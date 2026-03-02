@@ -19,6 +19,8 @@ const CLAUDE_CODE_MIN_VERSION: &str = "1.0.0";
 const COPILOT_MIN_VERSION: &str = "0.0.1";
 const CURSOR_AGENT_MIN_VERSION: &str = "0.1.0";
 const OPENCODE_MIN_VERSION: &str = "0.1.0";
+const GEMINI_CLI_MIN_VERSION: &str = "0.1.0";
+const CODEX_CLI_MIN_VERSION: &str = "0.1.0";
 
 /// Detected capabilities of a CLI runner binary
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,9 +102,11 @@ async fn detect_version(
 ) -> Result<String, RunnerError> {
     let version_flag = match runner_type {
         CliRunnerType::OpenCode => "version",
-        CliRunnerType::ClaudeCode | CliRunnerType::Copilot | CliRunnerType::CursorAgent => {
-            "--version"
-        }
+        CliRunnerType::ClaudeCode
+        | CliRunnerType::Copilot
+        | CliRunnerType::CursorAgent
+        | CliRunnerType::GeminiCli
+        | CliRunnerType::CodexCli => "--version",
     };
 
     let output = Command::new(binary_path)
@@ -165,6 +169,8 @@ const fn minimum_version(runner_type: CliRunnerType) -> (u32, u32, u32) {
         CliRunnerType::Copilot => parse_const_version(COPILOT_MIN_VERSION),
         CliRunnerType::CursorAgent => parse_const_version(CURSOR_AGENT_MIN_VERSION),
         CliRunnerType::OpenCode => parse_const_version(OPENCODE_MIN_VERSION),
+        CliRunnerType::GeminiCli => parse_const_version(GEMINI_CLI_MIN_VERSION),
+        CliRunnerType::CodexCli => parse_const_version(CODEX_CLI_MIN_VERSION),
     }
 }
 
@@ -216,9 +222,12 @@ const fn capabilities_for_runner(runner_type: CliRunnerType) -> (bool, bool, boo
         // Copilot: plain text output, line-by-line streaming, no --system-prompt, no session resume
         CliRunnerType::Copilot => (false, true, false, false),
         // Cursor Agent: --output-format json, --output-format stream-json, --resume
-        CliRunnerType::CursorAgent => (true, true, false, true),
+        // Gemini CLI: -o json, -o stream-json, --resume
+        CliRunnerType::CursorAgent | CliRunnerType::GeminiCli => (true, true, false, true),
         // OpenCode: --format json, --continue/--session
         CliRunnerType::OpenCode => (true, false, false, true),
+        // Codex CLI: --json (JSONL), streaming via JSONL events
+        CliRunnerType::CodexCli => (true, true, false, false),
     }
 }
 
@@ -317,6 +326,24 @@ mod tests {
             meets_minimum_version: true,
         };
         assert!(caps.is_compatible());
+    }
+
+    #[test]
+    fn test_capabilities_gemini_cli() {
+        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::GeminiCli);
+        assert!(json);
+        assert!(stream);
+        assert!(!sys);
+        assert!(resume);
+    }
+
+    #[test]
+    fn test_capabilities_codex_cli() {
+        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::CodexCli);
+        assert!(json);
+        assert!(stream);
+        assert!(!sys);
+        assert!(!resume);
     }
 
     #[test]

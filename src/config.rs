@@ -24,6 +24,10 @@ pub enum CliRunnerType {
     OpenCode,
     /// GitHub Copilot CLI (`copilot`)
     Copilot,
+    /// Gemini CLI (`gemini`)
+    GeminiCli,
+    /// Codex CLI (`codex`)
+    CodexCli,
 }
 
 impl CliRunnerType {
@@ -35,6 +39,8 @@ impl CliRunnerType {
             Self::CursorAgent => "cursor-agent",
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
+            Self::GeminiCli => "gemini",
+            Self::CodexCli => "codex",
         }
     }
 
@@ -46,6 +52,8 @@ impl CliRunnerType {
             Self::CursorAgent => "CURSOR_AGENT_BINARY",
             Self::OpenCode => "OPENCODE_BINARY",
             Self::Copilot => "COPILOT_BINARY",
+            Self::GeminiCli => "GEMINI_CLI_BINARY",
+            Self::CodexCli => "CODEX_CLI_BINARY",
         }
     }
 }
@@ -57,6 +65,8 @@ impl fmt::Display for CliRunnerType {
             Self::CursorAgent => write!(f, "cursor_agent"),
             Self::OpenCode => write!(f, "opencode"),
             Self::Copilot => write!(f, "copilot"),
+            Self::GeminiCli => write!(f, "gemini_cli"),
+            Self::CodexCli => write!(f, "codex_cli"),
         }
     }
 }
@@ -240,6 +250,8 @@ mod tests {
         assert_eq!(CliRunnerType::CursorAgent.binary_name(), "cursor-agent");
         assert_eq!(CliRunnerType::OpenCode.binary_name(), "opencode");
         assert_eq!(CliRunnerType::Copilot.binary_name(), "copilot");
+        assert_eq!(CliRunnerType::GeminiCli.binary_name(), "gemini");
+        assert_eq!(CliRunnerType::CodexCli.binary_name(), "codex");
     }
 
     #[test]
@@ -249,6 +261,14 @@ mod tests {
             "CLAUDE_CODE_BINARY"
         );
         assert_eq!(CliRunnerType::Copilot.env_override_key(), "COPILOT_BINARY");
+        assert_eq!(
+            CliRunnerType::GeminiCli.env_override_key(),
+            "GEMINI_CLI_BINARY"
+        );
+        assert_eq!(
+            CliRunnerType::CodexCli.env_override_key(),
+            "CODEX_CLI_BINARY"
+        );
     }
 
     #[test]
@@ -257,5 +277,7 @@ mod tests {
         assert_eq!(format!("{}", CliRunnerType::Copilot), "copilot");
         assert_eq!(format!("{}", CliRunnerType::CursorAgent), "cursor_agent");
         assert_eq!(format!("{}", CliRunnerType::OpenCode), "opencode");
+        assert_eq!(format!("{}", CliRunnerType::GeminiCli), "gemini_cli");
+        assert_eq!(format!("{}", CliRunnerType::CodexCli), "codex_cli");
     }
 }

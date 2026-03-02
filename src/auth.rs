@@ -94,6 +94,8 @@ pub async fn check_readiness(
         CliRunnerType::Copilot => check_copilot_readiness(binary_path).await,
         CliRunnerType::CursorAgent => check_version_probe(binary_path, "cursor-agent").await,
         CliRunnerType::OpenCode => check_version_probe(binary_path, "opencode").await,
+        CliRunnerType::GeminiCli => check_version_probe(binary_path, "gemini").await,
+        CliRunnerType::CodexCli => check_version_probe(binary_path, "codex").await,
     }
 }
 
