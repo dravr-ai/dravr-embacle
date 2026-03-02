@@ -17,6 +17,8 @@ Instead of integrating with LLM APIs directly (which require API keys, SDKs, and
 | GitHub Copilot | `copilot` | Text parsing, streaming |
 | Cursor Agent | `cursor-agent` | JSON output, streaming, MCP approval |
 | OpenCode | `opencode` | JSON events, session management |
+| Gemini CLI | `gemini` | JSON/stream-JSON output, streaming, session resume |
+| Codex CLI | `codex` | JSONL output, streaming, sandboxed exec mode |
 
 ### SDK Runners (persistent connection)
 
@@ -111,7 +113,7 @@ embacle-mcp --transport http --host 0.0.0.0 --port 3000 --provider claude_code
 | Tool | Description |
 |------|-------------|
 | `get_provider` | Get active LLM provider and list available providers |
-| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`) |
+| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`) |
 | `get_model` | Get current model and list available models for the active provider |
 | `set_model` | Set the model for subsequent requests (pass null to reset to default) |
 | `get_multiplex_provider` | Get providers configured for multiplex dispatch |
@@ -208,7 +210,9 @@ Your Application
             │   ├── ClaudeCodeRunner    → spawns `claude -p "prompt" --output-format json`
             │   ├── CopilotRunner       → spawns `copilot -p "prompt"`
             │   ├── CursorAgentRunner   → spawns `cursor-agent -p "prompt" --output-format json`
-            │   └── OpenCodeRunner      → spawns `opencode run "prompt" --format json`
+            │   ├── OpenCodeRunner      → spawns `opencode run "prompt" --format json`
+            │   ├── GeminiCliRunner     → spawns `gemini -p "prompt" -o json -y`
+            │   └── CodexCliRunner      → spawns `codex exec "prompt" --json --full-auto`
             │
             ├── SDK Runners (persistent connection, behind feature flag)
             │   └── CopilotSdkRunner    → JSON-RPC to `copilot --headless`
