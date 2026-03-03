@@ -492,10 +492,12 @@ impl LlmProvider for CopilotSdkRunner {
 impl Drop for CopilotSdkRunner {
     fn drop(&mut self) {
         if let Some(client) = self.client.get() {
-            let client = client.clone();
-            tokio::spawn(async move {
-                client.stop().await;
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let client = client.clone();
+                handle.spawn(async move {
+                    client.stop().await;
+                });
+            }
         }
     }
 }

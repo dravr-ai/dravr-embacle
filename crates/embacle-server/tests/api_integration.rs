@@ -594,12 +594,14 @@ async fn provider_resolver_round_trip_via_completions() {
         .await
         .expect("send request");
 
-    // Will fail due to no CLI binary — the error should be a server-side status,
-    // not a client error (routing/parsing would be 4xx)
+    // Verify correct routing: provider prefix is parsed and forwarded to the
+    // runner layer. The result depends on binary availability — 5xx (binary
+    // missing or invocation failure) or 2xx (actual completion). Either way it
+    // must NOT be a 4xx, which would indicate a routing/parsing error.
     let status = response.status();
     assert!(
-        status.is_server_error(),
-        "expected 5xx for missing binary, got {status}"
+        !status.is_client_error(),
+        "expected non-4xx for provider-prefixed model, got {status}"
     );
 }
 
@@ -614,13 +616,27 @@ async fn state_default_provider_accessible() {
 }
 
 #[tokio::test]
-async fn state_runner_creation_fails_for_missing_binary() {
+async fn state_runner_creation_reflects_binary_availability() {
     let state = ServerState::new(CliRunnerType::OpenCode);
     let result = state.get_runner(CliRunnerType::OpenCode).await;
 
-    // In CI/test, binaries are not installed so this should fail
-    assert!(
-        result.is_err(),
-        "expected error for missing opencode binary"
-    );
+    // Verify get_runner outcome matches actual binary availability
+    let binary_on_path = which::which("opencode").is_ok();
+    if binary_on_path {
+        assert!(
+            result.is_ok(),
+            "opencode binary found on PATH but get_runner failed"
+        );
+    } else {
+        assert!(
+            result.is_err(),
+            "opencode binary not on PATH but get_runner succeeded"
+        );
+    }
+}
+
+#[test]
+fn resolve_binary_fails_for_missing_binary() {
+    let result = embacle::discovery::resolve_binary("embacle_nonexistent_test_binary_xyz", None);
+    assert!(result.is_err(), "expected error for missing binary");
 }

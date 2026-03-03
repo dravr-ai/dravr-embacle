@@ -20,8 +20,6 @@ pub struct SandboxPolicy {
     pub allowed_env_keys: Vec<String>,
     /// Working directory for the subprocess
     pub working_directory: PathBuf,
-    /// CLI tool names the runner is permitted to invoke
-    pub allowed_tools: Vec<String>,
 }
 
 impl SandboxPolicy {
@@ -31,7 +29,6 @@ impl SandboxPolicy {
         Self {
             allowed_env_keys: default_allowed_env_keys(),
             working_directory,
-            allowed_tools: Vec::new(),
         }
     }
 
@@ -39,13 +36,6 @@ impl SandboxPolicy {
     #[must_use]
     pub fn with_env_keys(mut self, keys: Vec<String>) -> Self {
         self.allowed_env_keys = keys;
-        self
-    }
-
-    /// Set the list of allowed tools
-    #[must_use]
-    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
-        self.allowed_tools = tools;
         self
     }
 }
@@ -107,7 +97,6 @@ mod tests {
         let policy = SandboxPolicy::new(PathBuf::from("/tmp"));
         assert_eq!(policy.working_directory, PathBuf::from("/tmp"));
         assert!(!policy.allowed_env_keys.is_empty());
-        assert!(policy.allowed_tools.is_empty());
     }
 
     #[test]
@@ -115,14 +104,6 @@ mod tests {
         let policy =
             SandboxPolicy::new(PathBuf::from("/tmp")).with_env_keys(vec!["CUSTOM_KEY".to_owned()]);
         assert_eq!(policy.allowed_env_keys, vec!["CUSTOM_KEY"]);
-    }
-
-    #[test]
-    fn test_sandbox_policy_with_allowed_tools() {
-        let policy = SandboxPolicy::new(PathBuf::from("/tmp"))
-            .with_allowed_tools(vec!["bash".to_owned(), "git".to_owned()]);
-        assert_eq!(policy.allowed_tools.len(), 2);
-        assert!(policy.allowed_tools.contains(&"bash".to_owned()));
     }
 
     #[test]

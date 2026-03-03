@@ -40,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 http-body-util = "0.1"
 tokio = { version = "1.45", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
+which = "7.0"
 
 [lints.rust]
 unsafe_code = "deny"

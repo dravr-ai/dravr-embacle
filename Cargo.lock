@@ -341,6 +341,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "which",
 ]
 
 [[package]]
