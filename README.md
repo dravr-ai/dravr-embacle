@@ -1,5 +1,7 @@
 # Embacle — LLM Runners
 
+[![crates.io](https://img.shields.io/crates/v/embacle.svg)](https://crates.io/crates/embacle)
+[![docs.rs](https://docs.rs/embacle/badge.svg)](https://docs.rs/embacle)
 [![CI](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml/badge.svg)](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 
@@ -19,6 +21,9 @@ Instead of integrating with LLM APIs directly (which require API keys, SDKs, and
 | OpenCode | `opencode` | JSON events, session management |
 | Gemini CLI | `gemini` | JSON/stream-JSON output, streaming, session resume |
 | Codex CLI | `codex` | JSONL output, streaming, sandboxed exec mode |
+| Goose CLI | `goose` | JSON/stream-JSON output, streaming, no-session mode |
+| Cline CLI | `cline` | NDJSON output, streaming, session resume via task IDs |
+| Continue CLI | `cn` | JSON output, single-shot completions |
 
 ### SDK Runners (persistent connection)
 
@@ -32,7 +37,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", branch = "main" }
+embacle = "0.3"
 ```
 
 Use a CLI runner:
@@ -63,7 +68,7 @@ Enable the `copilot-sdk` feature for persistent JSON-RPC instead of per-request 
 
 ```toml
 [dependencies]
-embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", branch = "main", features = ["copilot-sdk"] }
+embacle = { version = "0.3", features = ["copilot-sdk"] }
 ```
 
 ```rust
@@ -113,7 +118,7 @@ embacle-mcp --transport http --host 0.0.0.0 --port 3000 --provider claude_code
 | Tool | Description |
 |------|-------------|
 | `get_provider` | Get active LLM provider and list available providers |
-| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`) |
+| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`) |
 | `get_model` | Get current model and list available models for the active provider |
 | `set_model` | Set the model for subsequent requests (pass null to reset to default) |
 | `get_multiplex_provider` | Get providers configured for multiplex dispatch |
@@ -212,10 +217,27 @@ Your Application
             │   ├── CursorAgentRunner   → spawns `cursor-agent -p "prompt" --output-format json`
             │   ├── OpenCodeRunner      → spawns `opencode run "prompt" --format json`
             │   ├── GeminiCliRunner     → spawns `gemini -p "prompt" -o json -y`
-            │   └── CodexCliRunner      → spawns `codex exec "prompt" --json --full-auto`
+            │   ├── CodexCliRunner      → spawns `codex exec "prompt" --json --full-auto`
+            │   ├── GooseCliRunner      → spawns `goose run --quiet --no-session`
+            │   ├── ClineCliRunner      → spawns `cline task --json --act --yolo`
+            │   └── ContinueCliRunner   → spawns `cn -p --format json`
             │
             ├── SDK Runners (persistent connection, behind feature flag)
             │   └── CopilotSdkRunner    → JSON-RPC to `copilot --headless`
+            │
+            ├── Provider Decorators (composable wrappers)
+            │   ├── FallbackProvider    → ordered chain, first success wins
+            │   ├── MetricsProvider     → latency, token, and error tracking
+            │   └── QualityGateProvider → response validation with retry
+            │
+            ├── Agent Loop
+            │   └── AgentExecutor       → multi-turn tool calling with configurable max turns
+            │
+            ├── Structured Output
+            │   └── request_structured_output()  → schema-validated JSON extraction with retry
+            │
+            ├── MCP Tool Bridge
+            │   └── McpToolBridge       → MCP tool definitions ↔ text-based tool loop
             │
             ├── MCP Server (separate binary crate)
             │   └── embacle-mcp         → JSON-RPC 2.0 over stdio or HTTP/SSE
@@ -286,6 +308,127 @@ The pure functions are also available individually for custom loop implementatio
 | `strip_tool_call_blocks()` | Returns clean text with tool blocks removed |
 | `format_tool_results_as_text()` | Formats results as `<tool_result>` XML blocks |
 
+### Agent Loop
+
+`AgentExecutor` runs a multi-turn tool-calling loop: inject a tool catalog, send the prompt, parse `<tool_call>` blocks from the response, execute tools, feed results back, repeat until the model stops calling tools or `max_turns` is reached.
+
+```rust
+use embacle::agent::{AgentExecutor, AgentConfig};
+use embacle::tool_simulation::FunctionDeclaration;
+use embacle::types::{ChatMessage, ChatRequest};
+use std::sync::Arc;
+use serde_json::json;
+
+let declarations = vec![FunctionDeclaration {
+    name: "lookup".into(),
+    description: "Look up a value".into(),
+    parameters: Some(json!({"type": "object", "properties": {"key": {"type": "string"}}})),
+}];
+
+let handler = Arc::new(|name: &str, _args: &serde_json::Value| {
+    embacle::tool_simulation::FunctionResponse {
+        name: name.to_owned(),
+        response: json!({"value": 42}),
+    }
+});
+
+let agent = AgentExecutor::new(Arc::new(runner), declarations, handler)
+    .with_max_turns(5);
+
+let request = ChatRequest::new(vec![ChatMessage::user("Look up answer")]);
+let result = agent.execute(&request).await?;
+println!("Turns: {}, Tool calls: {}", result.total_turns, result.tool_calls);
+```
+
+### Fallback Chains
+
+`FallbackProvider` wraps multiple providers and tries them in order. The first successful response wins; if all fail, the last error is returned.
+
+```rust
+use embacle::fallback::FallbackProvider;
+
+let provider = FallbackProvider::new(vec![
+    Box::new(primary_runner),
+    Box::new(backup_runner),
+])?;
+
+// Uses primary_runner; falls back to backup_runner on error
+let response = provider.complete(&request).await?;
+```
+
+Health checks pass if **any** provider is healthy. Capabilities are the union of all inner providers.
+
+### Metrics
+
+`MetricsProvider` wraps any provider to track latency, token usage, call counts, and errors.
+
+```rust
+use embacle::metrics::MetricsProvider;
+
+let provider = MetricsProvider::new(Box::new(runner));
+let response = provider.complete(&request).await?;
+
+let report = provider.report();
+println!("Calls: {}, Avg latency: {}ms", report.call_count, report.avg_latency_ms);
+```
+
+### Quality Gate
+
+`QualityGateProvider` validates responses against a policy (minimum length, refusal detection) and retries with feedback if validation fails.
+
+```rust
+use embacle::quality_gate::{QualityGateProvider, QualityPolicy};
+
+let policy = QualityPolicy {
+    max_retries: 2,
+    min_content_length: 10,
+    ..QualityPolicy::default()
+};
+let provider = QualityGateProvider::with_policy(Box::new(runner), policy);
+let response = provider.complete(&request).await?;
+```
+
+### Structured Output
+
+Forces any provider to return schema-valid JSON by injecting schema instructions and validating the response, retrying with error feedback on schema violations.
+
+```rust
+use embacle::structured_output::{request_structured_output, StructuredOutputRequest};
+use serde_json::json;
+
+let schema = json!({
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"},
+        "temperature": {"type": "number"}
+    },
+    "required": ["city", "temperature"]
+});
+
+let result = request_structured_output(
+    &runner,
+    &StructuredOutputRequest { request, schema, max_retries: 2 },
+).await?;
+
+let data: serde_json::Value = serde_json::from_str(&result.content)?;
+```
+
+### MCP Tool Bridge
+
+Bridges MCP tool definitions to embacle's text-based tool loop, so CLI runners can use tools from any MCP-compatible tool server.
+
+```rust
+use embacle::mcp_tool_bridge::{McpToolBridge, McpToolDefinition};
+
+let mcp_tools = vec![McpToolDefinition {
+    name: "search".into(),
+    description: Some("Search the web".into()),
+    input_schema: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+}];
+
+let declarations = McpToolBridge::to_declarations(&mcp_tools);
+```
+
 ## Features
 
 - **Zero API keys** — uses CLI tools' own auth (OAuth, API keys managed by the tool)
@@ -294,6 +437,12 @@ The pure functions are also available individually for custom loop implementatio
 - **Capability detection** — probes CLI version and supported features
 - **Container isolation** — optional container-based execution for production
 - **Subprocess safety** — timeout, output limits, environment sandboxing
+- **Agent loop** — multi-turn tool calling with configurable max turns and turn callbacks
+- **Fallback chains** — ordered provider failover with automatic retry
+- **Metrics** — latency, token, and error tracking as a provider decorator
+- **Quality gate** — response validation with retry on refusal or insufficient content
+- **Structured output** — schema-validated JSON extraction from any provider
+- **MCP tool bridge** — connect MCP tool servers to CLI runners via text-based tool loop
 - **Feature flags** — SDK integrations are opt-in to keep the default dependency footprint minimal
 
 ## Modules
@@ -310,6 +459,12 @@ The pure functions are also available individually for custom loop implementatio
 | `container` | default | Container-based execution backend |
 | `prompt` | default | Prompt building from chat messages |
 | `tool_simulation` | default | Text-based tool calling for CLI runners (`<tool_call>` XML protocol) |
+| `agent` | default | Multi-turn agent loop with tool calling and turn callbacks |
+| `fallback` | default | Ordered provider chain with first-success-wins failover |
+| `metrics` | default | Latency, token usage, and error tracking decorator |
+| `quality_gate` | default | Response validation (refusal detection, length checks) with retry |
+| `structured_output` | default | Schema-validated JSON extraction with retry |
+| `mcp_tool_bridge` | default | MCP tool definitions ↔ text-based tool loop bridge |
 | `copilot_sdk_runner` | `copilot-sdk` | Copilot SDK runner (persistent JSON-RPC) |
 | `copilot_sdk_config` | `copilot-sdk` | Copilot SDK configuration from environment |
 | `tool_bridge` | `copilot-sdk` | Tool definition conversion for native tool calling |
