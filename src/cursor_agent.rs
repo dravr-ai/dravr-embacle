@@ -159,6 +159,7 @@ impl CursorAgentRunner {
             model: "cursor-agent".to_owned(),
             usage,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         };
 
         Ok((response, parsed.session_id))
@@ -189,14 +190,6 @@ impl LlmProvider for CursorAgentRunner {
 
     #[instrument(skip_all, fields(runner = "cursor_agent"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        if request.temperature.is_some() || request.max_tokens.is_some() {
-            debug!(
-                temperature = ?request.temperature,
-                max_tokens = ?request.max_tokens,
-                "Cursor Agent CLI does not support temperature or max_tokens; ignoring",
-            );
-        }
-
         let prompt = build_user_prompt(&request.messages);
         let mut cmd = self.build_command(&prompt, "json");
 

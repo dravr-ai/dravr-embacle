@@ -191,6 +191,7 @@ impl CopilotRunner {
             model: "copilot".to_owned(),
             usage: None,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         })
     }
 }
@@ -222,14 +223,6 @@ impl LlmProvider for CopilotRunner {
 
     #[instrument(skip_all, fields(runner = "copilot"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        if request.temperature.is_some() || request.max_tokens.is_some() {
-            debug!(
-                temperature = ?request.temperature,
-                max_tokens = ?request.max_tokens,
-                "Copilot CLI does not support temperature or max_tokens; ignoring",
-            );
-        }
-
         let prompt = build_prompt(&request.messages);
         let mut cmd = self.build_command(&prompt, true);
 

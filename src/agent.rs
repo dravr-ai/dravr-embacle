@@ -321,6 +321,7 @@ mod tests {
             model: "test-model".to_owned(),
             usage,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         }
     }
 

@@ -30,6 +30,9 @@ pub struct ChatCompletionRequest {
     /// Maximum tokens to generate
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Enable strict capability checking (reject unsupported parameters)
+    #[serde(default)]
+    pub strict_capabilities: Option<bool>,
 }
 
 /// A model field that can be either a single string or an array of strings
@@ -71,6 +74,9 @@ pub struct ChatCompletionResponse {
     /// Token usage statistics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Warnings about unsupported request parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }
 
 /// A single choice in a chat completion response
@@ -316,6 +322,7 @@ mod tests {
                 finish_reason: Some("stop".to_owned()),
             }],
             usage: None,
+            warnings: None,
         };
         let json = serde_json::to_string(&resp).expect("serialize");
         assert!(json.contains("chat.completion"));

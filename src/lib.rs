@@ -44,6 +44,7 @@
 //! - [`compat`] — Version compatibility and capability detection
 //! - [`container`] — Container-based execution backend
 //! - [`discovery`] — Automatic binary detection on the host
+//! - [`capability_guard`] — Request/provider capability validation
 //! - [`auth`] — Readiness and authentication checking
 //! - [`process`] — Subprocess spawning with timeout and output limits
 //! - [`sandbox`] — Environment variable whitelisting and working directory control
@@ -66,6 +67,8 @@ pub mod types;
 pub mod agent;
 /// Auth readiness checking for CLI runners
 pub mod auth;
+/// Request/provider capability validation
+pub mod capability_guard;
 /// Claude Code CLI runner
 pub mod claude_code;
 /// Cline CLI runner
@@ -127,6 +130,7 @@ pub mod tool_bridge;
 // Re-export the runner structs for ergonomic access
 pub use agent::{AgentExecutor, AgentResult, OnTurnCallback, TurnInfo};
 pub use auth::ProviderReadiness;
+pub use capability_guard::validate_capabilities;
 pub use claude_code::ClaudeCodeRunner;
 pub use cline_cli::ClineCliRunner;
 pub use codex_cli::CodexCliRunner;

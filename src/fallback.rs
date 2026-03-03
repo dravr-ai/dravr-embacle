@@ -182,6 +182,7 @@ mod tests {
                     model: format!("{name}-model"),
                     usage: None,
                     finish_reason: Some("stop".to_owned()),
+                    warnings: None,
                 })]),
                 call_count: AtomicU32::new(0),
                 healthy: true,

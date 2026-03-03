@@ -190,6 +190,7 @@ impl ClaudeCodeRunner {
             model: "claude-code".to_owned(),
             usage,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         };
 
         Ok((response, parsed.session_id))
@@ -207,7 +208,7 @@ impl LlmProvider for ClaudeCodeRunner {
     }
 
     fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::STREAMING
+        LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::STREAMING | LlmCapabilities::MAX_TOKENS
     }
 
     fn default_model(&self) -> &str {

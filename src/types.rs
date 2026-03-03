@@ -116,19 +116,23 @@ bitflags::bitflags! {
     /// Indicates which features a provider supports. Used by the system to
     /// select appropriate providers and configure request handling.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct LlmCapabilities: u8 {
+    pub struct LlmCapabilities: u16 {
         /// Provider supports streaming responses
-        const STREAMING = 0b0000_0001;
+        const STREAMING         = 0b0000_0000_0001;
         /// Provider supports function/tool calling
-        const FUNCTION_CALLING = 0b0000_0010;
+        const FUNCTION_CALLING  = 0b0000_0000_0010;
         /// Provider supports vision/image input
-        const VISION = 0b0000_0100;
+        const VISION            = 0b0000_0000_0100;
         /// Provider supports JSON mode output
-        const JSON_MODE = 0b0000_1000;
+        const JSON_MODE         = 0b0000_0000_1000;
         /// Provider supports system messages
-        const SYSTEM_MESSAGES = 0b0001_0000;
+        const SYSTEM_MESSAGES   = 0b0000_0001_0000;
         /// Provider supports SDK-managed tool calling (tool loop handled by SDK, not by caller)
-        const SDK_TOOL_CALLING = 0b0010_0000;
+        const SDK_TOOL_CALLING  = 0b0000_0010_0000;
+        /// Provider supports temperature parameter
+        const TEMPERATURE       = 0b0000_0100_0000;
+        /// Provider supports max_tokens parameter
+        const MAX_TOKENS        = 0b0000_1000_0000;
     }
 }
 
@@ -183,6 +187,18 @@ impl LlmCapabilities {
     #[must_use]
     pub const fn supports_sdk_tool_calling(&self) -> bool {
         self.contains(Self::SDK_TOOL_CALLING)
+    }
+
+    /// Check if temperature parameter is supported
+    #[must_use]
+    pub const fn supports_temperature(&self) -> bool {
+        self.contains(Self::TEMPERATURE)
+    }
+
+    /// Check if `max_tokens` parameter is supported
+    #[must_use]
+    pub const fn supports_max_tokens(&self) -> bool {
+        self.contains(Self::MAX_TOKENS)
     }
 }
 
@@ -265,16 +281,15 @@ pub struct ChatRequest {
     pub model: Option<String>,
     /// Temperature for response randomness (0.0 - 2.0).
     ///
-    /// Not all CLI runners support this. Currently no runner propagates
-    /// temperature; it is accepted for API compatibility and ignored by
-    /// runners that lack a corresponding CLI flag.
+    /// Support depends on each provider's [`LlmCapabilities::TEMPERATURE`] flag.
+    /// Use [`validate_capabilities`](crate::validate_capabilities) to check
+    /// before dispatch.
     pub temperature: Option<f32>,
     /// Maximum tokens to generate.
     ///
-    /// Runner support varies:
-    /// - **Claude Code**: propagated via `CLAUDE_CODE_MAX_OUTPUT_TOKENS` env var.
-    /// - **Copilot / Cursor Agent / `OpenCode`**: not supported by the CLI;
-    ///   the field is accepted but ignored.
+    /// Support depends on each provider's [`LlmCapabilities::MAX_TOKENS`] flag.
+    /// Use [`validate_capabilities`](crate::validate_capabilities) to check
+    /// before dispatch.
     pub max_tokens: Option<u32>,
     /// Whether to stream the response
     pub stream: bool,
@@ -333,6 +348,9 @@ pub struct ChatResponse {
     pub usage: Option<TokenUsage>,
     /// Finish reason (stop, length, etc.)
     pub finish_reason: Option<String>,
+    /// Warnings about unsupported request parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }
 
 /// Token usage statistics

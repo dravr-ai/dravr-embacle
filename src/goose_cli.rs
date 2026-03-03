@@ -148,6 +148,7 @@ impl GooseCliRunner {
             model: "goose".to_owned(),
             usage: None,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         })
     }
 }
@@ -176,14 +177,6 @@ impl LlmProvider for GooseCliRunner {
 
     #[instrument(skip_all, fields(runner = "goose"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        if request.temperature.is_some() || request.max_tokens.is_some() {
-            debug!(
-                temperature = ?request.temperature,
-                max_tokens = ?request.max_tokens,
-                "Goose CLI does not support temperature or max_tokens; ignoring",
-            );
-        }
-
         let prompt = build_user_prompt(&request.messages);
 
         // Write prompt to a temp file since Goose reads from `-i <path>`

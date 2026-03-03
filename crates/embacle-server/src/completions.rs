@@ -81,11 +81,32 @@ async fn handle_single(
         Err(e) => return runner_error_to_response(&e),
     };
 
+    let strict = request.strict_capabilities.unwrap_or_else(|| {
+        std::env::var("EMBACLE_STRICT_CAPS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    });
+
     let messages = convert_messages(&request.messages);
     let mut chat_request = ChatRequest::new(messages);
     chat_request.model = resolved.model;
     chat_request.temperature = request.temperature;
     chat_request.max_tokens = request.max_tokens;
+
+    let warnings = match embacle::validate_capabilities(
+        runner.name(),
+        runner.capabilities(),
+        &chat_request,
+        strict,
+    ) {
+        Ok(w) => w,
+        Err(e) => return runner_error_to_response(&e),
+    };
+    let warnings_for_response = if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings)
+    };
 
     if request.stream {
         chat_request.stream = true;
@@ -120,6 +141,7 @@ async fn handle_single(
                         finish_reason: response.finish_reason.or_else(|| Some("stop".to_owned())),
                     }],
                     usage,
+                    warnings: warnings_for_response,
                 };
 
                 (StatusCode::OK, Json(resp)).into_response()
@@ -142,6 +164,12 @@ async fn handle_multiplex(
         );
     }
 
+    let strict = request.strict_capabilities.unwrap_or_else(|| {
+        std::env::var("EMBACLE_STRICT_CAPS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    });
+
     let default_provider = state.default_provider();
     let resolved: Vec<_> = models
         .iter()
@@ -150,6 +178,31 @@ async fn handle_multiplex(
 
     let providers: Vec<_> = resolved.iter().map(|r| r.runner_type).collect();
     let messages = convert_messages(&request.messages);
+
+    // Build a temporary ChatRequest for capability validation
+    let mut validation_request = ChatRequest::new(messages.clone());
+    validation_request.temperature = request.temperature;
+    validation_request.max_tokens = request.max_tokens;
+
+    for &provider_type in &providers {
+        let runner = match state.get_runner(provider_type).await {
+            Ok(r) => r,
+            Err(e) => return runner_error_to_response(&e),
+        };
+        match embacle::validate_capabilities(
+            runner.name(),
+            runner.capabilities(),
+            &validation_request,
+            strict,
+        ) {
+            Ok(w) => {
+                for warning in &w {
+                    warn!(provider = runner.name(), warning = %warning, "Capability warning");
+                }
+            }
+            Err(e) => return runner_error_to_response(&e),
+        }
+    }
 
     let engine = MultiplexEngine::new(state);
     match engine

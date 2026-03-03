@@ -418,6 +418,7 @@ impl LlmProvider for CopilotSdkRunner {
             model: model_used,
             usage: None,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         })
     }
 

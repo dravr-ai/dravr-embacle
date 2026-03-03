@@ -153,6 +153,7 @@ impl OpenCodeRunner {
             model: "opencode".to_owned(),
             usage,
             finish_reason: Some("stop".to_owned()),
+            warnings: None,
         };
 
         Ok((response, parsed.session_id))
@@ -183,14 +184,6 @@ impl LlmProvider for OpenCodeRunner {
 
     #[instrument(skip_all, fields(runner = "opencode"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        if request.temperature.is_some() || request.max_tokens.is_some() {
-            debug!(
-                temperature = ?request.temperature,
-                max_tokens = ?request.max_tokens,
-                "OpenCode CLI does not support temperature or max_tokens; ignoring",
-            );
-        }
-
         let prompt = build_prompt(&request.messages);
         let mut cmd = self.build_command(&prompt);
 
