@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use embacle::types::{ChatMessage, ChatRequest, ErrorKind, RunnerError};
+use embacle::types::{ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, RunnerError};
 use embacle::FunctionDeclaration;
 use tracing::{debug, error, warn};
 
@@ -75,14 +75,6 @@ async fn handle_single(
         .as_ref()
         .is_some_and(|t| !t.is_empty() && !is_tool_choice_none(request.tool_choice.as_ref()));
 
-    // Reject streaming with tools (not yet supported)
-    if request.stream && has_tools {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Streaming is not supported with tool calling",
-        );
-    }
-
     let resolved = resolve_model(model_str, state.default_provider());
     debug!(
         provider = %resolved.runner_type,
@@ -105,11 +97,19 @@ async fn handle_single(
 
     let mut messages = convert_messages(&request.messages);
 
-    // Inject tool catalog into system prompt if tools are provided
+    // Inject tool catalog using the most effective strategy for this provider
     if has_tools {
         let declarations = tools_to_declarations(request.tools.as_deref().unwrap_or_default());
         let catalog = embacle::generate_tool_catalog(&declarations);
-        embacle::inject_tool_catalog(&mut messages, &catalog);
+
+        if runner
+            .capabilities()
+            .contains(LlmCapabilities::SYSTEM_MESSAGES)
+        {
+            embacle::inject_tool_catalog(&mut messages, &catalog);
+        } else {
+            inject_tool_catalog_as_user_message(&mut messages, &catalog);
+        }
     }
 
     let mut chat_request = ChatRequest::new(messages);
@@ -132,19 +132,55 @@ async fn handle_single(
         Some(warnings)
     };
 
-    if request.stream {
+    dispatch_completion(
+        runner.as_ref(),
+        resolved.runner_type,
+        chat_request,
+        request.stream,
+        has_tools,
+        warnings_for_response,
+    )
+    .await
+}
+
+/// Dispatch the completion request to the appropriate execution path
+///
+/// Routes between three modes: streaming with tool-call downgrade,
+/// pure streaming, or non-streaming JSON response.
+async fn dispatch_completion(
+    runner: &dyn embacle::types::LlmProvider,
+    runner_type: embacle::config::CliRunnerType,
+    mut chat_request: ChatRequest,
+    stream: bool,
+    has_tools: bool,
+    warnings: Option<Vec<String>>,
+) -> Response {
+    if stream && has_tools {
+        // Streaming with tools: downgrade to non-streaming complete(), emit as SSE
+        debug!("Downgrading stream+tools to non-streaming complete");
+        match runner.complete(&chat_request).await {
+            Ok(response) => {
+                let model_name = format!("{runner_type}:{}", response.model);
+                let (message, finish_reason) =
+                    build_response_message(has_tools, response.content, response.finish_reason);
+                let reason = finish_reason.as_deref().unwrap_or("stop");
+                streaming::sse_single_response(message, reason, &model_name)
+            }
+            Err(e) => runner_error_to_response(&e),
+        }
+    } else if stream {
         chat_request.stream = true;
         match runner.complete_stream(&chat_request).await {
-            Ok(stream) => {
-                let model_name = format!("{}:{}", resolved.runner_type, runner.default_model());
-                streaming::sse_response(stream, &model_name)
+            Ok(s) => {
+                let model_name = format!("{runner_type}:{}", runner.default_model());
+                streaming::sse_response(s, &model_name)
             }
             Err(e) => runner_error_to_response(&e),
         }
     } else {
         match runner.complete(&chat_request).await {
             Ok(response) => {
-                let model_name = format!("{}:{}", resolved.runner_type, response.model);
+                let model_name = format!("{runner_type}:{}", response.model);
                 let usage = response.usage.map(|u| Usage {
                     prompt: u.prompt_tokens,
                     completion: u.completion_tokens,
@@ -165,7 +201,7 @@ async fn handle_single(
                         finish_reason,
                     }],
                     usage,
-                    warnings: warnings_for_response,
+                    warnings,
                 };
 
                 (StatusCode::OK, Json(resp)).into_response()
@@ -293,6 +329,7 @@ fn build_response_message(
                 .iter()
                 .enumerate()
                 .map(|(i, fc)| ToolCall {
+                    index: i,
                     id: generate_tool_call_id(&fc.name, i),
                     tool_type: "function".to_owned(),
                     function: ToolCallFunction {
@@ -413,6 +450,26 @@ fn tools_to_declarations(
         .collect()
 }
 
+/// Inject tool catalog into the last user message content
+///
+/// Used for providers that do not support system messages (e.g. Copilot CLI).
+/// The catalog is prepended to the last user message so the LLM sees it in
+/// the conversational flow rather than in a system prompt it cannot parse.
+fn inject_tool_catalog_as_user_message(messages: &mut [ChatMessage], catalog: &str) {
+    if let Some(last_user) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == embacle::types::MessageRole::User)
+    {
+        let augmented = format!("{catalog}\n\n{}", last_user.content);
+        *last_user = ChatMessage::user(augmented);
+    } else {
+        // No user message found; this shouldn't happen in practice but
+        // handle gracefully by appending a user message with the catalog.
+        warn!("No user message found for tool catalog injection");
+    }
+}
+
 /// Check if `tool_choice` is explicitly "none"
 fn is_tool_choice_none(tool_choice: Option<&ToolChoice>) -> bool {
     matches!(tool_choice, Some(ToolChoice::Mode(ref m)) if m == "none")
@@ -525,6 +582,7 @@ mod tests {
             role: "assistant".to_owned(),
             content: None,
             tool_calls: Some(vec![ToolCall {
+                index: 0,
                 id: "call_1".to_owned(),
                 tool_type: "function".to_owned(),
                 function: ToolCallFunction {
@@ -659,5 +717,37 @@ mod tests {
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         };
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn inject_tool_catalog_as_user_message_prepends_to_last_user() {
+        let mut messages = vec![
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("Some answer"),
+            ChatMessage::user("What is the weather?"),
+        ];
+        let catalog = "## Available Tools\n- get_weather: Get the weather";
+
+        inject_tool_catalog_as_user_message(&mut messages, catalog);
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages[2].content.starts_with("## Available Tools"));
+        assert!(messages[2].content.contains("What is the weather?"));
+        // First user message should be untouched
+        assert_eq!(messages[0].content, "First question");
+    }
+
+    #[test]
+    fn inject_tool_catalog_as_user_message_single_user() {
+        let mut messages = vec![
+            ChatMessage::system("You are helpful"),
+            ChatMessage::user("Hello"),
+        ];
+        let catalog = "## Tools\nsome tools";
+
+        inject_tool_catalog_as_user_message(&mut messages, catalog);
+
+        assert!(messages[1].content.starts_with("## Tools"));
+        assert!(messages[1].content.contains("Hello"));
     }
 }

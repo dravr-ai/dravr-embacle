@@ -12,7 +12,7 @@ use embacle::types::ChatStream;
 use futures::StreamExt;
 
 use crate::completions::{generate_id, unix_timestamp};
-use crate::openai_types::{ChatCompletionChunk, ChunkChoice, Delta};
+use crate::openai_types::{ChatCompletionChunk, ChunkChoice, Delta, ResponseMessage};
 
 /// Convert a `ChatStream` into an SSE response in `OpenAI` streaming format
 ///
@@ -104,6 +104,69 @@ pub fn sse_response(stream: ChatStream, model: &str) -> Response {
         futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
 
     let combined = sse_stream.chain(done_stream);
+
+    Sse::new(combined)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+/// Emit a complete non-streaming response as an SSE event sequence
+///
+/// Used when the caller requested `stream: true` but the backend performed a
+/// non-streaming `complete()` (e.g. for tool-calling downgrade). Produces:
+/// 1. Role announcement chunk with content and/or `tool_calls`
+/// 2. Final chunk with `finish_reason`
+/// 3. `[DONE]` sentinel
+pub fn sse_single_response(message: ResponseMessage, finish_reason: &str, model: &str) -> Response {
+    let completion_id = generate_id();
+    let created = unix_timestamp();
+
+    let content_chunk = ChatCompletionChunk {
+        id: completion_id.clone(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_owned(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: Delta {
+                role: Some("assistant"),
+                content: message.content,
+                tool_calls: message.tool_calls,
+            },
+            finish_reason: None,
+        }],
+    };
+
+    let final_chunk = ChatCompletionChunk {
+        id: completion_id,
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_owned(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: Delta {
+                role: None,
+                content: None,
+                tool_calls: None,
+            },
+            finish_reason: Some(finish_reason.to_owned()),
+        }],
+    };
+
+    let events = vec![
+        serde_json::to_string(&content_chunk).unwrap_or_default(),
+        serde_json::to_string(&final_chunk).unwrap_or_default(),
+    ];
+
+    let event_stream = futures::stream::iter(
+        events
+            .into_iter()
+            .map(|json| Ok::<_, Infallible>(Event::default().data(json))),
+    );
+    let done_stream =
+        futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
+
+    let combined = event_stream.chain(done_stream);
 
     Sse::new(combined)
         .keep_alive(axum::response::sse::KeepAlive::default())

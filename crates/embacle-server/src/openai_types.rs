@@ -126,6 +126,9 @@ pub struct ToolChoiceFunction {
 /// A tool call issued by the assistant
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Position index of this tool call in the array (required by `OpenAI` spec)
+    #[serde(default)]
+    pub index: usize,
     /// Unique identifier for this tool call
     pub id: String,
     /// Tool type (always "function")
@@ -500,6 +503,7 @@ mod tests {
                     role: "assistant",
                     content: None,
                     tool_calls: Some(vec![ToolCall {
+                        index: 0,
                         id: "call_abc123".to_owned(),
                         tool_type: "function".to_owned(),
                         function: ToolCallFunction {
