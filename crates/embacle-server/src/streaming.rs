@@ -74,7 +74,11 @@ pub fn sse_response(stream: ChatStream, model: &str) -> Response {
                         model: model.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: Delta { role, content },
+                            delta: Delta {
+                                role,
+                                content,
+                                tool_calls: None,
+                            },
                             finish_reason,
                         }],
                     };
