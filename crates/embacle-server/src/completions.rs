@@ -132,12 +132,15 @@ async fn handle_single(
         Some(warnings)
     };
 
+    let supports_streaming = runner.capabilities().contains(LlmCapabilities::STREAMING);
+
     dispatch_completion(
         runner.as_ref(),
         resolved.runner_type,
         chat_request,
         request.stream,
         has_tools,
+        supports_streaming,
         warnings_for_response,
     )
     .await
@@ -145,19 +148,30 @@ async fn handle_single(
 
 /// Dispatch the completion request to the appropriate execution path
 ///
-/// Routes between three modes: streaming with tool-call downgrade,
-/// pure streaming, or non-streaming JSON response.
+/// Routes between four modes:
+/// 1. Streaming with tools: downgrade to `complete()`, emit as SSE
+/// 2. Streaming without provider support: downgrade to `complete()`, emit as SSE
+/// 3. Pure streaming: use `complete_stream()`
+/// 4. Non-streaming: use `complete()`, return JSON
 async fn dispatch_completion(
     runner: &dyn embacle::types::LlmProvider,
     runner_type: embacle::config::CliRunnerType,
     mut chat_request: ChatRequest,
     stream: bool,
     has_tools: bool,
+    supports_streaming: bool,
     warnings: Option<Vec<String>>,
 ) -> Response {
-    if stream && has_tools {
-        // Streaming with tools: downgrade to non-streaming complete(), emit as SSE
-        debug!("Downgrading stream+tools to non-streaming complete");
+    if stream && (has_tools || !supports_streaming) {
+        // Downgrade to non-streaming complete(), emit result as SSE
+        if has_tools {
+            debug!("Downgrading stream+tools to non-streaming complete");
+        } else {
+            debug!(
+                provider = runner.name(),
+                "Provider does not support streaming; downgrading to non-streaming complete"
+            );
+        }
         match runner.complete(&chat_request).await {
             Ok(response) => {
                 let model_name = format!("{runner_type}:{}", response.model);

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use embacle::config::CliRunnerType;
 use embacle::types::{LlmProvider, RunnerError};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::runner::factory;
 
@@ -24,7 +24,7 @@ pub struct ServerState {
     active_provider: CliRunnerType,
     active_model: Option<String>,
     multiplex_providers: Vec<CliRunnerType>,
-    runners: HashMap<CliRunnerType, Arc<dyn LlmProvider>>,
+    runners: Mutex<HashMap<CliRunnerType, Arc<dyn LlmProvider>>>,
 }
 
 impl ServerState {
@@ -34,7 +34,7 @@ impl ServerState {
             active_provider: default_provider,
             active_model: None,
             multiplex_providers: Vec::new(),
-            runners: HashMap::new(),
+            runners: Mutex::new(HashMap::new()),
         }
     }
 
@@ -71,18 +71,26 @@ impl ServerState {
 
     /// Get or lazily create a runner for the given provider type
     ///
-    /// Created runners are cached for future calls.
+    /// Created runners are cached for future calls. The runner cache uses
+    /// interior mutability so callers only need `&self`.
     pub async fn get_runner(
-        &mut self,
+        &self,
         provider: CliRunnerType,
     ) -> Result<Arc<dyn LlmProvider>, RunnerError> {
-        if let Some(runner) = self.runners.get(&provider) {
-            return Ok(Arc::clone(runner));
+        // Fast path: check cache under lock
+        {
+            let runners = self.runners.lock().await;
+            if let Some(runner) = runners.get(&provider) {
+                return Ok(Arc::clone(runner));
+            }
         }
 
+        // Slow path: create runner without holding the lock
         let runner = factory::create_runner(provider).await?;
         let runner: Arc<dyn LlmProvider> = Arc::from(runner);
-        self.runners.insert(provider, Arc::clone(&runner));
+
+        let mut runners = self.runners.lock().await;
+        let runner = runners.entry(provider).or_insert_with(|| runner).clone();
         Ok(runner)
     }
 }

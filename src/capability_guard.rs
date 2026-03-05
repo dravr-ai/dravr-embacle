@@ -54,8 +54,9 @@ pub fn validate_capabilities(
     }
 
     if request.stream && !capabilities.supports_streaming() {
-        let msg =
-            format!("{provider_name} does not support streaming; requested value will be ignored");
+        let msg = format!(
+            "{provider_name} does not support streaming; response will be delivered as a single SSE event"
+        );
         if strict {
             return Err(RunnerError::config(msg));
         }

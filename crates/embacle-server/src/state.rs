@@ -44,21 +44,27 @@ impl ServerState {
 
     /// Get or lazily create a runner for the given provider type
     ///
-    /// Created runners are cached for future calls.
+    /// Created runners are cached for future calls. The lock is released
+    /// during runner creation to avoid blocking concurrent requests.
     pub async fn get_runner(
         &self,
         provider: CliRunnerType,
     ) -> Result<Arc<dyn LlmProvider>, RunnerError> {
-        let mut runners = self.runners.lock().await;
-
-        if let Some(runner) = runners.get(&provider) {
-            return Ok(Arc::clone(runner));
+        // Fast path: check cache under lock
+        {
+            let runners = self.runners.lock().await;
+            if let Some(runner) = runners.get(&provider) {
+                return Ok(Arc::clone(runner));
+            }
         }
 
+        // Slow path: create runner without holding the lock
         let runner = factory::create_runner(provider).await?;
         let runner: Arc<dyn LlmProvider> = Arc::from(runner);
-        runners.insert(provider, Arc::clone(&runner));
-        drop(runners);
+
+        let mut runners = self.runners.lock().await;
+        // Another request may have created the runner while we were waiting
+        let runner = runners.entry(provider).or_insert_with(|| runner).clone();
         Ok(runner)
     }
 }

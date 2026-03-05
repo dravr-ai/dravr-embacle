@@ -29,7 +29,7 @@ impl McpTool for GetModel {
     }
 
     async fn execute(&self, state: &SharedState, _arguments: Value) -> CallToolResult {
-        let mut state_guard = state.write().await;
+        let state_guard = state.read().await;
         let provider = state_guard.active_provider();
         let current_model = state_guard.active_model().map(ToOwned::to_owned);
         let runner_result = state_guard.get_runner(provider).await;

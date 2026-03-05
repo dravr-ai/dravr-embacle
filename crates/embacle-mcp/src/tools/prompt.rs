@@ -78,7 +78,7 @@ impl McpTool for Prompt {
 
 /// Execute a prompt against the single active provider
 async fn execute_single(state: &SharedState, messages: &[ChatMessage]) -> CallToolResult {
-    let mut state_guard = state.write().await;
+    let state_guard = state.read().await;
     let provider = state_guard.active_provider();
     let runner = match state_guard.get_runner(provider).await {
         Ok(r) => r,

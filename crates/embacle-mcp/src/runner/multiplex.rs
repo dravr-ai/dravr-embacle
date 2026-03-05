@@ -96,7 +96,7 @@ async fn dispatch_single(
     let start = Instant::now();
 
     let runner = {
-        let mut state_guard = state.write().await;
+        let state_guard = state.read().await;
         state_guard.get_runner(provider).await
     };
 
