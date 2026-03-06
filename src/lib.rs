@@ -58,7 +58,7 @@
 //! - [`goose_cli`] — Goose CLI runner
 //! - [`cline_cli`] — Cline CLI runner
 //! - [`continue_cli`] — Continue CLI runner
-//! - `copilot_sdk_runner` — GitHub Copilot SDK runner (requires `copilot-sdk` feature)
+//! - `copilot_headless` — GitHub Copilot Headless (ACP) runner (requires `copilot-headless` feature)
 
 /// Core types: traits, messages, requests, responses, and errors
 pub mod types;
@@ -118,16 +118,13 @@ pub mod structured_output;
 /// Text-based tool simulation for CLI runners without native function calling
 pub mod tool_simulation;
 
-// Copilot SDK modules (behind feature flag)
-/// Configuration for the Copilot SDK provider
-#[cfg(feature = "copilot-sdk")]
-pub mod copilot_sdk_config;
-/// GitHub Copilot SDK runner (persistent JSON-RPC server)
-#[cfg(feature = "copilot-sdk")]
-pub mod copilot_sdk_runner;
-/// Tool definition conversion for Copilot SDK native tool calling
-#[cfg(feature = "copilot-sdk")]
-pub mod tool_bridge;
+// Copilot Headless modules (behind feature flag)
+/// Configuration for the Copilot Headless (ACP) provider
+#[cfg(feature = "copilot-headless")]
+pub mod copilot_headless;
+/// Configuration types for the Copilot Headless provider
+#[cfg(feature = "copilot-headless")]
+pub mod copilot_headless_config;
 
 // Re-export the runner structs for ergonomic access
 pub use agent::{AgentExecutor, AgentResult, OnTurnCallback, TurnInfo};
@@ -160,14 +157,8 @@ pub use tool_simulation::{
     FunctionDeclaration, FunctionResponse, TextToolHandler, TextToolResponse,
 };
 
-// Copilot SDK re-exports (behind feature flag)
-#[cfg(feature = "copilot-sdk")]
-pub use copilot_sdk_config::CopilotSdkConfig;
-#[cfg(feature = "copilot-sdk")]
-pub use copilot_sdk_runner::{CopilotSdkRunner, SdkToolResponse};
-#[cfg(feature = "copilot-sdk")]
-pub use tool_bridge::{convert_function_declarations, extract_declarations_from_tool_value};
-
-// Re-export copilot-sdk types so consumers don't need a direct dependency
-#[cfg(feature = "copilot-sdk")]
-pub use copilot_sdk::{Tool as SdkTool, ToolHandler, ToolResultObject};
+// Copilot Headless re-exports (behind feature flag)
+#[cfg(feature = "copilot-headless")]
+pub use copilot_headless::{CopilotHeadlessRunner, HeadlessToolResponse};
+#[cfg(feature = "copilot-headless")]
+pub use copilot_headless_config::CopilotHeadlessConfig;
