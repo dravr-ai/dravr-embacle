@@ -23,14 +23,14 @@ impl CopilotHeadlessConfig {
     ///
     /// Environment variables:
     /// - `COPILOT_CLI_PATH` — Override path to copilot binary
-    /// - `COPILOT_HEADLESS_MODEL` — Default model (default: `claude-opus-4.6`)
+    /// - `COPILOT_HEADLESS_MODEL` — Default model (default: `claude-opus-4.6-fast`)
     /// - `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` — GitHub auth token
     #[must_use]
     pub fn from_env() -> Self {
         let cli_path = env::var("COPILOT_CLI_PATH").ok().map(PathBuf::from);
 
-        let model =
-            env::var("COPILOT_HEADLESS_MODEL").unwrap_or_else(|_| "claude-opus-4.6".to_owned());
+        let model = env::var("COPILOT_HEADLESS_MODEL")
+            .unwrap_or_else(|_| "claude-opus-4.6-fast".to_owned());
 
         let github_token = env::var("COPILOT_GITHUB_TOKEN")
             .or_else(|_| env::var("GH_TOKEN"))
@@ -49,7 +49,7 @@ impl Default for CopilotHeadlessConfig {
     fn default() -> Self {
         Self {
             cli_path: None,
-            model: "claude-opus-4.6".to_owned(),
+            model: "claude-opus-4.6-fast".to_owned(),
             github_token: None,
         }
     }

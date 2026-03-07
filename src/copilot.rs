@@ -26,23 +26,28 @@ use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
 /// Default model for Copilot CLI
-const DEFAULT_MODEL: &str = "claude-opus-4.6";
+const DEFAULT_MODEL: &str = "claude-opus-4.6-fast";
 
 /// Fallback model list when `gh copilot models` discovery fails
 const FALLBACK_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
     "claude-opus-4.6",
     "claude-opus-4.6-fast",
+    "claude-opus-4.5",
     "claude-sonnet-4.5",
     "claude-haiku-4.5",
     "claude-sonnet-4",
+    "gemini-3-pro-preview",
+    "gpt-5.4",
+    "gpt-5.3-codex",
     "gpt-5.2-codex",
     "gpt-5.2",
+    "gpt-5.1-codex-max",
     "gpt-5.1-codex",
     "gpt-5.1",
+    "gpt-5.1-codex-mini",
     "gpt-5-mini",
     "gpt-4.1",
-    "gemini-3-pro-preview",
 ];
 
 /// Discover available Copilot models by running `gh copilot models`.

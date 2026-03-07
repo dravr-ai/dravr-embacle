@@ -95,7 +95,7 @@ The headless runner spawns `copilot --acp` per request and communicates via NDJS
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COPILOT_CLI_PATH` | auto-detect | Override path to copilot binary |
-| `COPILOT_HEADLESS_MODEL` | `claude-opus-4.6` | Default model for completions |
+| `COPILOT_HEADLESS_MODEL` | `claude-opus-4.6-fast` | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
 
 ## MCP Server (`embacle-mcp`)
