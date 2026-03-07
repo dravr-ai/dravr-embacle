@@ -220,8 +220,23 @@ async fn setup_session(
 // Notification and permission handling
 // ---------------------------------------------------------------------------
 
-/// Process a session/update notification, accumulating content and tool call counts.
-fn process_notification(params: &Value, content: &mut String, tool_calls: &mut u32) {
+/// Accumulated state from ACP session notifications during a prompt turn.
+struct TurnAccumulator {
+    content: String,
+    tool_calls: Vec<ObservedToolCall>,
+}
+
+impl TurnAccumulator {
+    const fn new() -> Self {
+        Self {
+            content: String::new(),
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
+/// Process a session/update notification, accumulating content and tool calls.
+fn process_notification(params: &Value, acc: &mut TurnAccumulator) {
     let Some(params) = params.get("params").or(Some(params)) else {
         return;
     };
@@ -233,11 +248,26 @@ fn process_notification(params: &Value, content: &mut String, tool_calls: &mut u
     match &notif.update {
         schema::SessionUpdate::AgentMessageChunk(chunk) => {
             if let schema::ContentBlock::Text(text) = &chunk.content {
-                content.push_str(&text.text);
+                acc.content.push_str(&text.text);
             }
         }
-        schema::SessionUpdate::ToolCall(_) => {
-            *tool_calls += 1;
+        schema::SessionUpdate::ToolCall(tc) => {
+            acc.tool_calls.push(ObservedToolCall {
+                id: tc.tool_call_id.0.to_string(),
+                title: tc.title.clone(),
+                status: format!("{:?}", tc.status),
+            });
+        }
+        schema::SessionUpdate::ToolCallUpdate(update) => {
+            let update_id = update.tool_call_id.0.to_string();
+            if let Some(existing) = acc.tool_calls.iter_mut().find(|t| t.id == update_id) {
+                if let Some(ref title) = update.fields.title {
+                    existing.title.clone_from(title);
+                }
+                if let Some(ref status) = update.fields.status {
+                    existing.status = format!("{status:?}");
+                }
+            }
         }
         _ => {}
     }
@@ -274,10 +304,36 @@ fn build_permission_response(params: &Value) -> Value {
     )
 }
 
-const fn map_stop_reason(reason: &str) -> &str {
-    match reason.as_bytes() {
-        b"max_tokens" => "length",
-        b"cancelled" => "cancelled",
+/// Extract token usage from the prompt response JSON.
+///
+/// ACP returns usage at `/result/usage` with camelCase fields:
+/// `totalTokens`, `inputTokens`, `outputTokens`.
+fn extract_usage(result: &Value) -> Option<TokenUsage> {
+    let usage = result
+        .pointer("/result/usage")
+        .or_else(|| result.get("usage"))?;
+
+    let input = usage.get("inputTokens").and_then(Value::as_u64)?;
+    let output = usage.get("outputTokens").and_then(Value::as_u64)?;
+    let total = usage
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(input + output);
+
+    #[allow(clippy::cast_possible_truncation)]
+    Some(TokenUsage {
+        prompt_tokens: input as u32,
+        completion_tokens: output as u32,
+        total_tokens: total as u32,
+    })
+}
+
+fn map_stop_reason(reason: &str) -> &'static str {
+    match reason {
+        "max_tokens" => "length",
+        "max_turn_requests" => "max_turns",
+        "refusal" => "refusal",
+        "cancelled" => "cancelled",
         _ => "stop",
     }
 }
@@ -291,14 +347,13 @@ async fn collect_complete(
     transport: &mut AcpTransport,
     prompt_id: i64,
     model: String,
-) -> Result<ChatResponse, RunnerError> {
-    let mut content = String::new();
-    let mut tool_calls = 0u32;
+) -> Result<(ChatResponse, Vec<ObservedToolCall>), RunnerError> {
+    let mut acc = TurnAccumulator::new();
 
     loop {
         let msg = transport.read_message().await?;
 
-        // Prompt response
+        // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             if let Some(error) = msg.get("error") {
                 return Err(RunnerError::external_service(
@@ -312,39 +367,29 @@ async fn collect_complete(
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn");
 
+            let usage = extract_usage(&msg);
+
             debug!(
-                content_len = content.len(),
-                tool_calls,
+                content_len = acc.content.len(),
+                tool_calls = acc.tool_calls.len(),
                 model = %model,
+                has_usage = usage.is_some(),
                 "Copilot Headless complete() response"
             );
 
-            return Ok(ChatResponse {
-                content,
+            let response = ChatResponse {
+                content: acc.content,
                 model,
-                usage: None,
+                usage,
                 finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
                 warnings: None,
-            });
+            };
+
+            return Ok((response, acc.tool_calls));
         }
 
         // Server requests and notifications
-        if let Some(method) = msg.get("method").and_then(Value::as_str) {
-            match method {
-                "session/update" => {
-                    if let Some(params) = msg.get("params") {
-                        process_notification(params, &mut content, &mut tool_calls);
-                    }
-                }
-                "session/request_permission" => {
-                    if let (Some(id), Some(params)) = (msg.get("id"), msg.get("params")) {
-                        let response = build_permission_response(params);
-                        transport.send_response(id, response).await?;
-                    }
-                }
-                _ => {}
-            }
-        }
+        handle_server_message(&msg, transport, &mut acc).await?;
     }
 }
 
@@ -354,10 +399,12 @@ async fn collect_streaming(
     prompt_id: i64,
     chunk_tx: &mpsc::UnboundedSender<Result<StreamChunk, RunnerError>>,
 ) -> Result<(), RunnerError> {
+    let mut acc = TurnAccumulator::new();
+
     loop {
         let msg = transport.read_message().await?;
 
-        // Prompt response
+        // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             if let Some(error) = msg.get("error") {
                 return Err(RunnerError::external_service(
@@ -399,6 +446,8 @@ async fn collect_streaming(
                                 }
                             }
                         }
+                        // Also track tool calls for internal accounting
+                        process_notification(params, &mut acc);
                     }
                 }
                 "session/request_permission" => {
@@ -413,6 +462,61 @@ async fn collect_streaming(
     }
 }
 
+/// Handle a server-to-client message (notification or request).
+async fn handle_server_message(
+    msg: &Value,
+    transport: &mut AcpTransport,
+    acc: &mut TurnAccumulator,
+) -> Result<(), RunnerError> {
+    if let Some(method) = msg.get("method").and_then(Value::as_str) {
+        match method {
+            "session/update" => {
+                if let Some(params) = msg.get("params") {
+                    process_notification(params, acc);
+                }
+            }
+            "session/request_permission" => {
+                if let (Some(id), Some(params)) = (msg.get("id"), msg.get("params")) {
+                    let response = build_permission_response(params);
+                    transport.send_response(id, response).await?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// A tool call observed during an ACP session turn.
+#[derive(Debug, Clone)]
+pub struct ObservedToolCall {
+    /// Tool call ID from the ACP protocol.
+    pub id: String,
+    /// Human-readable title describing the tool action.
+    pub title: String,
+    /// Execution status (e.g., "Pending", "`InProgress`", "Completed", "Failed").
+    pub status: String,
+}
+
+/// Response from a headless conversation turn including tool execution metadata.
+#[derive(Debug, Clone)]
+pub struct HeadlessToolResponse {
+    /// Final assistant response content.
+    pub content: String,
+    /// Model that generated the response.
+    pub model: String,
+    /// Tool calls observed during the turn.
+    pub tool_calls: Vec<ObservedToolCall>,
+    /// Token usage for this turn.
+    pub usage: Option<TokenUsage>,
+    /// Finish reason.
+    pub finish_reason: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Public runner
 // ---------------------------------------------------------------------------
@@ -422,6 +526,10 @@ async fn collect_streaming(
 /// Communicates with `copilot --acp` via the Agent Client Protocol (JSON-RPC over stdio).
 /// Spawns a new copilot subprocess per request using NDJSON framing.
 /// Uses types from `agent-client-protocol-schema` for protocol message deserialization.
+///
+/// Copilot manages its own tool execution loop internally (`SDK_TOOL_CALLING`).
+/// Tool calls are observed and reported via [`HeadlessToolResponse`] from
+/// [`converse()`](Self::converse), but the caller does not need to execute tools.
 pub struct CopilotHeadlessRunner {
     config: CopilotHeadlessConfig,
     available_models: Vec<String>,
@@ -480,21 +588,54 @@ impl CopilotHeadlessRunner {
             .find(|m| m.role == MessageRole::System)
             .map(|m| m.content.as_str())
     }
-}
 
-/// Response from a headless conversation turn including tool execution metadata.
-#[derive(Debug, Clone)]
-pub struct HeadlessToolResponse {
-    /// Final assistant response content.
-    pub content: String,
-    /// Model that generated the response.
-    pub model: String,
-    /// Number of tool calls observed during the turn.
-    pub tool_calls_count: u32,
-    /// Token usage (not available via ACP currently).
-    pub usage: Option<TokenUsage>,
-    /// Finish reason.
-    pub finish_reason: Option<String>,
+    /// Run a conversation turn and return detailed results including tool call metadata.
+    ///
+    /// Unlike [`complete()`](LlmProvider::complete), this returns an [`HeadlessToolResponse`]
+    /// with observed tool calls that copilot executed internally during the turn.
+    pub async fn converse(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<HeadlessToolResponse, RunnerError> {
+        let cli_path = self.resolve_cli_path()?;
+        let model = request
+            .model
+            .as_deref()
+            .unwrap_or(&self.config.model)
+            .to_owned();
+        let user_prompt = Self::extract_user_prompt(request);
+        let system_prompt = Self::extract_system_prompt(request);
+
+        let (mut transport, mut child, session_id) = setup_session(
+            &cli_path,
+            self.config.github_token.as_deref(),
+            &model,
+            system_prompt,
+        )
+        .await?;
+
+        let prompt_id = transport
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": [{"type": "text", "text": user_prompt}],
+                }),
+            )
+            .await?;
+
+        let result = collect_complete(&mut transport, prompt_id, model).await;
+        let _ = child.kill().await;
+
+        let (response, tool_calls) = result?;
+        Ok(HeadlessToolResponse {
+            content: response.content,
+            model: response.model,
+            tool_calls,
+            usage: response.usage,
+            finish_reason: response.finish_reason,
+        })
+    }
 }
 
 #[async_trait]
@@ -508,7 +649,9 @@ impl LlmProvider for CopilotHeadlessRunner {
     }
 
     fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES
+        LlmCapabilities::STREAMING
+            | LlmCapabilities::SYSTEM_MESSAGES
+            | LlmCapabilities::SDK_TOOL_CALLING
     }
 
     fn default_model(&self) -> &str {
@@ -547,9 +690,9 @@ impl LlmProvider for CopilotHeadlessRunner {
             )
             .await?;
 
-        let response = collect_complete(&mut transport, prompt_id, model).await;
+        let result = collect_complete(&mut transport, prompt_id, model).await;
         let _ = child.kill().await;
-        response
+        result.map(|(response, _tool_calls)| response)
     }
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {

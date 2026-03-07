@@ -159,6 +159,6 @@ pub use tool_simulation::{
 
 // Copilot Headless re-exports (behind feature flag)
 #[cfg(feature = "copilot-headless")]
-pub use copilot_headless::{CopilotHeadlessRunner, HeadlessToolResponse};
+pub use copilot_headless::{CopilotHeadlessRunner, HeadlessToolResponse, ObservedToolCall};
 #[cfg(feature = "copilot-headless")]
 pub use copilot_headless_config::CopilotHeadlessConfig;
