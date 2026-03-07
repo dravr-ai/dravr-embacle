@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0] — 2026-03-07
+
+### Fixed
+
+- fix: purge stale copilot-sdk references from docs, CI, and release workflow
+- fix: complete headless tool calling + usage extraction Add SDK_TOOL_CALLING, ObservedToolCall tracking, converse() API, ACP usage parsing
+
+
+
 ## [0.5.0] — 2026-03-05
 
 ### Fixed
