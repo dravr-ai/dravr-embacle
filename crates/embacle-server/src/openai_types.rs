@@ -39,6 +39,36 @@ pub struct ChatCompletionRequest {
     /// Controls which tools the model may call
     #[serde(default)]
     pub tool_choice: Option<ToolChoice>,
+    /// Controls the response format (text, json_object, or json_schema)
+    #[serde(default)]
+    pub response_format: Option<ResponseFormatRequest>,
+}
+
+/// OpenAI-compatible response format request
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResponseFormatRequest {
+    /// Default text response
+    #[serde(rename = "text")]
+    Text,
+    /// Force JSON object output
+    #[serde(rename = "json_object")]
+    JsonObject,
+    /// Force JSON output conforming to a specific schema
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        /// The JSON schema specification
+        json_schema: JsonSchemaSpec,
+    },
+}
+
+/// JSON schema specification within a response format request
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonSchemaSpec {
+    /// Schema name for identification
+    pub name: String,
+    /// The JSON Schema definition
+    pub schema: serde_json::Value,
 }
 
 /// A model field that can be either a single string or an array of strings

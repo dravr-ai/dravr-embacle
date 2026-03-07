@@ -126,6 +126,7 @@ impl ClineCliRunner {
                 usage: None,
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
+                tool_calls: None,
             },
             task_id,
         ))

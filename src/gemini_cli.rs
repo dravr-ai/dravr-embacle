@@ -135,6 +135,7 @@ impl GeminiCliRunner {
                     usage,
                     finish_reason: Some("stop".to_owned()),
                     warnings: None,
+                    tool_calls: None,
                 },
                 parsed.session_id,
             ));
@@ -206,6 +207,7 @@ impl GeminiCliRunner {
                 usage,
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
+                tool_calls: None,
             },
             session_id,
         ))

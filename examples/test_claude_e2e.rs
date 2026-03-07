@@ -97,6 +97,11 @@ async fn main() {
         temperature: None,
         max_tokens: Some(20),
         stream: false,
+        tools: None,
+        tool_choice: None,
+        top_p: None,
+        stop: None,
+        response_format: None,
     };
 
     match runner.complete(&request).await {
@@ -125,6 +130,11 @@ async fn main() {
         temperature: None,
         max_tokens: Some(50),
         stream: true,
+        tools: None,
+        tool_choice: None,
+        top_p: None,
+        stop: None,
+        response_format: None,
     };
 
     match runner.complete_stream(&stream_request).await {

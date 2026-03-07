@@ -116,6 +116,11 @@ async fn handle_single(
     chat_request.model = resolved.model;
     chat_request.temperature = request.temperature;
     chat_request.max_tokens = request.max_tokens;
+    chat_request.tools = request
+        .tools
+        .as_ref()
+        .map(|tools| tools.iter().map(server_tool_to_core).collect());
+    chat_request.tool_choice = request.tool_choice.as_ref().map(server_choice_to_core);
 
     let warnings = match embacle::validate_capabilities(
         runner.name(),
@@ -175,8 +180,12 @@ async fn dispatch_completion(
         match runner.complete(&chat_request).await {
             Ok(response) => {
                 let model_name = format!("{runner_type}:{}", response.model);
-                let (message, finish_reason) =
-                    build_response_message(has_tools, response.content, response.finish_reason);
+                let (message, finish_reason) = build_response_message(
+                    has_tools,
+                    response.content,
+                    response.finish_reason,
+                    response.tool_calls,
+                );
                 let reason = finish_reason.as_deref().unwrap_or("stop");
                 streaming::sse_single_response(message, reason, &model_name)
             }
@@ -201,8 +210,12 @@ async fn dispatch_completion(
                     total: u.total_tokens,
                 });
 
-                let (message, finish_reason) =
-                    build_response_message(has_tools, response.content, response.finish_reason);
+                let (message, finish_reason) = build_response_message(
+                    has_tools,
+                    response.content,
+                    response.finish_reason,
+                    response.tool_calls,
+                );
 
                 let resp = ChatCompletionResponse {
                     id: generate_id(),
@@ -315,12 +328,48 @@ async fn handle_multiplex(
     }
 }
 
-/// Build a `ResponseMessage` from LLM output, parsing tool calls if tools were requested
+/// Build a `ResponseMessage` from LLM output, using native tool calls if available
+/// or falling back to XML parsing if tools were requested
 fn build_response_message(
     has_tools: bool,
     content: String,
     finish_reason: Option<String>,
+    native_tool_calls: Option<Vec<embacle::ToolCallRequest>>,
 ) -> (ResponseMessage, Option<String>) {
+    // If the provider returned native tool calls, use them directly
+    if let Some(ref calls) = native_tool_calls {
+        if !calls.is_empty() {
+            let tool_calls: Vec<ToolCall> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, tc)| ToolCall {
+                    index: i,
+                    id: tc.id.clone(),
+                    tool_type: "function".to_owned(),
+                    function: ToolCallFunction {
+                        name: tc.function_name.clone(),
+                        arguments: serde_json::to_string(&tc.arguments)
+                            .unwrap_or_else(|_| "{}".to_owned()),
+                    },
+                })
+                .collect();
+            let text_content = if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            };
+            return (
+                ResponseMessage {
+                    role: "assistant",
+                    content: text_content,
+                    tool_calls: Some(tool_calls),
+                },
+                Some("tool_calls".to_owned()),
+            );
+        }
+    }
+
+    // Fall back to XML parsing for text-based tool simulation
     if has_tools {
         let parsed_calls = embacle::parse_tool_call_blocks(&content);
         if parsed_calls.is_empty() {
@@ -448,6 +497,29 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
     }
 
     result
+}
+
+/// Convert a server `ToolDefinition` to core `ToolDefinition`
+fn server_tool_to_core(tool: &crate::openai_types::ToolDefinition) -> embacle::ToolDefinition {
+    embacle::ToolDefinition {
+        name: tool.function.name.clone(),
+        description: tool.function.description.clone().unwrap_or_default(),
+        parameters: tool.function.parameters.clone(),
+    }
+}
+
+/// Convert a server `ToolChoice` to core `ToolChoice`
+fn server_choice_to_core(choice: &ToolChoice) -> embacle::ToolChoice {
+    match choice {
+        ToolChoice::Mode(m) => match m.as_str() {
+            "none" => embacle::ToolChoice::None,
+            "required" => embacle::ToolChoice::Required,
+            _ => embacle::ToolChoice::Auto,
+        },
+        ToolChoice::Specific(s) => embacle::ToolChoice::Specific {
+            name: s.function.name.clone(),
+        },
+    }
 }
 
 /// Convert `OpenAI` tool definitions to embacle `FunctionDeclaration` format

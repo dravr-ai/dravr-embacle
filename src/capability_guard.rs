@@ -63,6 +63,59 @@ pub fn validate_capabilities(
         warnings.push(msg);
     }
 
+    if request.tools.is_some() && !capabilities.supports_function_calling() {
+        let msg = format!(
+            "{provider_name} does not support native function calling; tools will use text simulation"
+        );
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
+    if matches!(
+        request.tool_choice,
+        Some(crate::types::ToolChoice::Required)
+    ) && !capabilities.supports_function_calling()
+    {
+        let msg = format!(
+            "{provider_name} does not support function calling; tool_choice=required is not available"
+        );
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
+    if request.top_p.is_some() && !capabilities.supports_top_p() {
+        let msg =
+            format!("{provider_name} does not support top_p; requested value will be ignored");
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
+    if request.stop.is_some() && !capabilities.supports_stop_sequences() {
+        let msg = format!(
+            "{provider_name} does not support stop sequences; requested value will be ignored"
+        );
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
+    if request.response_format.is_some() && !capabilities.supports_response_format() {
+        let msg = format!(
+            "{provider_name} does not support response_format; requested value will be ignored"
+        );
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
     Ok(warnings)
 }
 
@@ -159,5 +212,64 @@ mod tests {
         assert!(warnings[0].contains("temperature"));
         assert!(warnings[1].contains("max_tokens"));
         assert!(warnings[2].contains("streaming"));
+    }
+
+    #[test]
+    fn strict_rejects_tools_without_function_calling() {
+        let caps = LlmCapabilities::STREAMING;
+        let request = ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![
+            crate::types::ToolDefinition {
+                name: "test".to_owned(),
+                description: "test".to_owned(),
+                parameters: None,
+            },
+        ]);
+        let err = validate_capabilities("test", caps, &request, true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("function calling"));
+    }
+
+    #[test]
+    fn strict_rejects_unsupported_top_p() {
+        let caps = LlmCapabilities::STREAMING;
+        let request = ChatRequest::new(vec![ChatMessage::user("hello")]).with_top_p(0.9);
+        let err = validate_capabilities("test", caps, &request, true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("top_p"));
+    }
+
+    #[test]
+    fn strict_rejects_unsupported_stop() {
+        let caps = LlmCapabilities::STREAMING;
+        let request =
+            ChatRequest::new(vec![ChatMessage::user("hello")]).with_stop(vec!["END".to_owned()]);
+        let err = validate_capabilities("test", caps, &request, true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("stop sequences"));
+    }
+
+    #[test]
+    fn strict_rejects_unsupported_response_format() {
+        let caps = LlmCapabilities::STREAMING;
+        let request = ChatRequest::new(vec![ChatMessage::user("hello")])
+            .with_response_format(crate::types::ResponseFormat::JsonObject);
+        let err = validate_capabilities("test", caps, &request, true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("response_format"));
+    }
+
+    #[test]
+    fn permissive_warns_for_tools_without_function_calling() {
+        let caps = LlmCapabilities::STREAMING;
+        let request = ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![
+            crate::types::ToolDefinition {
+                name: "test".to_owned(),
+                description: "test".to_owned(),
+                parameters: None,
+            },
+        ]);
+        let warnings = validate_capabilities("test", caps, &request, false).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("function calling"));
     }
 }

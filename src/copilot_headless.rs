@@ -393,6 +393,7 @@ async fn collect_complete(
                 usage,
                 finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
                 warnings: None,
+                tool_calls: None,
             };
 
             return Ok((response, acc.tool_calls));

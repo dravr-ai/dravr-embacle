@@ -257,6 +257,7 @@ mod tests {
                     usage: None,
                     finish_reason: Some("stop".to_owned()),
                     warnings: None,
+                    tool_calls: None,
                 })
             } else {
                 responses.remove(0)
@@ -300,6 +301,7 @@ mod tests {
                 }),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
+                tool_calls: None,
             }),
             Ok(ChatResponse {
                 content: "second".to_owned(),
@@ -311,6 +313,7 @@ mod tests {
                 }),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
+                tool_calls: None,
             }),
         ]);
         let metered = MetricsProvider::new(Box::new(provider));
@@ -349,6 +352,7 @@ mod tests {
             usage: None,
             finish_reason: Some("stop".to_owned()),
             warnings: None,
+            tool_calls: None,
         })]);
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("12345678")]); // 8 chars => 2 tokens
@@ -382,6 +386,7 @@ mod tests {
             }),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
+            tool_calls: None,
         })]);
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);

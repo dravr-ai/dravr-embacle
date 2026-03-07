@@ -87,6 +87,11 @@ pub async fn request_structured_output(
             temperature: structured_request.request.temperature,
             max_tokens: structured_request.request.max_tokens,
             stream: false,
+            tools: structured_request.request.tools.clone(),
+            tool_choice: structured_request.request.tool_choice.clone(),
+            top_p: structured_request.request.top_p,
+            stop: structured_request.request.stop.clone(),
+            response_format: structured_request.request.response_format.clone(),
         };
 
         let response = provider.complete(&request).await?;
@@ -366,6 +371,7 @@ mod tests {
             usage: None,
             finish_reason: Some("stop".to_owned()),
             warnings: None,
+            tool_calls: None,
         }
     }
 

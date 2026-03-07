@@ -59,6 +59,7 @@
 
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, MessageRole, RunnerError, TokenUsage,
+    ToolCallRequest, ToolDefinition,
 };
 use serde_json::Value;
 use std::fmt::Write;
@@ -71,18 +72,9 @@ use tracing::{debug, info, warn};
 
 /// A tool definition describing a callable function.
 ///
-/// Mirrors the Gemini/OpenAI `FunctionDeclaration` format: a name, description,
-/// and optional JSON Schema for the parameters.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FunctionDeclaration {
-    /// Name of the function
-    pub name: String,
-    /// Description of what the function does
-    pub description: String,
-    /// Parameters schema (JSON Schema format)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Value>,
-}
+/// This is a type alias for [`ToolDefinition`] from core types, maintaining
+/// backward compatibility with existing code that uses `FunctionDeclaration`.
+pub type FunctionDeclaration = ToolDefinition;
 
 /// A parsed tool call extracted from LLM text output.
 ///
@@ -94,6 +86,25 @@ pub struct FunctionCall {
     pub name: String,
     /// Arguments for the function as a JSON object
     pub args: Value,
+}
+
+impl From<ToolCallRequest> for FunctionCall {
+    fn from(tc: ToolCallRequest) -> Self {
+        Self {
+            name: tc.function_name,
+            args: tc.arguments,
+        }
+    }
+}
+
+impl From<FunctionCall> for ToolCallRequest {
+    fn from(fc: FunctionCall) -> Self {
+        Self {
+            id: format!("call_{}", fc.name),
+            function_name: fc.name,
+            arguments: fc.args,
+        }
+    }
 }
 
 /// A tool execution result to feed back to the LLM.

@@ -150,6 +150,9 @@ pub use opencode::OpenCodeRunner;
 pub use quality_gate::{QualityGateProvider, QualityPolicy};
 pub use structured_output::{request_structured_output, StructuredOutputRequest};
 
+// Core tool calling type re-exports
+pub use types::{ResponseFormat, ToolCallRequest, ToolChoice, ToolDefinition};
+
 // Tool simulation re-exports
 pub use tool_simulation::{
     execute_with_text_tools, format_tool_results_as_text, generate_tool_catalog,

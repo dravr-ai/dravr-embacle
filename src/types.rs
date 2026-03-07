@@ -133,6 +133,12 @@ bitflags::bitflags! {
         const TEMPERATURE       = 0b0000_0100_0000;
         /// Provider supports max_tokens parameter
         const MAX_TOKENS        = 0b0000_1000_0000;
+        /// Provider supports top_p (nucleus sampling) parameter
+        const TOP_P             = 0b0001_0000_0000;
+        /// Provider supports stop sequences parameter
+        const STOP_SEQUENCES    = 0b0010_0000_0000;
+        /// Provider supports response format control (JSON mode, JSON Schema)
+        const RESPONSE_FORMAT   = 0b0100_0000_0000;
     }
 }
 
@@ -200,6 +206,24 @@ impl LlmCapabilities {
     pub const fn supports_max_tokens(&self) -> bool {
         self.contains(Self::MAX_TOKENS)
     }
+
+    /// Check if `top_p` parameter is supported
+    #[must_use]
+    pub const fn supports_top_p(&self) -> bool {
+        self.contains(Self::TOP_P)
+    }
+
+    /// Check if stop sequences parameter is supported
+    #[must_use]
+    pub const fn supports_stop_sequences(&self) -> bool {
+        self.contains(Self::STOP_SEQUENCES)
+    }
+
+    /// Check if response format control is supported
+    #[must_use]
+    pub const fn supports_response_format(&self) -> bool {
+        self.contains(Self::RESPONSE_FORMAT)
+    }
 }
 
 // ============================================================================
@@ -216,6 +240,8 @@ pub enum MessageRole {
     User,
     /// Assistant response message
     Assistant,
+    /// Tool result message
+    Tool,
 }
 
 impl MessageRole {
@@ -226,6 +252,7 @@ impl MessageRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::Tool => "tool",
         }
     }
 }
@@ -237,6 +264,15 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// Content of the message
     pub content: String,
+    /// Tool calls requested by the assistant (only for `Assistant` role)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallRequest>>,
+    /// ID of the tool call this message responds to (only for `Tool` role)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Function name for tool result messages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
@@ -246,6 +282,9 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -266,6 +305,81 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(MessageRole::Assistant, content)
     }
+
+    /// Create a tool result message
+    #[must_use]
+    pub fn tool(
+        name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            name: Some(name.into()),
+        }
+    }
+}
+
+// ============================================================================
+// Tool Calling Types
+// ============================================================================
+
+/// A tool call requested by the assistant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRequest {
+    /// Unique identifier for this tool call
+    pub id: String,
+    /// Name of the function to call
+    pub function_name: String,
+    /// JSON-encoded arguments for the function
+    pub arguments: serde_json::Value,
+}
+
+/// Definition of a tool that can be called by the model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Name of the function
+    pub name: String,
+    /// Description of what the function does
+    pub description: String,
+    /// JSON Schema describing the function parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// Controls which tools the model may call
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolChoice {
+    /// Model decides whether to call tools
+    Auto,
+    /// Model will not call any tools
+    None,
+    /// Model must call at least one tool
+    Required,
+    /// Model must call the specified function
+    Specific {
+        /// Name of the function to call
+        name: String,
+    },
+}
+
+/// Controls the response format from the model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ResponseFormat {
+    /// Default text response
+    Text,
+    /// Force JSON object output
+    JsonObject,
+    /// Force JSON output conforming to a specific schema
+    JsonSchema {
+        /// Schema name for identification
+        name: String,
+        /// JSON Schema the response must conform to
+        schema: serde_json::Value,
+    },
 }
 
 // ============================================================================
@@ -293,6 +407,21 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// Whether to stream the response
     pub stream: bool,
+    /// Tool definitions available for the model to call
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+    /// Controls which tools the model may call
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    /// Nucleus sampling parameter (0.0 - 1.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Stop sequences that halt generation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    /// Control over the response format (text, JSON, or schema-validated JSON)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl ChatRequest {
@@ -305,6 +434,11 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             stream: false,
+            tools: None,
+            tool_choice: None,
+            top_p: None,
+            stop: None,
+            response_format: None,
         }
     }
 
@@ -335,6 +469,41 @@ impl ChatRequest {
         self.stream = true;
         self
     }
+
+    /// Set the tool definitions
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Set the tool choice
+    #[must_use]
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Set the `top_p` (nucleus sampling) parameter
+    #[must_use]
+    pub const fn with_top_p(mut self, top_p: f32) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Set stop sequences
+    #[must_use]
+    pub fn with_stop(mut self, stop: Vec<String>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Set the response format
+    #[must_use]
+    pub fn with_response_format(mut self, response_format: ResponseFormat) -> Self {
+        self.response_format = Some(response_format);
+        self
+    }
 }
 
 /// Response from a chat completion
@@ -351,6 +520,9 @@ pub struct ChatResponse {
     /// Warnings about unsupported request parameters
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    /// Tool calls requested by the model (populated by providers with native function calling)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallRequest>>,
 }
 
 /// Token usage statistics
@@ -415,4 +587,159 @@ pub trait LlmProvider: Send + Sync {
 
     /// Check if the provider is healthy and ready to serve requests
     async fn health_check(&self) -> Result<bool, RunnerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_call_request_serde_round_trip() {
+        let tc = ToolCallRequest {
+            id: "call_1".to_owned(),
+            function_name: "get_weather".to_owned(),
+            arguments: json!({"city": "Paris"}),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let deserialized: ToolCallRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "call_1");
+        assert_eq!(deserialized.function_name, "get_weather");
+        assert_eq!(deserialized.arguments["city"], "Paris");
+    }
+
+    #[test]
+    fn tool_definition_serde_round_trip() {
+        let td = ToolDefinition {
+            name: "search".to_owned(),
+            description: "Search the web".to_owned(),
+            parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "search");
+        assert!(deserialized.parameters.is_some());
+    }
+
+    #[test]
+    fn tool_definition_without_parameters() {
+        let td = ToolDefinition {
+            name: "ping".to_owned(),
+            description: "Check connectivity".to_owned(),
+            parameters: None,
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        assert!(!json.contains("parameters"));
+        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.parameters.is_none());
+    }
+
+    #[test]
+    fn tool_choice_serde_variants() {
+        let auto = ToolChoice::Auto;
+        let json = serde_json::to_string(&auto).unwrap();
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ToolChoice::Auto));
+
+        let none = ToolChoice::None;
+        let json = serde_json::to_string(&none).unwrap();
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ToolChoice::None));
+
+        let required = ToolChoice::Required;
+        let json = serde_json::to_string(&required).unwrap();
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ToolChoice::Required));
+
+        let specific = ToolChoice::Specific {
+            name: "get_weather".to_owned(),
+        };
+        let json = serde_json::to_string(&specific).unwrap();
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ToolChoice::Specific { name } if name == "get_weather"));
+    }
+
+    #[test]
+    fn response_format_serde_variants() {
+        let text = ResponseFormat::Text;
+        let json = serde_json::to_string(&text).unwrap();
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ResponseFormat::Text));
+
+        let json_obj = ResponseFormat::JsonObject;
+        let json = serde_json::to_string(&json_obj).unwrap();
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, ResponseFormat::JsonObject));
+
+        let json_schema = ResponseFormat::JsonSchema {
+            name: "person".to_owned(),
+            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+        };
+        let json = serde_json::to_string(&json_schema).unwrap();
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(deserialized, ResponseFormat::JsonSchema { name, .. } if name == "person")
+        );
+    }
+
+    #[test]
+    fn chat_message_tool_constructor() {
+        let msg = ChatMessage::tool("get_weather", "call_1", r#"{"temp": 72}"#);
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.content, r#"{"temp": 72}"#);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(msg.name.as_deref(), Some("get_weather"));
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn chat_message_regular_constructors_have_none_tool_fields() {
+        let user = ChatMessage::user("hello");
+        assert!(user.tool_calls.is_none());
+        assert!(user.tool_call_id.is_none());
+        assert!(user.name.is_none());
+    }
+
+    #[test]
+    fn chat_request_builder_methods() {
+        let req = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_tools(vec![ToolDefinition {
+                name: "test".to_owned(),
+                description: "test fn".to_owned(),
+                parameters: None,
+            }])
+            .with_tool_choice(ToolChoice::Required)
+            .with_top_p(0.9)
+            .with_stop(vec!["END".to_owned()])
+            .with_response_format(ResponseFormat::JsonObject);
+
+        assert!(req.tools.is_some());
+        assert!(matches!(req.tool_choice, Some(ToolChoice::Required)));
+        assert_eq!(req.top_p, Some(0.9));
+        assert_eq!(req.stop.as_ref().unwrap()[0], "END");
+        assert!(matches!(
+            req.response_format,
+            Some(ResponseFormat::JsonObject)
+        ));
+    }
+
+    #[test]
+    fn message_role_tool_as_str() {
+        assert_eq!(MessageRole::Tool.as_str(), "tool");
+    }
+
+    #[test]
+    fn capability_flags_new_fields() {
+        let caps = LlmCapabilities::TOP_P
+            | LlmCapabilities::STOP_SEQUENCES
+            | LlmCapabilities::RESPONSE_FORMAT;
+        assert!(caps.supports_top_p());
+        assert!(caps.supports_stop_sequences());
+        assert!(caps.supports_response_format());
+
+        let empty = LlmCapabilities::empty();
+        assert!(!empty.supports_top_p());
+        assert!(!empty.supports_stop_sequences());
+        assert!(!empty.supports_response_format());
+    }
 }

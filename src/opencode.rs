@@ -162,6 +162,7 @@ impl OpenCodeRunner {
             usage,
             finish_reason: finish_reason.or_else(|| Some("stop".to_owned())),
             warnings: None,
+            tool_calls: None,
         };
 
         Ok((response, session_id))

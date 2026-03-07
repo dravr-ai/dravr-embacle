@@ -21,6 +21,7 @@ pub fn build_prompt(messages: &[ChatMessage]) -> String {
             MessageRole::System => "[system]",
             MessageRole::User => "[user]",
             MessageRole::Assistant => "[assistant]",
+            MessageRole::Tool => "[tool]",
         };
         parts.push(format!("{label}\n{}", msg.content));
     }
@@ -65,6 +66,7 @@ pub fn build_user_prompt(messages: &[ChatMessage]) -> String {
         let label = match msg.role {
             MessageRole::User => "[user]",
             MessageRole::Assistant => "[assistant]",
+            MessageRole::Tool => "[tool]",
             MessageRole::System => unreachable!(),
         };
         parts.push(format!("{label}\n{}", msg.content));

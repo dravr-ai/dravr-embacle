@@ -190,6 +190,11 @@ impl LlmProvider for QualityGateProvider {
                         temperature: request.temperature,
                         max_tokens: request.max_tokens,
                         stream: false,
+                        tools: request.tools.clone(),
+                        tool_choice: request.tool_choice.clone(),
+                        top_p: request.top_p,
+                        stop: request.stop.clone(),
+                        response_format: request.response_format.clone(),
                     };
 
                     last_response = self.inner.complete(&retry_request).await?;
@@ -272,6 +277,7 @@ mod tests {
                     usage: None,
                     finish_reason: Some("stop".to_owned()),
                     warnings: None,
+                    tool_calls: None,
                 })
             } else {
                 responses.remove(0)
@@ -292,6 +298,7 @@ mod tests {
             usage: None,
             finish_reason: Some("stop".to_owned()),
             warnings: None,
+            tool_calls: None,
         }
     }
 
