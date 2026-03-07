@@ -44,18 +44,20 @@ jobs:
   test-linux:
     name: Tests (Linux)
     runs-on: ubuntu-latest
+    env:
+      HAS_COPILOT_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - name: Install Copilot CLI
-        if: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
+        if: env.HAS_COPILOT_TOKEN == 'true'
         run: |
           npm install -g @github/copilot-linux-x64
           copilot --version
       - name: Copilot Headless E2E
-        if: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
+        if: env.HAS_COPILOT_TOKEN == 'true'
         run: cargo test --workspace --features copilot-headless
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
