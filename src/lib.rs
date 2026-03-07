@@ -1,4 +1,4 @@
-// ABOUTME: Standalone LLM runner library wrapping AI CLI tools and SDKs as providers
+// ABOUTME: Standalone LLM runner library wrapping AI CLI tools and ACP as providers
 // ABOUTME: Re-exports runners, agent loop, fallback chains, metrics, quality gates, MCP bridge, and structured output
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -8,11 +8,11 @@
 //!
 //! Standalone library providing pluggable [`LlmProvider`](types::LlmProvider)
 //! implementations that delegate to CLI tools (Claude Code, Copilot, Cursor Agent,
-//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue) and SDKs (Copilot SDK) for LLM completions.
+//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue) and ACP (Copilot Headless) for LLM completions.
 //!
 //! CLI runners wrap a binary, build prompts from [`ChatMessage`](types::ChatMessage)
-//! sequences, parse JSON output, and manage session continuity. The Copilot SDK
-//! runner maintains a persistent `copilot --headless` server via JSON-RPC.
+//! sequences, parse JSON output, and manage session continuity. The Copilot Headless
+//! runner communicates via NDJSON-framed JSON-RPC with `copilot --acp`.
 //!
 //! ## Quick Start
 //!
