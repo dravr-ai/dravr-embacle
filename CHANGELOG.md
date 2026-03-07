@@ -1,20 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Added
-
-- feat: native tool calling types in core (`ToolDefinition`, `ToolCallRequest`, `ToolChoice`, `ResponseFormat`) with builder methods on `ChatRequest`
-- feat: capability guard validates request fields (`tools`, `top_p`, `stop`, `response_format`) against provider capabilities
-- feat: enhanced JSON schema validation with recursive objects, array items, enum values, numeric bounds, and `additionalProperties: false`
-- feat: `InstalledAuthUnverified` readiness variant and `check_env_var_auth()` helper for env-based auth probes
-- feat: `PermissionPolicy` enum for ACP headless permission handling (auto-approve or deny-all)
-
-### Fixed
-
-- fix: ACP permission response prefers `AllowAlways` over `AllowOnce`, cancels when no allow option exists instead of falling back to reject
-- fix: `FunctionDeclaration` is now a type alias for `ToolDefinition`, unifying text tool simulation with core types
-
 ## [0.6.0] — 2026-03-07
 
 ### Fixed
