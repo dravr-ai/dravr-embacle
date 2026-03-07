@@ -27,6 +27,14 @@ const AUTH_CHECK_MAX_OUTPUT: usize = 64 * 1024;
 pub enum ProviderReadiness {
     /// CLI is installed and authenticated
     Ready,
+    /// CLI is installed but authentication could not be verified
+    ///
+    /// The binary exists and runs, but the runner lacks a dedicated auth probe.
+    /// Requests may still succeed if the user has configured auth externally.
+    InstalledAuthUnverified {
+        /// Why authentication could not be verified
+        reason: String,
+    },
     /// CLI is installed but not authenticated or misconfigured
     NotReady {
         /// Human-readable explanation of why the provider is not ready
@@ -47,10 +55,16 @@ pub enum ProviderReadiness {
 }
 
 impl ProviderReadiness {
-    /// Returns `true` when the provider is authenticated and ready to serve requests
+    /// Returns `true` when the provider is confirmed authenticated and ready
     #[must_use]
     pub const fn is_ready(&self) -> bool {
         matches!(self, Self::Ready)
+    }
+
+    /// Returns `true` when the binary is installed (even if auth is unverified)
+    #[must_use]
+    pub const fn is_installed(&self) -> bool {
+        matches!(self, Self::Ready | Self::InstalledAuthUnverified { .. })
     }
 }
 
@@ -58,6 +72,9 @@ impl fmt::Display for ProviderReadiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ready => write!(f, "ready"),
+            Self::InstalledAuthUnverified { reason } => {
+                write!(f, "installed (auth unverified: {reason})")
+            }
             Self::NotReady { reason, action } => {
                 write!(f, "not ready: {reason} (action: {action})")
             }
@@ -92,14 +109,27 @@ pub async fn check_readiness(
     match runner_type {
         CliRunnerType::ClaudeCode => check_claude_readiness(binary_path).await,
         CliRunnerType::Copilot => check_copilot_readiness(binary_path).await,
-        CliRunnerType::CursorAgent => check_version_probe(binary_path, "cursor-agent").await,
-        CliRunnerType::OpenCode => check_version_probe(binary_path, "opencode").await,
-        CliRunnerType::GeminiCli => check_version_probe(binary_path, "gemini").await,
-        CliRunnerType::CodexCli => check_version_probe(binary_path, "codex").await,
-        CliRunnerType::GooseCli => check_version_probe(binary_path, "goose").await,
-        CliRunnerType::ClineCli => check_version_probe(binary_path, "cline").await,
-        CliRunnerType::ContinueCli => check_version_probe(binary_path, "cn").await,
+        CliRunnerType::OpenCode => check_opencode_readiness(binary_path).await,
+        CliRunnerType::GeminiCli => check_gemini_readiness(binary_path).await,
+        CliRunnerType::CodexCli => check_codex_readiness(binary_path).await,
+        CliRunnerType::CursorAgent => {
+            check_version_probe_unverified(binary_path, "cursor-agent").await
+        }
+        CliRunnerType::GooseCli => check_version_probe_unverified(binary_path, "goose").await,
+        CliRunnerType::ClineCli => check_version_probe_unverified(binary_path, "cline").await,
+        CliRunnerType::ContinueCli => check_version_probe_unverified(binary_path, "cn").await,
     }
+}
+
+/// Check if any of the given environment variables are set and non-empty.
+///
+/// Returns `Some(var_name)` for the first variable found, or `None`.
+#[must_use]
+pub fn check_env_var_auth<'a>(var_names: &'a [&'a str]) -> Option<&'a str> {
+    var_names
+        .iter()
+        .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
+        .copied()
 }
 
 /// Claude Code has an explicit `auth status` sub-command
@@ -194,12 +224,36 @@ async fn check_gh_auth_status() -> Option<ProviderReadiness> {
     }
 }
 
-/// Generic version probe — success means the binary is installed and executable.
+/// Check Gemini CLI readiness via API key env vars, falling back to version probe.
+async fn check_gemini_readiness(binary_path: &Path) -> Result<ProviderReadiness, RunnerError> {
+    if let Some(var) = check_env_var_auth(&["GOOGLE_API_KEY", "GEMINI_API_KEY"]) {
+        debug!(env_var = var, "Gemini: API key found in environment");
+        return Ok(ProviderReadiness::Ready);
+    }
+    check_version_probe_unverified(binary_path, "gemini").await
+}
+
+/// Check Codex CLI readiness via `OPENAI_API_KEY` env var, falling back to version probe.
+async fn check_codex_readiness(binary_path: &Path) -> Result<ProviderReadiness, RunnerError> {
+    if check_env_var_auth(&["OPENAI_API_KEY"]).is_some() {
+        debug!("Codex: OPENAI_API_KEY found in environment");
+        return Ok(ProviderReadiness::Ready);
+    }
+    check_version_probe_unverified(binary_path, "codex").await
+}
+
+/// Check `OpenCode` readiness via `gh auth status`, falling back to version probe.
+async fn check_opencode_readiness(binary_path: &Path) -> Result<ProviderReadiness, RunnerError> {
+    if let Some(gh_result) = check_gh_auth_status().await {
+        return Ok(gh_result);
+    }
+    check_version_probe_unverified(binary_path, "opencode").await
+}
+
+/// Version probe that returns `InstalledAuthUnverified` on success.
 ///
-/// This does NOT verify authentication; it only confirms the binary can
-/// run `--version` without error. Runners that lack a dedicated auth
-/// sub-command fall back to this heuristic.
-async fn check_version_probe(
+/// Used for runners that lack a dedicated auth sub-command and no env var check.
+async fn check_version_probe_unverified(
     binary_path: &Path,
     name: &str,
 ) -> Result<ProviderReadiness, RunnerError> {
@@ -210,8 +264,10 @@ async fn check_version_probe(
 
     match output {
         Ok(CliOutput { exit_code: 0, .. }) => {
-            debug!(runner = name, "Version probe succeeded");
-            Ok(ProviderReadiness::Ready)
+            debug!(runner = name, "Version probe succeeded (auth not verified)");
+            Ok(ProviderReadiness::InstalledAuthUnverified {
+                reason: format!("{name} has no dedicated auth probe"),
+            })
         }
         Ok(cli_output) => {
             let stderr = String::from_utf8_lossy(&cli_output.stderr);
@@ -262,8 +318,38 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_readiness_installed_auth_unverified() {
+        let status = ProviderReadiness::InstalledAuthUnverified {
+            reason: "no auth probe".to_owned(),
+        };
+        assert!(!status.is_ready());
+        assert!(status.is_installed());
+    }
+
+    #[test]
+    fn test_is_installed_for_ready() {
+        assert!(ProviderReadiness::Ready.is_installed());
+    }
+
+    #[test]
+    fn test_is_installed_for_not_ready() {
+        let status = ProviderReadiness::NotReady {
+            reason: "x".to_owned(),
+            action: "y".to_owned(),
+        };
+        assert!(!status.is_installed());
+    }
+
+    #[test]
     fn test_provider_readiness_display() {
         assert_eq!(format!("{}", ProviderReadiness::Ready), "ready");
+
+        let unverified = ProviderReadiness::InstalledAuthUnverified {
+            reason: "no auth probe".to_owned(),
+        };
+        let display = format!("{unverified}");
+        assert!(display.contains("installed"));
+        assert!(display.contains("auth unverified"));
 
         let not_ready = ProviderReadiness::NotReady {
             reason: "expired token".to_owned(),
@@ -281,5 +367,27 @@ mod tests {
             reason: "error".to_owned(),
         };
         assert!(format!("{unknown}").contains("error"));
+    }
+
+    #[test]
+    fn test_check_env_var_auth_found() {
+        std::env::set_var("TEST_EMBACLE_AUTH_KEY", "secret123");
+        let result = check_env_var_auth(&["NONEXISTENT_VAR", "TEST_EMBACLE_AUTH_KEY"]);
+        assert_eq!(result, Some("TEST_EMBACLE_AUTH_KEY"));
+        std::env::remove_var("TEST_EMBACLE_AUTH_KEY");
+    }
+
+    #[test]
+    fn test_check_env_var_auth_not_found() {
+        let result = check_env_var_auth(&["EMBACLE_TEST_DEFINITELY_NOT_SET_12345"]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_env_var_auth_empty_value_skipped() {
+        std::env::set_var("TEST_EMBACLE_EMPTY_KEY", "");
+        let result = check_env_var_auth(&["TEST_EMBACLE_EMPTY_KEY"]);
+        assert!(result.is_none());
+        std::env::remove_var("TEST_EMBACLE_EMPTY_KEY");
     }
 }
