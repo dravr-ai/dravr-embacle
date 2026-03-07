@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.0] — 2026-03-07
+
+### Added
+
+- feat: add InstalledAuthUnverified variant and env var auth checking
+- feat: enhance JSON schema validation with recursion, enum, and bounds
+- feat: add native tool calling types to core library
+
+### Fixed
+
+- fix: remove [Unreleased] section before v0.7.0 release
+- fix: use npm prefix -g to locate copilot binary on CI
+- fix: use npm bin -g to find copilot binary path on CI
+- fix: symlink copilot-linux-x64 binary to copilot on CI PATH
+- fix: use env var for secrets conditional in CI workflow
+- fix: wire COPILOT_GITHUB_TOKEN secret into CI for headless e2e tests
+- fix: CI now tests all workspace crates, fix workspace-wide clippy warnings
+- fix: ACP permission response prefers AllowAlways, never falls back to reject
+- fix: update AGENTS.md project overview to reflect full workspace scope
+- fix: default to claude-opus-4.6-fast, update Copilot fallback model list
+- fix: rewrite OpenCode NDJSON parser, add E2E test suite for all runners
+
+
+
 ## [0.6.0] — 2026-03-07
 
 ### Fixed
