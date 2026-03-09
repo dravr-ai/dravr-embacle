@@ -31,6 +31,66 @@
 //! # }
 //! ```
 //!
+//! ## Fallback Chains
+//!
+//! Try multiple providers in order — first success wins:
+//!
+//! ```rust,no_run
+//! use std::path::PathBuf;
+//! use embacle::{ClaudeCodeRunner, CopilotRunner, RunnerConfig};
+//! use embacle::fallback::FallbackProvider;
+//! use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
+//!
+//! # async fn example() -> Result<(), embacle::types::RunnerError> {
+//! let claude = ClaudeCodeRunner::new(RunnerConfig::new(PathBuf::from("claude")));
+//! let copilot = CopilotRunner::new(RunnerConfig::new(PathBuf::from("copilot"))).await;
+//!
+//! let provider = FallbackProvider::new(vec![
+//!     Box::new(claude),
+//!     Box::new(copilot),
+//! ])?;
+//!
+//! // If claude fails, copilot handles it — same interface
+//! let request = ChatRequest::new(vec![ChatMessage::user("Hello!")]);
+//! let response = provider.complete(&request).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Structured Output
+//!
+//! Schema-validated JSON from any provider, with retry on validation failure:
+//!
+//! ```rust,no_run
+//! use embacle::structured_output::{request_structured_output, StructuredOutputRequest};
+//! use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
+//! use serde_json::json;
+//!
+//! # async fn example(runner: &dyn LlmProvider) -> Result<(), embacle::types::RunnerError> {
+//! let schema = json!({
+//!     "type": "object",
+//!     "properties": {
+//!         "city": {"type": "string"},
+//!         "temperature": {"type": "number"}
+//!     },
+//!     "required": ["city", "temperature"]
+//! });
+//!
+//! let request = ChatRequest::new(vec![
+//!     ChatMessage::user("What's the weather in Paris?"),
+//! ]);
+//!
+//! let data = request_structured_output(
+//!     runner,
+//!     &StructuredOutputRequest { request, schema, max_retries: 2 },
+//! ).await?;
+//!
+//! assert!(data["city"].is_string());
+//! assert!(data["temperature"].is_number());
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Modules
 //!
 //! - [`types`] — Core types: `LlmProvider` trait, messages, requests, errors
