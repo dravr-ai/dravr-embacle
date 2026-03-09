@@ -565,7 +565,7 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Human-readable display name for the provider
-    fn display_name(&self) -> &'static str;
+    fn display_name(&self) -> &str;
 
     /// Provider capabilities (streaming, function calling, etc.)
     fn capabilities(&self) -> LlmCapabilities;

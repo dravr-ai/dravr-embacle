@@ -663,7 +663,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         "copilot_headless"
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         "GitHub Copilot (Headless)"
     }
 

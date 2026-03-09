@@ -146,7 +146,7 @@ impl LlmProvider for QualityGateProvider {
         self.inner.name()
     }
 
-    fn display_name(&self) -> &'static str {
+    fn display_name(&self) -> &str {
         self.inner.display_name()
     }
 
@@ -255,7 +255,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "test"
         }
-        fn display_name(&self) -> &'static str {
+        fn display_name(&self) -> &str {
             "Test Provider"
         }
         fn capabilities(&self) -> LlmCapabilities {

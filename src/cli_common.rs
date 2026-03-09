@@ -165,7 +165,7 @@ macro_rules! delegate_provider_base {
             $runner_name
         }
 
-        fn display_name(&self) -> &'static str {
+        fn display_name(&self) -> &str {
             $display_name
         }
 

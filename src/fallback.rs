@@ -28,7 +28,7 @@ use crate::types::{
 /// An empty vec is rejected with a config error.
 pub struct FallbackProvider {
     providers: Vec<Box<dyn LlmProvider>>,
-    display_name: &'static str,
+    display_name: String,
     combined_models: Vec<String>,
 }
 
@@ -46,10 +46,7 @@ impl FallbackProvider {
         }
 
         let names: Vec<&str> = providers.iter().map(|p| p.name()).collect();
-        // Leak once at construction so display_name() can return &'static str
-        // without allocating per call. FallbackProvider is typically long-lived.
-        let display_name: &'static str =
-            Box::leak(format!("Fallback ({})", names.join(", ")).into_boxed_str());
+        let display_name = format!("Fallback ({})", names.join(", "));
 
         // Deduplicated union of all available models
         let mut combined_models = Vec::new();
@@ -75,8 +72,8 @@ impl LlmProvider for FallbackProvider {
         "fallback"
     }
 
-    fn display_name(&self) -> &'static str {
-        self.display_name
+    fn display_name(&self) -> &str {
+        &self.display_name
     }
 
     fn capabilities(&self) -> LlmCapabilities {
@@ -202,7 +199,7 @@ mod tests {
         fn name(&self) -> &'static str {
             self.provider_name
         }
-        fn display_name(&self) -> &'static str {
+        fn display_name(&self) -> &str {
             self.display
         }
         fn capabilities(&self) -> LlmCapabilities {

@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use subtle::ConstantTimeEq;
 
 use crate::openai_types::ErrorResponse;
 
@@ -34,8 +35,9 @@ pub async fn require_auth(request: Request, next: Next) -> Response {
 
     match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
-            let token = &header["Bearer ".len()..];
-            if token == expected_key {
+            let token = &header.as_bytes()["Bearer ".len()..];
+            let expected = expected_key.as_bytes();
+            if token.ct_eq(expected).into() {
                 next.run(request).await
             } else {
                 auth_error("Invalid API key")
