@@ -9,10 +9,6 @@ Standalone Rust library that wraps AI CLI tools and SDKs as pluggable LLM provid
 
 Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to CLI tools that users already have installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
 
-## Tested With
-
-Embacle has been tested with [mirroir.dev](https://mirroir.dev), an MCP server for AI-powered iPhone automation.
-
 ## Supported Runners
 
 ### CLI Runners (subprocess-based)
@@ -260,6 +256,11 @@ All runners implement the same `LlmProvider` trait:
 - **`health_check()`** — verify the runner is available and authenticated
 
 For detailed API docs — fallback chains, structured output, agent loop, metrics, quality gates, tool simulation, and more — see [docs.rs/embacle](https://docs.rs/embacle).
+
+## Tested With
+
+Embacle has been tested with [mirroir.dev]([https://mirroir.dev](https://github.com/jfarcand/mirroir-mcp)), an MCP server for AI-powered iPhone automation.
+
 
 ## License
 
