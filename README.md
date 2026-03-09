@@ -38,7 +38,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-embacle = "0.7"
+embacle = "0.8"
 ```
 
 Use a CLI runner:
@@ -69,7 +69,7 @@ Enable the `copilot-headless` feature for ACP-based communication with SDK-manag
 
 ```toml
 [dependencies]
-embacle = { version = "0.7", features = ["copilot-headless"] }
+embacle = { version = "0.8", features = ["copilot-headless"] }
 ```
 
 ```rust
