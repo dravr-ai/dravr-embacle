@@ -63,12 +63,24 @@ pub enum StopField {
     Multiple(Vec<String>),
 }
 
+/// OpenAI-specified maximum number of stop sequences
+const MAX_STOP_SEQUENCES: usize = 4;
+
 impl StopField {
-    /// Convert to a Vec of strings regardless of the variant
+    /// Number of stop sequences in this field
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Multiple(v) => v.len(),
+        }
+    }
+
+    /// Convert to a Vec of strings regardless of the variant,
+    /// truncating to the OpenAI-specified maximum of 4 sequences
     pub fn into_vec(self) -> Vec<String> {
         match self {
             Self::Single(s) => vec![s],
-            Self::Multiple(v) => v,
+            Self::Multiple(v) => v.into_iter().take(MAX_STOP_SEQUENCES).collect(),
         }
     }
 }
@@ -699,6 +711,23 @@ mod tests {
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
         let stop = req.stop.expect("stop present");
         assert_eq!(stop.into_vec(), vec!["END", "STOP"]);
+    }
+
+    #[test]
+    fn stop_field_len() {
+        let single = StopField::Single("END".to_owned());
+        assert_eq!(single.len(), 1);
+        let multiple = StopField::Multiple(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()]);
+        assert_eq!(multiple.len(), 3);
+    }
+
+    #[test]
+    fn stop_field_into_vec_truncates_at_four() {
+        let oversized = StopField::Multiple((0..10).map(|i| format!("stop_{i}")).collect());
+        let result = oversized.into_vec();
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0], "stop_0");
+        assert_eq!(result[3], "stop_3");
     }
 
     #[test]

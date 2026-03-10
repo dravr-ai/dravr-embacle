@@ -54,6 +54,14 @@ pub async fn handle(
             return error_response(StatusCode::BAD_REQUEST, "top_p must be between 0.0 and 1.0");
         }
     }
+    if let Some(ref stop) = request.stop {
+        if stop.len() > 4 {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "stop must have at most 4 sequences",
+            );
+        }
+    }
 
     match request.model {
         ModelField::Multiple(ref models) if models.len() > 1 => {
