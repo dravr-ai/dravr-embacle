@@ -409,3 +409,38 @@ mod headless {
         }
     }
 }
+
+// ============================================================================
+// OpenAI API Runner (requires `openai-api` feature + live API key)
+// ============================================================================
+
+/// E2E test for `OpenAiApiRunner` against a live `OpenAI`-compatible endpoint.
+///
+/// Enable with: `EMBACLE_E2E_OPENAI_API=1`
+///
+/// Required env vars (example for Groq):
+///   `OPENAI_API_BASE_URL=https://api.groq.com/openai/v1`
+///   `OPENAI_API_KEY=gsk_...`
+///   `OPENAI_API_MODEL=llama-3.3-70b-versatile`
+#[cfg(feature = "openai-api")]
+mod openai_api_e2e {
+    use super::*;
+    use embacle::{OpenAiApiConfig, OpenAiApiRunner};
+
+    #[tokio::test]
+    async fn openai_api_complete_and_stream() {
+        if !runner_enabled("openai_api") {
+            eprintln!("  SKIP openai_api: set EMBACLE_E2E_OPENAI_API=1 to enable");
+            return;
+        }
+
+        let config = OpenAiApiConfig::from_env();
+        eprintln!(
+            "  openai_api: base_url={}, model={}",
+            config.base_url, config.model
+        );
+
+        let runner = OpenAiApiRunner::new(config).await;
+        test_provider_complete(&runner).await;
+    }
+}
