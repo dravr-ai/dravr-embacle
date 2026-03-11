@@ -38,14 +38,31 @@ Instead of integrating with LLM APIs directly (which require API keys, SDKs, and
 |--------|-------------|----------|
 | GitHub Copilot Headless | `copilot-headless` | NDJSON/JSON-RPC via `copilot --acp`, SDK-managed tool calling, streaming |
 
-## Quick Start
+## Install
 
-Add to your `Cargo.toml`:
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap dravr-ai/tap
+brew install embacle
+```
+
+This installs both `embacle-server` (OpenAI API + MCP) and `embacle-mcp` (standalone MCP).
+
+### Docker
+
+```bash
+docker pull ghcr.io/dravr-ai/embacle:latest
+```
+
+### Cargo (library)
 
 ```toml
 [dependencies]
-embacle = "0.9"
+embacle = "0.10"
 ```
+
+## Quick Start
 
 Use a CLI runner:
 
@@ -186,7 +203,7 @@ Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`)
 
 ## REST API Server (`embacle-server`)
 
-An OpenAI-compatible HTTP server that proxies requests to embacle runners. Any client that speaks the OpenAI chat completions API can use it without modification.
+An OpenAI-compatible HTTP server with built-in MCP support that proxies requests to embacle runners. Any client that speaks the OpenAI chat completions API or MCP protocol can use it without modification.
 
 ### Usage
 
@@ -205,6 +222,7 @@ embacle-server --provider claude_code --port 8080 --host 0.0.0.0
 | `POST` | `/v1/chat/completions` | Chat completion (streaming and non-streaming) |
 | `GET` | `/v1/models` | List available providers and models |
 | `GET` | `/health` | Per-provider readiness check |
+| `POST` | `/mcp` | MCP Streamable HTTP (JSON-RPC 2.0) |
 
 ### Model Routing
 

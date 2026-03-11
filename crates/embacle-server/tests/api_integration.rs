@@ -59,6 +59,9 @@ async fn send_and_parse(
 
 #[tokio::test]
 async fn health_returns_json_with_status_field() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
     let app = test_app();
 
     let response = app
@@ -87,6 +90,9 @@ async fn health_returns_json_with_status_field() {
 
 #[tokio::test]
 async fn health_providers_contains_all_ten() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
     let app = test_app();
 
     let response = app
@@ -122,6 +128,9 @@ async fn health_providers_contains_all_ten() {
 
 #[tokio::test]
 async fn models_returns_list_object() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
     let app = test_app();
 
     let response = app
@@ -716,4 +725,161 @@ async fn state_runner_creation_reflects_binary_availability() {
 fn resolve_binary_fails_for_missing_binary() {
     let result = embacle::discovery::resolve_binary("embacle_nonexistent_test_binary_xyz", None);
     assert!(result.is_err(), "expected error for missing binary");
+}
+
+// ============================================================================
+// MCP Endpoint
+// ============================================================================
+
+/// Build a POST /mcp request with a JSON-RPC body
+fn post_mcp(body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).expect("serialize")))
+        .expect("build request")
+}
+
+#[tokio::test]
+async fn mcp_initialize_returns_protocol_version() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "test-client", "version": "1.0" }
+        }
+    });
+
+    let (status, json) = send_and_parse(test_app(), post_mcp(&body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 1);
+    assert_eq!(json["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(json["result"]["serverInfo"]["name"], "embacle-server");
+    assert!(json["result"]["capabilities"]["tools"].is_object());
+}
+
+#[tokio::test]
+async fn mcp_tools_list_returns_registered_tools() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    });
+
+    let (status, json) = send_and_parse(test_app(), post_mcp(&body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let tools = json["result"]["tools"].as_array().expect("tools is array");
+    assert_eq!(tools.len(), 2, "expected prompt and list_models tools");
+
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"prompt"), "missing prompt tool");
+    assert!(names.contains(&"list_models"), "missing list_models tool");
+}
+
+#[tokio::test]
+async fn mcp_ping_returns_empty_object() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "ping"
+    });
+
+    let (status, json) = send_and_parse(test_app(), post_mcp(&body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["result"], serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn mcp_unknown_method_returns_error() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "nonexistent/method"
+    });
+
+    let (status, json) = send_and_parse(test_app(), post_mcp(&body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["error"]["code"], -32601);
+}
+
+#[tokio::test]
+async fn mcp_notification_returns_no_content() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+
+    let app = test_app();
+    let response = app.oneshot(post_mcp(&body)).await.expect("send request");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn mcp_invalid_json_returns_parse_error() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::remove_var("EMBACLE_API_KEY");
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from("not valid json"))
+        .expect("build request");
+
+    let (status, json) = send_and_parse(test_app(), request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["error"]["code"], -32700);
+}
+
+#[tokio::test]
+async fn mcp_auth_enforced_when_key_set() {
+    let _guard = ENV_MUTEX.lock().await;
+    std::env::set_var("EMBACLE_API_KEY", "mcp-test-key");
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "ping"
+    });
+
+    // No auth header → 401
+    let (status, _) = send_and_parse(test_app(), post_mcp(&body)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With auth header → 200
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer mcp-test-key")
+        .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+        .expect("build request");
+
+    let (status, json) = send_and_parse(test_app(), request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["result"], serde_json::json!({}));
+
+    std::env::remove_var("EMBACLE_API_KEY");
 }

@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod completions;
 pub mod health;
+pub mod mcp;
 pub mod models;
 pub mod openai_types;
 pub mod provider_resolver;

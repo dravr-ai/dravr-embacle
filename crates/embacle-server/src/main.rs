@@ -13,7 +13,7 @@ use embacle_server::router;
 use embacle_server::runner::{self, parse_runner_type};
 use embacle_server::state::ServerState;
 
-/// embacle-server — OpenAI-compatible REST API for embacle LLM runners
+/// embacle-server — OpenAI-compatible REST API + MCP server for embacle LLM runners
 #[derive(Parser)]
 #[command(name = "embacle-server", version, about)]
 struct Cli {
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         address = %addr,
         provider = %provider,
-        "Starting embacle REST API server"
+        "Starting embacle server (OpenAI API + MCP)"
     );
 
     axum::serve(listener, app)
