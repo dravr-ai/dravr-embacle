@@ -130,7 +130,7 @@ async fn handle_single(
     chat_request.temperature = request.temperature;
     chat_request.max_tokens = request.max_tokens;
     chat_request.top_p = request.top_p;
-    chat_request.stop = request.stop.clone().map(StopField::into_vec);
+    chat_request.stop = request.stop.as_ref().map(StopField::to_bounded_vec);
     chat_request.response_format = request.response_format.as_ref().map(server_format_to_core);
     chat_request.tools = request
         .tools
@@ -287,7 +287,7 @@ async fn handle_multiplex(
     validation_request.temperature = request.temperature;
     validation_request.max_tokens = request.max_tokens;
     validation_request.top_p = request.top_p;
-    validation_request.stop = request.stop.clone().map(StopField::into_vec);
+    validation_request.stop = request.stop.as_ref().map(StopField::to_bounded_vec);
     validation_request.response_format =
         request.response_format.as_ref().map(server_format_to_core);
 
@@ -316,7 +316,7 @@ async fn handle_multiplex(
         temperature: request.temperature,
         max_tokens: request.max_tokens,
         top_p: request.top_p,
-        stop: request.stop.clone().map(StopField::into_vec),
+        stop: request.stop.as_ref().map(StopField::to_bounded_vec),
         response_format: request.response_format.as_ref().map(server_format_to_core),
     };
     match engine.execute(&messages, &providers, &params).await {

@@ -68,19 +68,33 @@ const MAX_STOP_SEQUENCES: usize = 4;
 
 impl StopField {
     /// Number of stop sequences in this field
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             Self::Single(_) => 1,
             Self::Multiple(v) => v.len(),
         }
     }
 
+    /// Returns true if no stop sequences are present
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Multiple(v) if v.is_empty())
+    }
+
     /// Convert to a Vec of strings regardless of the variant,
-    /// truncating to the OpenAI-specified maximum of 4 sequences
+    /// truncating to the `OpenAI`-specified maximum of 4 sequences
     pub fn into_vec(self) -> Vec<String> {
         match self {
             Self::Single(s) => vec![s],
             Self::Multiple(v) => v.into_iter().take(MAX_STOP_SEQUENCES).collect(),
+        }
+    }
+
+    /// Clone only the bounded subset (up to 4 sequences) without copying
+    /// the entire input — safe for use with user-controlled data
+    pub fn to_bounded_vec(&self) -> Vec<String> {
+        match self {
+            Self::Single(s) => vec![s.clone()],
+            Self::Multiple(v) => v.iter().take(MAX_STOP_SEQUENCES).cloned().collect(),
         }
     }
 }
