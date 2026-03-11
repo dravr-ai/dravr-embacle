@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "agent-client-protocol-schema"
-version = "0.11.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f833f2ec0d0ac6d68cbd0c1e2e02642876291048f45fb9772ff617ac5c34ef3"
+checksum = "e0497b9a95a404e35799904835c57c6f8c69b9d08ccfd3cb5b7d746425cd6789"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -302,7 +302,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embacle"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1519,9 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.26.0"
+version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
  "getrandom 0.4.2",

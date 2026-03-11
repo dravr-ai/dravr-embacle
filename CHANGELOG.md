@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.0] — 2026-03-11
+
+### Added
+
+- feat: add with_client() constructor for HTTP client injection
+- feat: add OpenAI-compatible HTTP API client runner (openai-api feature) SSE streaming, tool calling, model discovery, 30 unit tests
+- feat: add Docker image with ghcr.io release workflow
+
+### Fixed
+
+- fix: resolve 3 CodeQL uncontrolled-allocation-size alerts in stop field Use bounded to_bounded_vec() instead of clone+truncate to avoid copying unbounded user input
+- fix: revert accidental version bump in Cargo.toml files
+- fix: update OpenAI API default model to gpt-5.4
+- fix: resolve 9 CodeQL security alerts (stop bounds, CI permissions)
+
+
+
 ## [0.8.1] — 2026-03-09
 
 
