@@ -39,7 +39,9 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
-    /// Default LLM provider (claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli)
+    /// Default LLM provider
+    ///
+    /// Valid: claude, copilot, cursor-agent, opencode, gemini, codex, goose, cline, continue, warp, kiro
     #[arg(long, default_value = "copilot")]
     provider: String,
 }
