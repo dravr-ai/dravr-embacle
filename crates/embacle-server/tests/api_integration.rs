@@ -89,7 +89,7 @@ async fn health_returns_json_with_status_field() {
 }
 
 #[tokio::test]
-async fn health_providers_contains_all_ten() {
+async fn health_providers_contains_all_eleven() {
     let _guard = ENV_MUTEX.lock().await;
     std::env::remove_var("EMBACLE_API_KEY");
 
@@ -114,7 +114,7 @@ async fn health_providers_contains_all_ten() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
 
     let providers = json["providers"].as_object().expect("providers is object");
-    assert_eq!(providers.len(), 10, "expected 10 providers");
+    assert_eq!(providers.len(), 11, "expected 11 providers");
 
     // Each provider should have a status string
     for (name, value) in providers {
