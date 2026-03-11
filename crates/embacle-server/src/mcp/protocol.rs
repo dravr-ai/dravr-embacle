@@ -4,6 +4,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+//! JSON-RPC 2.0 wire types for the MCP protocol.
+//!
+//! Defines request/response structures, error codes, and MCP-specific types
+//! (`InitializeResult`, `ToolDefinition`, `CallToolResult`) used by the
+//! server's MCP Streamable HTTP transport.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

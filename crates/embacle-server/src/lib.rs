@@ -4,6 +4,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+//! # embacle-server
+//!
+//! OpenAI-compatible REST API server with built-in MCP support, proxying
+//! requests to embacle LLM runners.
+//!
+//! ## Endpoints
+//!
+//! - `POST /v1/chat/completions` — chat completion (streaming and non-streaming)
+//! - `GET /v1/models` — list available providers and models
+//! - `GET /health` — per-provider readiness check
+//! - `POST /mcp` — MCP Streamable HTTP (JSON-RPC 2.0)
+//!
+//! ## Modules
+//!
+//! - [`completions`] — chat completion handler with multiplex fan-out
+//! - [`models`] — model listing endpoint
+//! - [`health`] — provider health checks
+//! - [`mcp`] — MCP Streamable HTTP transport (JSON-RPC 2.0)
+//! - [`auth`] — optional bearer token authentication
+//! - [`streaming`] — SSE streaming for OpenAI-format responses
+//! - [`provider_resolver`] — `provider:model` string routing
+//! - [`router`] — Axum router wiring all endpoints
+//! - [`state`] — shared server state and runner cache
+//! - [`runner`] — runner factory bridging to embacle core
+
 pub mod auth;
 pub mod completions;
 pub mod health;

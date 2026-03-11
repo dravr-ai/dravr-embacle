@@ -4,6 +4,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+//! MCP tool definitions for the unified server.
+//!
+//! Each tool implements [`McpTool`] and is registered in the [`ToolRegistry`]
+//! at server startup. Tools are stateless — provider routing is determined
+//! per-request from tool arguments.
+//!
+//! ## Available Tools
+//!
+//! - [`prompt::Prompt`] — send chat messages to an LLM provider
+//! - [`list_models::ListModels`] — enumerate available providers
+
 pub mod list_models;
 pub mod prompt;
 

@@ -4,6 +4,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+//! Axum handler for MCP Streamable HTTP at `POST /mcp`.
+//!
+//! Parses the request body as JSON-RPC 2.0, dispatches to [`McpServer`],
+//! and returns the response as either plain JSON or a single SSE event
+//! (when the client sends `Accept: text/event-stream`).
+
 use std::convert::Infallible;
 use std::sync::Arc;
 

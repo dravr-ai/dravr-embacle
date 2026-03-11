@@ -8,11 +8,16 @@
 //!
 //! Standalone library providing pluggable [`LlmProvider`](types::LlmProvider)
 //! implementations that delegate to CLI tools (Claude Code, Copilot, Cursor Agent,
-//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue, Warp) and ACP (Copilot Headless) for LLM completions.
+//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue, Warp), an HTTP API client
+//! (OpenAI-compatible), and ACP (Copilot Headless) for LLM completions.
 //!
 //! CLI runners wrap a binary, build prompts from [`ChatMessage`](types::ChatMessage)
 //! sequences, parse JSON output, and manage session continuity. The Copilot Headless
 //! runner communicates via NDJSON-framed JSON-RPC with `copilot --acp`.
+//!
+//! Two companion binary crates build on this library:
+//! - **`embacle-server`** — OpenAI-compatible REST API + MCP Streamable HTTP on a single port
+//! - **`embacle-mcp`** — standalone MCP server over stdio or HTTP
 //!
 //! ## Quick Start
 //!
@@ -93,22 +98,35 @@
 //!
 //! ## Modules
 //!
-//! - [`types`] — Core types: `LlmProvider` trait, messages, requests, errors
-//! - [`config`] — Runner types and configuration
-//! - [`agent`] — Configurable agent loop with multi-turn tool calling
-//! - [`fallback`] — Provider fallback chains (try providers in order)
-//! - [`mcp_tool_bridge`] — MCP tool definition to text-tool-simulation bridge
-//! - [`metrics`] — Cost/latency normalization decorator
-//! - [`quality_gate`] — Response quality validation with retry
-//! - [`structured_output`] — Schema-enforced JSON output from any provider
-//! - [`compat`] — Version compatibility and capability detection
-//! - [`container`] — Container-based execution backend
-//! - [`discovery`] — Automatic binary detection on the host
+//! ### Core
+//!
+//! - [`types`] — `LlmProvider` trait, messages, requests, responses, errors
+//! - [`config`] — `RunnerConfig`, `CliRunnerType` enum
+//! - [`factory`] — Runner factory, provider parsing, `ALL_PROVIDERS` constant
+//!
+//! ### Higher-Level Features
+//!
+//! - [`agent`] — Multi-turn agent loop with configurable tool calling
+//! - [`fallback`] — Ordered provider failover chains
+//! - [`metrics`] — Latency, token, and error tracking decorator
+//! - [`quality_gate`] — Response validation with retry on refusal
+//! - [`structured_output`] — Schema-enforced JSON extraction from any provider
+//! - [`tool_simulation`] — XML-based text tool calling for CLI runners without native function calling
+//! - [`mcp_tool_bridge`] — MCP tool definitions to text-tool-simulation bridge
 //! - [`capability_guard`] — Request/provider capability validation
+//!
+//! ### Runner Infrastructure
+//!
 //! - [`auth`] — Readiness and authentication checking
+//! - [`discovery`] — Automatic binary detection on the host
 //! - [`process`] — Subprocess spawning with timeout and output limits
 //! - [`sandbox`] — Environment variable whitelisting and working directory control
 //! - [`prompt`] — Prompt building from `ChatMessage` slices
+//! - [`compat`] — Version compatibility and capability detection
+//! - [`container`] — Container-based execution backend
+//!
+//! ### CLI Runners
+//!
 //! - [`claude_code`] — Claude Code CLI runner
 //! - [`copilot`] — GitHub Copilot CLI runner
 //! - [`cursor_agent`] — Cursor Agent CLI runner
@@ -119,8 +137,11 @@
 //! - [`cline_cli`] — Cline CLI runner
 //! - [`continue_cli`] — Continue CLI runner
 //! - [`warp_cli`] — Warp terminal `oz` CLI runner
+//!
+//! ### Feature-Flagged Runners
+//!
 //! - `openai_api` — OpenAI-compatible HTTP API client (requires `openai-api` feature)
-//! - `copilot_headless` — GitHub Copilot Headless (ACP) runner (requires `copilot-headless` feature)
+//! - `copilot_headless` — GitHub Copilot Headless ACP runner (requires `copilot-headless` feature)
 
 /// Core types: traits, messages, requests, responses, and errors
 pub mod types;

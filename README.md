@@ -92,7 +92,7 @@ Enable the `openai-api` feature for HTTP-based communication with any OpenAI-com
 
 ```toml
 [dependencies]
-embacle = { version = "0.9", features = ["openai-api"] }
+embacle = { version = "0.10", features = ["openai-api"] }
 ```
 
 ```rust
@@ -130,7 +130,7 @@ Enable the `copilot-headless` feature for ACP-based communication with SDK-manag
 
 ```toml
 [dependencies]
-embacle = { version = "0.9", features = ["copilot-headless"] }
+embacle = { version = "0.10", features = ["copilot-headless"] }
 ```
 
 ```rust
@@ -223,6 +223,29 @@ embacle-server --provider claude_code --port 8080 --host 0.0.0.0
 | `GET` | `/v1/models` | List available providers and models |
 | `GET` | `/health` | Per-provider readiness check |
 | `POST` | `/mcp` | MCP Streamable HTTP (JSON-RPC 2.0) |
+
+### MCP Streamable HTTP
+
+The server also speaks [MCP](https://modelcontextprotocol.io/) at `POST /mcp`, accepting JSON-RPC 2.0 requests. Any MCP-compatible client can connect over HTTP instead of stdio.
+
+| Tool | Description |
+|------|-------------|
+| `prompt` | Send chat messages to an LLM provider, with optional `model` routing (e.g. `copilot:gpt-4o`) |
+| `list_models` | List available providers and the server's default |
+
+```bash
+# MCP initialize handshake
+curl http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl"}}}'
+
+# Call the prompt tool
+curl http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prompt","arguments":{"messages":[{"role":"user","content":"hello"}]}}}'
+```
+
+Add `Accept: text/event-stream` to receive SSE-wrapped responses instead of plain JSON.
 
 ### Model Routing
 
@@ -362,7 +385,7 @@ Your Application
             │   └── embacle-mcp         → JSON-RPC 2.0 over stdio or HTTP/SSE
             │
             ├── REST API Server (separate binary crate)
-            │   └── embacle-server      → OpenAI-compatible HTTP, SSE streaming, multiplex
+            │   └── embacle-server      → OpenAI-compatible HTTP, MCP Streamable HTTP, SSE streaming, multiplex
             │
             └── Tool Simulation (text-based tool calling for CLI runners)
                 └── execute_with_text_tools()  → catalog injection, XML parsing, tool loop
@@ -377,7 +400,7 @@ For detailed API docs — fallback chains, structured output, agent loop, metric
 
 ## Tested With
 
-Embacle has been tested with [mirroir.dev]([https://mirroir.dev](https://github.com/jfarcand/mirroir-mcp)), an MCP server for AI-powered iPhone automation.
+Embacle has been tested with [mirroir.dev](https://github.com/jfarcand/mirroir-mcp), an MCP server for AI-powered iPhone automation.
 
 
 ## License
