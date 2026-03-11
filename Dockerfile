@@ -4,7 +4,7 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release --bin embacle-server --bin embacle-mcp
+RUN cargo build --release -p embacle-server -p embacle-mcp
 
 FROM node:22-bookworm-slim
 

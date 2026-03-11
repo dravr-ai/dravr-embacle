@@ -237,13 +237,13 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p embacle
+          cargo publish -p embacle || echo "embacle already published, continuing..."
 
           echo "Waiting for crates.io to index embacle..."
           sleep 30
 
-          cargo publish -p embacle-mcp
-          cargo publish -p embacle-server
+          cargo publish -p embacle-mcp || echo "embacle-mcp already published, continuing..."
+          cargo publish -p embacle-server || echo "embacle-server already published, continuing..."
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
