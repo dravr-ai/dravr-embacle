@@ -52,7 +52,7 @@ use crate::types::{
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// Default model identifier
-const DEFAULT_MODEL: &str = "gpt-4o";
+const DEFAULT_MODEL: &str = "gpt-5.4";
 
 /// Default HTTP request timeout in seconds
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
