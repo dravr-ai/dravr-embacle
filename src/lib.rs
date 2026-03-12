@@ -8,7 +8,7 @@
 //!
 //! Standalone library providing pluggable [`LlmProvider`](types::LlmProvider)
 //! implementations that delegate to CLI tools (Claude Code, Copilot, Cursor Agent,
-//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue, Warp), an HTTP API client
+//! `OpenCode`, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo Code), an HTTP API client
 //! (OpenAI-compatible), and ACP (Copilot Headless) for LLM completions.
 //!
 //! CLI runners wrap a binary, build prompts from [`ChatMessage`](types::ChatMessage)
@@ -114,6 +114,8 @@
 //! - [`tool_simulation`] — XML-based text tool calling for CLI runners without native function calling
 //! - [`mcp_tool_bridge`] — MCP tool definitions to text-tool-simulation bridge
 //! - [`capability_guard`] — Request/provider capability validation
+//! - [`guardrail`] — Pluggable pre/post request validation middleware
+//! - [`cache`] — Response caching with TTL and capacity limits
 //!
 //! ### Runner Infrastructure
 //!

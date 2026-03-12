@@ -2,20 +2,28 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Version | Supported |
+|---------|-----------|
+| 0.10.x  | Yes       |
+| < 0.10  | No        |
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+If you discover a security vulnerability in embacle, please report it responsibly:
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+1. **Do not** open a public GitHub issue
+2. Email **security@dravr.ai** with a description of the vulnerability
+3. Include steps to reproduce, if possible
+4. You will receive an acknowledgment within 48 hours
+
+We will work with you to understand the issue and coordinate a fix before any public disclosure.
+
+## Security Model
+
+Embacle delegates LLM execution to CLI tools installed on the host. The security boundary is:
+
+- **Subprocess isolation** — each request spawns a sandboxed child process with environment whitelisting and working directory control
+- **No secrets in core** — the library stores no API keys or tokens; authentication is handled by the underlying CLI tools
+- **Bearer auth** — `embacle-server` supports optional `EMBACLE_API_KEY` for request authentication
+- **Input validation** — all user inputs are validated at system boundaries before passing to subprocesses
+- **No shell expansion** — commands are built with explicit argument arrays, never shell strings

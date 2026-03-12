@@ -1,5 +1,5 @@
-# ABOUTME: Standalone LLM runner library wrapping AI CLI tools and SDKs as pluggable providers
-# ABOUTME: Wraps CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex) and ACP (Copilot Headless)
+# ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools as pluggable providers
+# ABOUTME: Wraps CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo) and ACP
 
 [workspace]
 members = [".", "crates/embacle-mcp", "crates/embacle-server"]
@@ -9,14 +9,18 @@ name = "embacle"
 version = "0.10.2"
 edition = "2021"
 license = "Apache-2.0"
-description = "LLM runner library — wraps AI CLI tools and SDKs as pluggable LLM providers"
+description = "LLM runner library — wraps 12 AI CLI tools as pluggable LLM providers with agent loop, guardrails, and cost tracking"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 homepage = "https://github.com/dravr-ai/dravr-embacle"
 documentation = "https://docs.rs/embacle"
-keywords = ["llm", "cli", "ai", "claude", "gemini"]
+keywords = ["llm", "cli", "ai", "mcp", "openai"]
 categories = ["command-line-utilities", "api-bindings"]
 readme = "README.md"
 exclude = [".claude/", ".githooks/", ".github/", "scripts/", "AGENTS.md", "crates/"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []

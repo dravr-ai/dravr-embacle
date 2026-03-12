@@ -1,6 +1,6 @@
 # embacle-mcp
 
-MCP server binary that exposes [embacle](https://github.com/dravr-ai/dravr-embacle) LLM runners via the [Model Context Protocol](https://modelcontextprotocol.io/). Any MCP-compatible client (Claude Desktop, editors, custom agents) can connect to use all embacle providers.
+MCP server library and binary that exposes [embacle](https://github.com/dravr-ai/dravr-embacle) LLM runners via the [Model Context Protocol](https://modelcontextprotocol.io/). Any MCP-compatible client (Claude Desktop, editors, custom agents) can connect to use all embacle providers.
 
 ## Install
 
@@ -23,7 +23,7 @@ embacle-mcp --transport http --host 0.0.0.0 --port 3000 --provider claude_code
 | Tool | Description |
 |------|-------------|
 | `get_provider` | Get active LLM provider and list available providers |
-| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`) |
+| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`, `warp_cli`, `kiro_cli`, `kilo_cli`) |
 | `get_model` | Get current model and list available models for the active provider |
 | `set_model` | Set the model for subsequent requests (pass null to reset to default) |
 | `get_multiplex_provider` | Get providers configured for multiplex dispatch |
@@ -57,6 +57,9 @@ At least one supported CLI tool must be installed and authenticated:
 - `goose` (Goose CLI)
 - `cline` (Cline CLI)
 - `cn` (Continue CLI)
+- `oz` (Warp)
+- `kiro-cli` (Kiro CLI)
+- `kilo` (Kilo Code)
 
 ## License
 

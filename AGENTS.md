@@ -31,24 +31,28 @@
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `embacle` | library | Core: 9 CLI runners, ACP headless runner, agent loop, decorators, tool simulation |
-| `embacle-mcp` | binary | MCP server (stdio/HTTP) exposing all runners via JSON-RPC 2.0 |
-| `embacle-server` | binary | OpenAI-compatible REST API with SSE streaming, multiplex fan-out, bearer auth |
+| `embacle` | library | Core: 12 CLI runners, HTTP API runner, ACP headless runner, agent loop, decorators, tool simulation |
+| `embacle-mcp` | library + binary | MCP server (stdio/HTTP) exposing all runners via JSON-RPC 2.0 |
+| `embacle-server` | binary | Unified OpenAI-compatible REST API + MCP server with SSE streaming, multiplex fan-out, bearer auth |
 
 ### CLI Runners (subprocess per request)
-Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue
+Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo Code
 
 ### ACP Runner (feature flag: `copilot-headless`)
 `CopilotHeadlessRunner` — NDJSON/JSON-RPC via `copilot --acp` with SDK-managed tool calling
 
 ### Higher-Level Features
 - **Agent loop** (`AgentExecutor`) — multi-turn tool calling with configurable max turns
-- **Fallback chains** (`FallbackProvider`) — ordered failover across providers
-- **Metrics** (`MetricsProvider`) — latency, token, and error tracking decorator
+- **Fallback chains** (`FallbackProvider`) — ordered failover with retry and exponential backoff
+- **Metrics** (`MetricsProvider`) — latency, token, cost tracking, and OTel metrics export
 - **Quality gate** (`QualityGateProvider`) — response validation with retry on refusal
+- **Guardrails** (`GuardrailProvider`) — pluggable pre/post request validation middleware
+- **Cache** (`CacheProvider`) — response caching with TTL and capacity limits
 - **Structured output** — schema-validated JSON extraction from any provider
 - **MCP tool bridge** — connect MCP tool servers to CLI runners via text-based tool loop
 - **Text tool simulation** — XML-based `<tool_call>` protocol for CLI runners without native function calling
+- **Config file** — TOML-based declarative configuration (feature flag: `config-file`)
+- **Capability guard** — request/provider capability validation
 
 ### Architecture
 ```
@@ -56,6 +60,7 @@ src/
 ├── lib.rs                  # Re-exports all runners + shared types
 ├── types.rs                # LlmProvider trait, RunnerError, ChatRequest, ChatResponse, etc.
 ├── config.rs               # RunnerConfig, CliRunnerType enum
+├── factory.rs              # Runner factory, provider parsing, ALL_PROVIDERS
 ├── cli_common.rs           # CliRunnerBase + macro for runner boilerplate
 ├── auth.rs                 # Auth checking + readiness state
 ├── discovery.rs            # Binary auto-detection via `which`
@@ -66,28 +71,35 @@ src/
 ├── compat.rs               # CLI compatibility detection
 ├── stream.rs               # GuardedStream for child process lifecycle
 ├── agent.rs                # Multi-turn agent loop with tool calling
-├── fallback.rs             # Ordered provider failover
-├── metrics.rs              # Latency/token tracking decorator
+├── fallback.rs             # Ordered provider failover with retry
+├── metrics.rs              # Latency/token/cost tracking decorator
 ├── quality_gate.rs         # Response validation with retry
+├── guardrail.rs            # Pluggable pre/post request validation
+├── cache.rs                # Response caching with TTL and capacity
 ├── structured_output.rs    # Schema-enforced JSON extraction
 ├── tool_simulation.rs      # Text-based tool calling (XML protocol)
 ├── mcp_tool_bridge.rs      # MCP tool definitions ↔ text tool loop
 ├── capability_guard.rs     # Request/provider capability validation
+├── config_file.rs          # TOML config loading (feature: config-file)
 ├── claude_code.rs          # ClaudeCodeRunner
 ├── copilot.rs              # CopilotRunner + model discovery
 ├── copilot_headless.rs     # CopilotHeadlessRunner (ACP/NDJSON)
 ├── copilot_headless_config.rs  # Headless config from env vars
 ├── cursor_agent.rs         # CursorAgentRunner
 ├── opencode.rs             # OpenCodeRunner (NDJSON)
+├── openai_api.rs           # OpenAiApiRunner (feature: openai-api)
 ├── gemini_cli.rs           # GeminiCliRunner
 ├── codex_cli.rs            # CodexCliRunner (JSONL)
 ├── goose_cli.rs            # GooseCliRunner
 ├── cline_cli.rs            # ClineCliRunner (NDJSON)
-└── continue_cli.rs         # ContinueCliRunner
+├── continue_cli.rs         # ContinueCliRunner
+├── warp_cli.rs             # WarpCliRunner (NDJSON)
+├── kiro_cli.rs             # KiroCliRunner
+└── kilo_cli.rs             # KiloCliRunner (NDJSON)
 
 crates/
-├── embacle-mcp/            # MCP server binary (stdio + HTTP/SSE)
-└── embacle-server/         # OpenAI-compatible REST API server
+├── embacle-mcp/            # MCP server library + binary (stdio + HTTP/SSE)
+└── embacle-server/         # Unified OpenAI-compatible REST API + MCP server
 
 tests/
 └── e2e.rs                  # E2E integration tests (env-gated per runner)
@@ -99,7 +111,7 @@ tests/
 - **Subprocess-based** — wraps CLI tools via `tokio::process::Command`
 - **ACP via feature flag** — `copilot-headless` adds NDJSON/JSON-RPC transport for `copilot --acp`
 - **No HTTP dependencies in core** — only tokio (process), serde, tracing, which, bitflags
-- **Workspace binaries** — MCP server and REST API are separate crates with their own dependencies
+- **Workspace crates** — MCP server (library + binary) and unified REST API + MCP server (binary) are separate crates
 
 ## Git Hooks - MANDATORY for ALL AI Agents
 

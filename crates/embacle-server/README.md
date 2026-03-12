@@ -1,6 +1,6 @@
 # embacle-server
 
-OpenAI-compatible REST API server that proxies requests to [embacle](https://github.com/dravr-ai/dravr-embacle) LLM runners. Any client that speaks the OpenAI chat completions API can use it without modification.
+Unified OpenAI-compatible REST API + MCP server that proxies requests to [embacle](https://github.com/dravr-ai/dravr-embacle) LLM runners. Any client that speaks the OpenAI chat completions API or MCP protocol can use it without modification.
 
 ## Install
 
@@ -16,6 +16,9 @@ embacle-server
 
 # Specify provider and bind address
 embacle-server --provider claude_code --port 8080 --host 0.0.0.0
+
+# MCP-only mode via stdio (for editor/client integration)
+embacle-server --transport stdio --provider copilot
 ```
 
 ## Endpoints
@@ -25,6 +28,7 @@ embacle-server --provider claude_code --port 8080 --host 0.0.0.0
 | `POST` | `/v1/chat/completions` | Chat completion (streaming and non-streaming) |
 | `GET` | `/v1/models` | List available providers and models |
 | `GET` | `/health` | Per-provider readiness check |
+| `POST` | `/mcp` | MCP Streamable HTTP (JSON-RPC 2.0) |
 
 ## Model Routing
 
@@ -75,6 +79,9 @@ At least one supported CLI tool must be installed and authenticated:
 - `goose` (Goose CLI)
 - `cline` (Cline CLI)
 - `cn` (Continue CLI)
+- `oz` (Warp)
+- `kiro-cli` (Kiro CLI)
+- `kilo` (Kilo Code)
 
 ## License
 

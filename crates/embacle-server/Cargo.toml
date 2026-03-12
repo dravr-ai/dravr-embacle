@@ -9,10 +9,10 @@ name = "embacle-server"
 version = "0.10.2"
 edition = "2021"
 license = "Apache-2.0"
-description = "OpenAI-compatible REST API server for embacle LLM runners"
+description = "Unified OpenAI-compatible REST API + MCP server for embacle LLM runners"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 readme = "README.md"
-keywords = ["openai", "llm", "cli", "ai", "rest"]
+keywords = ["openai", "llm", "mcp", "ai", "rest"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [lib]

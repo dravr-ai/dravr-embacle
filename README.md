@@ -5,7 +5,7 @@
 [![CI](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml/badge.svg)](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 
-Standalone Rust library that wraps AI CLI tools and SDKs as pluggable LLM providers.
+Standalone Rust library that wraps 12 AI CLI tools and SDKs as pluggable LLM providers.
 
 Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to CLI tools that users already have installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
 
@@ -25,6 +25,8 @@ Instead of integrating with LLM APIs directly (which require API keys, SDKs, and
 | Cline CLI | `cline` | NDJSON output, streaming, session resume via task IDs |
 | Continue CLI | `cn` | JSON output, single-shot completions |
 | Warp | `oz` | NDJSON output, conversation resume |
+| Kiro CLI | `kiro-cli` | ANSI-stripped text output, auto model selection |
+| Kilo Code | `kilo` | NDJSON output, streaming, token tracking, 500+ models via Kilo Gateway |
 
 ### HTTP API Runners (feature-flagged)
 
@@ -162,7 +164,7 @@ The headless runner spawns `copilot --acp` per request and communicates via NDJS
 
 ## MCP Server (`embacle-mcp`)
 
-A standalone MCP server binary that exposes embacle runners via the [Model Context Protocol](https://modelcontextprotocol.io/). Connect any MCP-compatible client (Claude Desktop, editors, custom agents) to use all embacle providers.
+A library and standalone binary that exposes embacle runners via the [Model Context Protocol](https://modelcontextprotocol.io/). Connect any MCP-compatible client (Claude Desktop, editors, custom agents) to use all embacle providers.
 
 ### Usage
 
@@ -179,7 +181,7 @@ embacle-mcp --transport http --host 0.0.0.0 --port 3000 --provider claude_code
 | Tool | Description |
 |------|-------------|
 | `get_provider` | Get active LLM provider and list available providers |
-| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`, `warp_cli`, `openai_api`) |
+| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`, `warp_cli`, `kiro_cli`, `kilo_cli`) |
 | `get_model` | Get current model and list available models for the active provider |
 | `set_model` | Set the model for subsequent requests (pass null to reset to default) |
 | `get_multiplex_provider` | Get providers configured for multiplex dispatch |
@@ -203,7 +205,7 @@ Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`)
 
 ## REST API Server (`embacle-server`)
 
-An OpenAI-compatible HTTP server with built-in MCP support that proxies requests to embacle runners. Any client that speaks the OpenAI chat completions API or MCP protocol can use it without modification.
+A unified OpenAI-compatible HTTP server with built-in MCP support that proxies requests to embacle runners. Any client that speaks the OpenAI chat completions API or MCP protocol can use it without modification. Supports `--transport stdio` for MCP-only mode (editor integration).
 
 ### Usage
 
@@ -213,6 +215,9 @@ embacle-server
 
 # Specify provider and port
 embacle-server --provider claude_code --port 8080 --host 0.0.0.0
+
+# MCP-only mode via stdio (for editor/client integration)
+embacle-server --transport stdio --provider copilot
 ```
 
 ### Endpoints
@@ -359,7 +364,9 @@ Your Application
             │   ├── GooseCliRunner      → spawns `goose run --quiet --no-session`
             │   ├── ClineCliRunner      → spawns `cline task --json --act --yolo`
             │   ├── ContinueCliRunner   → spawns `cn -p --format json`
-            │   └── WarpCliRunner       → spawns `oz agent run --prompt "..." --output-format json`
+            │   ├── WarpCliRunner       → spawns `oz agent run --prompt "..." --output-format json`
+            │   ├── KiroCliRunner       → spawns `kiro-cli send "prompt"`
+            │   └── KiloCliRunner       → spawns `kilo run --auto --format json`
             │
             ├── HTTP API Runners (behind feature flag)
             │   └── OpenAiApiRunner       → reqwest to any OpenAI-compatible endpoint
@@ -368,9 +375,11 @@ Your Application
             │   └── CopilotHeadlessRunner → NDJSON/JSON-RPC to `copilot --acp`
             │
             ├── Provider Decorators (composable wrappers)
-            │   ├── FallbackProvider    → ordered chain, first success wins
-            │   ├── MetricsProvider     → latency, token, and error tracking
-            │   └── QualityGateProvider → response validation with retry
+            │   ├── FallbackProvider    → ordered chain with retry and exponential backoff
+            │   ├── MetricsProvider     → latency, token, and cost tracking
+            │   ├── QualityGateProvider → response validation with retry
+            │   ├── GuardrailProvider   → pluggable pre/post request validation
+            │   └── CacheProvider       → response caching with TTL and capacity
             │
             ├── Agent Loop
             │   └── AgentExecutor       → multi-turn tool calling with configurable max turns
@@ -381,10 +390,10 @@ Your Application
             ├── MCP Tool Bridge
             │   └── McpToolBridge       → MCP tool definitions ↔ text-based tool loop
             │
-            ├── MCP Server (separate binary crate)
+            ├── MCP Server (library + binary crate)
             │   └── embacle-mcp         → JSON-RPC 2.0 over stdio or HTTP/SSE
             │
-            ├── REST API Server (separate binary crate)
+            ├── Unified REST API + MCP Server (binary crate)
             │   └── embacle-server      → OpenAI-compatible HTTP, MCP Streamable HTTP, SSE streaming, multiplex
             │
             └── Tool Simulation (text-based tool calling for CLI runners)

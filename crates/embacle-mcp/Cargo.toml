@@ -12,7 +12,7 @@ license = "Apache-2.0"
 description = "MCP server for embacle LLM runners — expose AI CLI tools via Model Context Protocol"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 readme = "README.md"
-keywords = ["mcp", "llm", "cli", "ai"]
+keywords = ["mcp", "llm", "cli", "ai", "json-rpc"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lib]

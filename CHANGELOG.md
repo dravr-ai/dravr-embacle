@@ -2,13 +2,34 @@
 
 ## [0.10.2] — 2026-03-11
 
+### Added
 
+- feat: add Kiro CLI runner as 11th LLM provider
+- feat: add retry with exponential backoff to FallbackProvider
+- feat: add TOML config file loading behind config-file feature flag
+- feat: add cost tracking, response cache, and OTel metrics export
+- feat: add guardrail middleware and cross-decorator scenario tests
+- feat: unify embacle-server with embacle-mcp into single binary
+- feat: add Kilo Code CLI runner with NDJSON parsing and streaming
+
+### Fixed
+
+- fix: resolve clippy doc_markdown warnings for provider help strings
+- fix: add permissions block to homebrew workflow (code scanning alert #10)
+- fix: filter artifact download to exclude Docker buildx cache
 
 ## [0.10.1] — 2026-03-11
 
+### Fixed
 
+- fix: Docker build uses -p flag for workspace binary targets
 
 ## [0.10.0] — 2026-03-11
+
+### Added
+
+- feat: add MCP Streamable HTTP to embacle-server, Homebrew tap with CI
+- docs: add OpenAI API runner section to README
 
 
 
