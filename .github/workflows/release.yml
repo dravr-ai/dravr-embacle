@@ -66,8 +66,9 @@ jobs:
           sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
 
           # Update dependency version references in subcrates
-          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\" }/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\" }/" crates/embacle-mcp/Cargo.toml
-          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\" }/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\" }/" crates/embacle-server/Cargo.toml
+          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/embacle-mcp/Cargo.toml
+          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
+          sed -i "s/embacle-mcp = { path = \"\.\.\/embacle-mcp\", version = \"[^\"]*\"/embacle-mcp = { path = \"\.\.\/embacle-mcp\", version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
 
       - name: Update lockfile
         run: cargo generate-lockfile
@@ -243,6 +244,10 @@ jobs:
           sleep 30
 
           cargo publish -p embacle-mcp || echo "embacle-mcp already published, continuing..."
+
+          echo "Waiting for crates.io to index embacle-mcp..."
+          sleep 30
+
           cargo publish -p embacle-server || echo "embacle-server already published, continuing..."
 
       - name: Download all artifacts

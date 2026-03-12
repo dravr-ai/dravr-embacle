@@ -15,6 +15,10 @@ readme = "README.md"
 keywords = ["mcp", "llm", "cli", "ai"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "embacle_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "embacle-mcp"
 path = "src/main.rs"

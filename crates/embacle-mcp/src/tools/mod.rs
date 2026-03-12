@@ -35,6 +35,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn McpTool>>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     /// Create an empty registry
     pub fn new() -> Self {

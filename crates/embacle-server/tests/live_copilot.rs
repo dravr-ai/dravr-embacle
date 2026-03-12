@@ -9,11 +9,12 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use embacle::config::CliRunnerType;
+use embacle_mcp::ServerState;
 use http_body_util::BodyExt;
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use embacle_server::router;
-use embacle_server::state::ServerState;
 
 /// Check whether live tests should run.
 /// Returns `true` when `EMBACLE_LIVE_TESTS=1` and the copilot binary is on PATH.
@@ -27,7 +28,7 @@ fn skip_unless_live() -> bool {
 
 /// Build a test app wired to the Copilot provider
 fn live_app() -> axum::Router {
-    let state = Arc::new(ServerState::new(CliRunnerType::Copilot));
+    let state = Arc::new(RwLock::new(ServerState::new(CliRunnerType::Copilot)));
     router::build(state)
 }
 

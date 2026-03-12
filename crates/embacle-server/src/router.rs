@@ -13,7 +13,6 @@ use axum::Router;
 use crate::auth;
 use crate::completions;
 use crate::health;
-use crate::mcp;
 use crate::models;
 use crate::state::SharedState;
 
@@ -23,18 +22,18 @@ use crate::state::SharedState;
 /// - `POST /v1/chat/completions` — Chat completion (streaming and non-streaming)
 /// - `GET /v1/models` — List available models
 /// - `GET /health` — Provider health check
-/// - `POST /mcp` — MCP Streamable HTTP (JSON-RPC 2.0)
+/// - `POST /mcp` — MCP Streamable HTTP (JSON-RPC 2.0, via embacle-mcp)
 ///
 /// The auth middleware is applied to all routes. It only enforces
 /// authentication when `EMBACLE_API_KEY` is set.
 pub fn build(state: SharedState) -> Router {
-    let mcp_server = Arc::new(mcp::server::McpServer::new(
+    let mcp_server = Arc::new(embacle_mcp::McpServer::new(
         Arc::clone(&state),
-        mcp::tools::build_tool_registry(),
+        embacle_mcp::build_tool_registry(),
     ));
 
     let mcp_router = Router::new()
-        .route("/mcp", post(mcp::handler::handle_mcp_post))
+        .route("/mcp", post(embacle_mcp::transport::http::handle_mcp_post))
         .with_state(mcp_server);
 
     Router::new()

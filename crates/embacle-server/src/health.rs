@@ -25,6 +25,7 @@ use crate::state::SharedState;
 pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
     let mut providers = HashMap::new();
     let mut any_ready = false;
+    let state_guard = state.read().await;
 
     for &provider in ALL_PROVIDERS {
         let binary_name = provider.binary_name();
@@ -36,7 +37,7 @@ pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
             continue;
         }
 
-        match state.get_runner(provider).await {
+        match state_guard.get_runner(provider).await {
             Ok(runner) => match runner.health_check().await {
                 Ok(true) => {
                     providers.insert(provider.to_string(), "ready".to_owned());

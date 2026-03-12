@@ -208,8 +208,8 @@ cargo test <test_name_pattern> -- --nocapture
 # 1. Format code
 cargo fmt
 
-# 2. Clippy (single crate, no workspace)
-cargo clippy --all-targets
+# 2. Clippy with CI-matching strictness (warnings = errors)
+RUSTFLAGS=-Dwarnings cargo clippy --all-targets -- -D warnings
 
 # 3. Run targeted tests
 cargo test <test_pattern> -- --nocapture
@@ -218,7 +218,7 @@ cargo test <test_pattern> -- --nocapture
 #### Tier 3: Full Validation (before merge)
 ```bash
 cargo fmt
-cargo clippy --all-targets
+RUSTFLAGS=-Dwarnings cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 

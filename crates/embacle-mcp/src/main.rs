@@ -4,24 +4,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-mod protocol;
-mod runner;
-mod server;
-mod state;
-mod tools;
-mod transport;
-
 use std::sync::Arc;
 
 use clap::Parser;
 use embacle::types::RunnerError;
+use embacle_mcp::runner::{parse_runner_type, valid_provider_names};
+use embacle_mcp::transport::McpTransport;
+use embacle_mcp::{McpServer, ServerState};
 use tokio::sync::RwLock;
-
-use runner::parse_runner_type;
-use server::McpServer;
-use state::ServerState;
-use tools::build_tool_registry;
-use transport::McpTransport;
 
 /// embacle-mcp — MCP server exposing embacle LLM runners via Model Context Protocol
 #[derive(Parser)]
@@ -63,12 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         RunnerError::config(format!(
             "Unknown provider: {}. Valid: {}",
             cli.provider,
-            runner::valid_provider_names()
+            valid_provider_names()
         ))
     })?;
 
     let state = Arc::new(RwLock::new(ServerState::new(provider)));
-    let registry = build_tool_registry();
+    let registry = embacle_mcp::build_tool_registry();
     let server = Arc::new(McpServer::new(state, registry));
 
     tracing::info!(
@@ -79,10 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.transport.as_str() {
         "stdio" => {
-            transport::stdio::StdioTransport.serve(server).await?;
+            embacle_mcp::transport::stdio::StdioTransport
+                .serve(server)
+                .await?;
         }
         "http" => {
-            transport::http::HttpTransport::new(cli.host, cli.port)
+            embacle_mcp::transport::http::HttpTransport::new(cli.host, cli.port)
                 .serve(server)
                 .await?;
         }

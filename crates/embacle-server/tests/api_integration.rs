@@ -1,5 +1,5 @@
-// ABOUTME: Integration tests for the embacle-server REST API endpoints
-// ABOUTME: Exercises router, auth middleware, health, models, and completions via axum test client
+// ABOUTME: Integration tests for the embacle-server REST API and MCP endpoints
+// ABOUTME: Exercises router, auth middleware, health, models, completions, and MCP via axum test client
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -9,12 +9,12 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use embacle::config::CliRunnerType;
+use embacle_mcp::ServerState;
 use http_body_util::BodyExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
 
 use embacle_server::router;
-use embacle_server::state::ServerState;
 
 /// Guards access to `EMBACLE_API_KEY` env var across parallel tests.
 /// All tests that read or mutate this env var must hold this lock.
@@ -32,7 +32,7 @@ fn post_completions(body: &serde_json::Value) -> Request<Body> {
 
 /// Build a test app with the given default provider
 fn test_app() -> axum::Router {
-    let state = Arc::new(ServerState::new(CliRunnerType::Copilot));
+    let state = Arc::new(RwLock::new(ServerState::new(CliRunnerType::Copilot)));
     router::build(state)
 }
 
@@ -696,9 +696,9 @@ async fn provider_resolver_round_trip_via_completions() {
 // ============================================================================
 
 #[tokio::test]
-async fn state_default_provider_accessible() {
+async fn state_active_provider_accessible() {
     let state = ServerState::new(CliRunnerType::ClaudeCode);
-    assert_eq!(state.default_provider(), CliRunnerType::ClaudeCode);
+    assert_eq!(state.active_provider(), CliRunnerType::ClaudeCode);
 }
 
 #[tokio::test]
@@ -728,7 +728,7 @@ fn resolve_binary_fails_for_missing_binary() {
 }
 
 // ============================================================================
-// MCP Endpoint
+// MCP Endpoint (via embacle-mcp)
 // ============================================================================
 
 /// Build a POST /mcp request with a JSON-RPC body
@@ -762,7 +762,7 @@ async fn mcp_initialize_returns_protocol_version() {
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 1);
     assert_eq!(json["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(json["result"]["serverInfo"]["name"], "embacle-server");
+    assert_eq!(json["result"]["serverInfo"]["name"], "embacle-mcp");
     assert!(json["result"]["capabilities"]["tools"].is_object());
 }
 
@@ -781,11 +781,22 @@ async fn mcp_tools_list_returns_registered_tools() {
     assert_eq!(status, StatusCode::OK);
 
     let tools = json["result"]["tools"].as_array().expect("tools is array");
-    assert_eq!(tools.len(), 2, "expected prompt and list_models tools");
+    assert_eq!(tools.len(), 7, "expected 7 MCP tools from embacle-mcp");
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"prompt"), "missing prompt tool");
-    assert!(names.contains(&"list_models"), "missing list_models tool");
+    assert!(names.contains(&"get_provider"), "missing get_provider tool");
+    assert!(names.contains(&"set_provider"), "missing set_provider tool");
+    assert!(names.contains(&"get_model"), "missing get_model tool");
+    assert!(names.contains(&"set_model"), "missing set_model tool");
+    assert!(
+        names.contains(&"get_multiplex_provider"),
+        "missing get_multiplex_provider tool"
+    );
+    assert!(
+        names.contains(&"set_multiplex_provider"),
+        "missing set_multiplex_provider tool"
+    );
 }
 
 #[tokio::test]

@@ -88,7 +88,8 @@ async fn handle_single(
         .as_ref()
         .is_some_and(|t| !t.is_empty() && !is_tool_choice_none(request.tool_choice.as_ref()));
 
-    let resolved = resolve_model(model_str, state.default_provider());
+    let state_guard = state.read().await;
+    let resolved = resolve_model(model_str, state_guard.active_provider());
     debug!(
         provider = %resolved.runner_type,
         model = ?resolved.model,
@@ -97,10 +98,11 @@ async fn handle_single(
         "Dispatching completion"
     );
 
-    let runner = match state.get_runner(resolved.runner_type).await {
+    let runner = match state_guard.get_runner(resolved.runner_type).await {
         Ok(r) => r,
         Err(e) => return runner_error_to_response(&e),
     };
+    drop(state_guard);
 
     let strict = request.strict_capabilities.unwrap_or_else(|| {
         std::env::var("EMBACLE_STRICT_CAPS")
@@ -273,7 +275,8 @@ async fn handle_multiplex(
             .unwrap_or(false)
     });
 
-    let default_provider = state.default_provider();
+    let state_guard = state.read().await;
+    let default_provider = state_guard.active_provider();
     let resolved: Vec<_> = models
         .iter()
         .map(|m| resolve_model(m, default_provider))
@@ -292,7 +295,7 @@ async fn handle_multiplex(
         request.response_format.as_ref().map(server_format_to_core);
 
     for &provider_type in &providers {
-        let runner = match state.get_runner(provider_type).await {
+        let runner = match state_guard.get_runner(provider_type).await {
             Ok(r) => r,
             Err(e) => return runner_error_to_response(&e),
         };
@@ -311,6 +314,7 @@ async fn handle_multiplex(
         }
     }
 
+    drop(state_guard);
     let engine = MultiplexEngine::new(state);
     let params = MultiplexParams {
         temperature: request.temperature,
@@ -605,6 +609,7 @@ fn runner_error_to_response(err: &RunnerError) -> Response {
         ErrorKind::Timeout => (StatusCode::GATEWAY_TIMEOUT, "timeout_error"),
         ErrorKind::ExternalService => (StatusCode::BAD_GATEWAY, "external_service_error"),
         ErrorKind::Config => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+        ErrorKind::Guardrail => (StatusCode::BAD_REQUEST, "guardrail_error"),
         ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
 

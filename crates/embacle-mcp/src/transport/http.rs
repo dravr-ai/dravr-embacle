@@ -65,7 +65,7 @@ impl McpTransport for HttpTransport {
 ///
 /// Parses the body as JSON-RPC, dispatches to the MCP server, and returns
 /// the response as JSON or SSE depending on the Accept header.
-async fn handle_mcp_post(
+pub async fn handle_mcp_post(
     State(server): State<Arc<McpServer>>,
     headers: HeaderMap,
     body: String,
