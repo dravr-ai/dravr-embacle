@@ -31,7 +31,7 @@ struct Cli {
 
     /// Default LLM provider
     ///
-    /// Valid: claude, copilot, cursor-agent, opencode, gemini, codex, goose, cline, continue, warp, kiro
+    /// Valid: claude, copilot, cursor-agent, opencode, gemini, codex, goose, cline, continue, warp, kiro, kilo
     #[arg(long, default_value = "copilot")]
     provider: String,
 }
