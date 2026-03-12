@@ -46,6 +46,8 @@ pub enum ErrorKind {
     AuthFailure,
     /// Configuration error
     Config,
+    /// Guardrail policy violation (request or response rejected)
+    Guardrail,
 }
 
 impl ErrorKind {
@@ -105,6 +107,14 @@ impl RunnerError {
     pub fn timeout(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Timeout,
+            message: message.into(),
+        }
+    }
+
+    /// Create a guardrail violation error
+    pub fn guardrail(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Guardrail,
             message: message.into(),
         }
     }
@@ -614,6 +624,7 @@ mod tests {
         assert!(!ErrorKind::BinaryNotFound.is_transient());
         assert!(!ErrorKind::AuthFailure.is_transient());
         assert!(!ErrorKind::Config.is_transient());
+        assert!(!ErrorKind::Guardrail.is_transient());
     }
 
     #[test]

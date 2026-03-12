@@ -185,6 +185,8 @@ pub mod fallback;
 pub mod gemini_cli;
 /// Goose CLI runner
 pub mod goose_cli;
+/// Pluggable guardrail middleware for request/response validation
+pub mod guardrail;
 /// Kiro CLI runner
 pub mod kiro_cli;
 /// MCP tool definition to text-tool-simulation bridge
@@ -251,6 +253,10 @@ pub use factory::{
 pub use fallback::{FallbackProvider, RetryConfig};
 pub use gemini_cli::GeminiCliRunner;
 pub use goose_cli::GooseCliRunner;
+pub use guardrail::{
+    ContentLengthGuardrail, Guardrail, GuardrailProvider, GuardrailViolation, PiiScrubGuardrail,
+    TopicFilterGuardrail,
+};
 pub use kiro_cli::KiroCliRunner;
 pub use mcp_tool_bridge::{McpToolDefinition, McpToolExecutor};
 pub use metrics::{
