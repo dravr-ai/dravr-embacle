@@ -138,6 +138,7 @@
 //! - [`continue_cli`] — Continue CLI runner
 //! - [`warp_cli`] — Warp terminal `oz` CLI runner
 //! - [`kiro_cli`] — Kiro CLI runner
+//! - [`kilo_cli`] — Kilo Code CLI runner
 //!
 //! ### Feature-Flagged Runners
 //!
@@ -187,6 +188,8 @@ pub mod gemini_cli;
 pub mod goose_cli;
 /// Pluggable guardrail middleware for request/response validation
 pub mod guardrail;
+/// Kilo Code CLI runner
+pub mod kilo_cli;
 /// Kiro CLI runner
 pub mod kiro_cli;
 /// MCP tool definition to text-tool-simulation bridge
@@ -257,6 +260,7 @@ pub use guardrail::{
     ContentLengthGuardrail, Guardrail, GuardrailProvider, GuardrailViolation, PiiScrubGuardrail,
     TopicFilterGuardrail,
 };
+pub use kilo_cli::KiloCliRunner;
 pub use kiro_cli::KiroCliRunner;
 pub use mcp_tool_bridge::{McpToolDefinition, McpToolExecutor};
 pub use metrics::{

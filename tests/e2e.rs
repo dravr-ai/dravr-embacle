@@ -323,6 +323,22 @@ async fn e2e_kiro_cli() {
     test_provider_stream(&runner).await;
 }
 
+#[tokio::test]
+async fn e2e_kilo_cli() {
+    if !runner_enabled("kilo_cli") {
+        eprintln!("SKIP e2e_kilo_cli (set EMBACLE_E2E_KILO_CLI=1)");
+        return;
+    }
+    let path = resolve_or_skip(CliRunnerType::KiloCli);
+    if !path.exists() {
+        return;
+    }
+    let config = RunnerConfig::new(path).with_timeout(E2E_TIMEOUT);
+    let runner = embacle::KiloCliRunner::new(config);
+    test_provider_complete(&runner).await;
+    test_provider_stream(&runner).await;
+}
+
 // ============================================================================
 // Copilot Headless (ACP) tests — requires copilot-headless feature
 // ============================================================================

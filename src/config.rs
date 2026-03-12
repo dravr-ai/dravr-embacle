@@ -38,6 +38,8 @@ pub enum CliRunnerType {
     WarpCli,
     /// Kiro CLI (`kiro-cli`)
     KiroCli,
+    /// Kilo Code CLI (`kilo`)
+    KiloCli,
 }
 
 impl CliRunnerType {
@@ -56,6 +58,7 @@ impl CliRunnerType {
             Self::ContinueCli => "cn",
             Self::WarpCli => "oz",
             Self::KiroCli => "kiro-cli",
+            Self::KiloCli => "kilo",
         }
     }
 
@@ -74,6 +77,7 @@ impl CliRunnerType {
             Self::ContinueCli => "CONTINUE_CLI_BINARY",
             Self::WarpCli => "WARP_CLI_BINARY",
             Self::KiroCli => "KIRO_CLI_BINARY",
+            Self::KiloCli => "KILO_CLI_BINARY",
         }
     }
 }
@@ -92,6 +96,7 @@ impl fmt::Display for CliRunnerType {
             Self::ContinueCli => write!(f, "continue_cli"),
             Self::WarpCli => write!(f, "warp_cli"),
             Self::KiroCli => write!(f, "kiro_cli"),
+            Self::KiloCli => write!(f, "kilo_cli"),
         }
     }
 }
@@ -282,6 +287,7 @@ mod tests {
         assert_eq!(CliRunnerType::ContinueCli.binary_name(), "cn");
         assert_eq!(CliRunnerType::WarpCli.binary_name(), "oz");
         assert_eq!(CliRunnerType::KiroCli.binary_name(), "kiro-cli");
+        assert_eq!(CliRunnerType::KiloCli.binary_name(), "kilo");
     }
 
     #[test]
@@ -313,6 +319,7 @@ mod tests {
         );
         assert_eq!(CliRunnerType::WarpCli.env_override_key(), "WARP_CLI_BINARY");
         assert_eq!(CliRunnerType::KiroCli.env_override_key(), "KIRO_CLI_BINARY");
+        assert_eq!(CliRunnerType::KiloCli.env_override_key(), "KILO_CLI_BINARY");
     }
 
     #[test]
@@ -328,5 +335,6 @@ mod tests {
         assert_eq!(format!("{}", CliRunnerType::ContinueCli), "continue_cli");
         assert_eq!(format!("{}", CliRunnerType::WarpCli), "warp_cli");
         assert_eq!(format!("{}", CliRunnerType::KiroCli), "kiro_cli");
+        assert_eq!(format!("{}", CliRunnerType::KiloCli), "kilo_cli");
     }
 }

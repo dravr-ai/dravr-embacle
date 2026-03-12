@@ -26,6 +26,7 @@ const CLINE_CLI_MIN_VERSION: &str = "2.0.0";
 const CONTINUE_CLI_MIN_VERSION: &str = "1.0.0";
 const WARP_CLI_MIN_VERSION: &str = "0.1.0";
 const KIRO_CLI_MIN_VERSION: &str = "1.0.0";
+const KILO_CLI_MIN_VERSION: &str = "7.0.0";
 
 /// Detected capabilities of a CLI runner binary
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +117,8 @@ async fn detect_version(
         | CliRunnerType::ClineCli
         | CliRunnerType::ContinueCli
         | CliRunnerType::WarpCli
-        | CliRunnerType::KiroCli => "--version",
+        | CliRunnerType::KiroCli
+        | CliRunnerType::KiloCli => "--version",
     };
 
     let output = Command::new(binary_path)
@@ -186,6 +188,7 @@ const fn minimum_version(runner_type: CliRunnerType) -> (u32, u32, u32) {
         CliRunnerType::ContinueCli => parse_const_version(CONTINUE_CLI_MIN_VERSION),
         CliRunnerType::WarpCli => parse_const_version(WARP_CLI_MIN_VERSION),
         CliRunnerType::KiroCli => parse_const_version(KIRO_CLI_MIN_VERSION),
+        CliRunnerType::KiloCli => parse_const_version(KILO_CLI_MIN_VERSION),
     }
 }
 
@@ -236,11 +239,12 @@ const fn capabilities_for_runner(runner_type: CliRunnerType) -> (bool, bool, boo
         CliRunnerType::ClaudeCode => (true, true, true, true),
         // Copilot: plain text output, line-by-line streaming, no --system-prompt, no session resume
         CliRunnerType::Copilot => (false, true, false, false),
-        // Cursor Agent, Gemini CLI, Goose CLI, Cline CLI: JSON + streaming, no system prompt, session resume
+        // Cursor Agent, Gemini CLI, Goose CLI, Cline CLI, Kilo CLI: JSON + streaming, no system prompt, session resume
         CliRunnerType::CursorAgent
         | CliRunnerType::GeminiCli
         | CliRunnerType::GooseCli
-        | CliRunnerType::ClineCli => (true, true, false, true),
+        | CliRunnerType::ClineCli
+        | CliRunnerType::KiloCli => (true, true, false, true),
         // OpenCode, Continue CLI, Warp oz: JSON output, no streaming, session resume
         CliRunnerType::OpenCode | CliRunnerType::ContinueCli | CliRunnerType::WarpCli => {
             (true, false, false, true)
@@ -330,6 +334,15 @@ mod tests {
         let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::OpenCode);
         assert!(json);
         assert!(!stream);
+        assert!(!sys);
+        assert!(resume);
+    }
+
+    #[test]
+    fn test_capabilities_kilo_cli() {
+        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::KiloCli);
+        assert!(json);
+        assert!(stream);
         assert!(!sys);
         assert!(resume);
     }

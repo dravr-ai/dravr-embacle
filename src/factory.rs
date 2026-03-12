@@ -11,8 +11,8 @@ use crate::discovery::resolve_binary;
 use crate::types::{LlmProvider, RunnerError};
 use crate::{
     ClaudeCodeRunner, ClineCliRunner, CodexCliRunner, ContinueCliRunner, CopilotRunner,
-    CursorAgentRunner, GeminiCliRunner, GooseCliRunner, KiroCliRunner, OpenCodeRunner,
-    WarpCliRunner,
+    CursorAgentRunner, GeminiCliRunner, GooseCliRunner, KiloCliRunner, KiroCliRunner,
+    OpenCodeRunner, WarpCliRunner,
 };
 
 /// Create an `LlmProvider` instance for the given runner type
@@ -45,6 +45,7 @@ pub async fn create_runner(
         CliRunnerType::ContinueCli => Box::new(ContinueCliRunner::new(config)),
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
+        CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
     };
 
     Ok(runner)
@@ -70,6 +71,7 @@ pub async fn create_runner_with_config(
         CliRunnerType::ContinueCli => Box::new(ContinueCliRunner::new(config)),
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
+        CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
     }
 }
 
@@ -86,6 +88,7 @@ pub const ALL_PROVIDERS: &[CliRunnerType] = &[
     CliRunnerType::ContinueCli,
     CliRunnerType::WarpCli,
     CliRunnerType::KiroCli,
+    CliRunnerType::KiloCli,
 ];
 
 /// Parse a provider name string into a `CliRunnerType`
@@ -107,13 +110,14 @@ pub fn parse_runner_type(s: &str) -> Option<CliRunnerType> {
         }
         "warp" | "warp_cli" | "warpcli" | "warp-cli" | "oz" => Some(CliRunnerType::WarpCli),
         "kiro" | "kiro_cli" | "kirocli" | "kiro-cli" => Some(CliRunnerType::KiroCli),
+        "kilo" | "kilo_cli" | "kilocli" | "kilo-cli" | "kilocode" => Some(CliRunnerType::KiloCli),
         _ => None,
     }
 }
 
 /// Format the list of valid provider names for error messages
 pub const fn valid_provider_names() -> &'static str {
-    "claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli"
+    "claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
 }
 
 #[cfg(test)]
@@ -154,6 +158,7 @@ mod tests {
         );
         assert_eq!(parse_runner_type("warp_cli"), Some(CliRunnerType::WarpCli));
         assert_eq!(parse_runner_type("kiro_cli"), Some(CliRunnerType::KiroCli));
+        assert_eq!(parse_runner_type("kilo_cli"), Some(CliRunnerType::KiloCli));
     }
 
     #[test]
@@ -176,6 +181,9 @@ mod tests {
         assert_eq!(parse_runner_type("oz"), Some(CliRunnerType::WarpCli));
         assert_eq!(parse_runner_type("kiro"), Some(CliRunnerType::KiroCli));
         assert_eq!(parse_runner_type("kiro-cli"), Some(CliRunnerType::KiroCli));
+        assert_eq!(parse_runner_type("kilo"), Some(CliRunnerType::KiloCli));
+        assert_eq!(parse_runner_type("kilo-cli"), Some(CliRunnerType::KiloCli));
+        assert_eq!(parse_runner_type("kilocode"), Some(CliRunnerType::KiloCli));
     }
 
     #[test]
@@ -194,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn all_providers_has_eleven_entries() {
-        assert_eq!(ALL_PROVIDERS.len(), 11);
+    fn all_providers_has_twelve_entries() {
+        assert_eq!(ALL_PROVIDERS.len(), 12);
     }
 }
