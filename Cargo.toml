@@ -6,7 +6,7 @@ members = [".", "crates/embacle-mcp", "crates/embacle-server"]
 
 [package]
 name = "embacle"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "LLM runner library — wraps 12 AI CLI tools as pluggable LLM providers with agent loop, guardrails, and cost tracking"

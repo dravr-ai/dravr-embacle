@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0] — 2026-03-12
+
+### Added
+
+- feat: add Kilo Code CLI runner with NDJSON parsing and streaming
+- feat: unify embacle-server with embacle-mcp into single binary
+- feat: add guardrail middleware and cross-decorator scenario tests GuardrailProvider with 3 built-in guards, ScriptedProvider, 7 scenarios
+- feat: add cost tracking, response cache, and OTel metrics export TokenPricing/PricingTable, CacheProvider, otel feature flag with instruments
+- feat: add TOML config file loading behind config-file feature flag Declarative provider, fallback, alias setup via embacle.toml or ~/.config/embacle/
+- feat: add retry with exponential backoff to FallbackProvider Add ErrorKind::is_transient(), RetryConfig, FallbackProvider::with_retry()
+- feat: add Kiro CLI runner as 11th LLM provider
+
+### Fixed
+
+- fix: add kilo to --provider help text in server and mcp binaries
+- fix: add permissions block to homebrew workflow
+- fix: resolve clippy doc_markdown warnings for provider help strings
+- fix: update health endpoint test to expect 11 providers
+
+
+
 ## [0.10.2] — 2026-03-11
 
 ### Added
