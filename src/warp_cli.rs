@@ -16,7 +16,7 @@ use tracing::instrument;
 
 use crate::config::RunnerConfig;
 use crate::process::run_cli_command;
-use crate::prompt::build_prompt;
+use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 
 /// Default model for the Warp `oz` CLI
@@ -149,8 +149,9 @@ impl LlmProvider for WarpCliRunner {
 
     #[instrument(skip_all, fields(runner = "warp_cli"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prompt = build_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt);
+        let prepared = prepare_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt);
 
         if let Some(model) = &request.model {
             if let Some(cid) = self.base.get_session(model).await {

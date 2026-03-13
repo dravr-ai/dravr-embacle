@@ -1,12 +1,124 @@
 // ABOUTME: Prompt construction from ChatMessage sequences for CLI invocations
-// ABOUTME: Extracts system messages and builds role-prefixed prompt strings
+// ABOUTME: Extracts system messages, builds role-prefixed prompt strings, materializes images to temp files
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-use tracing::debug;
+use std::fmt::Write as FmtWrite;
+use std::io::Write;
+use std::path::PathBuf;
 
-use crate::types::{ChatMessage, MessageRole};
+use base64::Engine;
+use tracing::{debug, warn};
+
+use crate::types::{ChatMessage, ImagePart, MessageRole, RunnerError};
+
+/// Prompt with materialized image files for CLI runners
+///
+/// Holds the built prompt string and an optional temp directory containing
+/// image files decoded from base64. The temp directory is automatically
+/// cleaned up when this struct is dropped, so it must be kept alive until
+/// the CLI subprocess finishes reading the files.
+pub struct PreparedPrompt {
+    /// The prompt text, with image file path references injected for any attached images
+    pub prompt: String,
+    /// Temp directory holding decoded image files (cleaned up on drop)
+    pub image_dir: Option<tempfile::TempDir>,
+}
+
+/// File extension for a given MIME type
+fn mime_to_extension(mime_type: &str) -> &str {
+    match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "bin",
+    }
+}
+
+/// Decode a base64-encoded image and write it to a file in the given directory
+fn write_image_file(
+    dir: &std::path::Path,
+    image: &ImagePart,
+    index: usize,
+) -> Result<PathBuf, RunnerError> {
+    let ext = mime_to_extension(&image.mime_type);
+    let path = dir.join(format!("{index}.{ext}"));
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .map_err(|e| RunnerError::internal(format!("failed to decode base64 image data: {e}")))?;
+
+    let mut file = std::fs::File::create(&path)
+        .map_err(|e| RunnerError::internal(format!("failed to create temp image file: {e}")))?;
+    file.write_all(&decoded)
+        .map_err(|e| RunnerError::internal(format!("failed to write temp image file: {e}")))?;
+
+    debug!(path = %path.display(), size = decoded.len(), mime = %image.mime_type, "Materialized image to temp file");
+    Ok(path)
+}
+
+/// Materialize images from messages into temp files
+///
+/// Returns rewritten messages (with file path references appended to content)
+/// and a `TempDir` handle that must be kept alive until the CLI subprocess finishes.
+fn materialize_images(
+    messages: &[ChatMessage],
+) -> Result<(Vec<ChatMessage>, Option<tempfile::TempDir>), RunnerError> {
+    let has_any_images = messages
+        .iter()
+        .any(|m| m.images.as_ref().is_some_and(|imgs| !imgs.is_empty()));
+
+    if !has_any_images {
+        return Ok((messages.to_vec(), None));
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("embacle-images-")
+        .tempdir()
+        .map_err(|e| RunnerError::internal(format!("failed to create temp dir for images: {e}")))?;
+
+    let mut rewritten = Vec::with_capacity(messages.len());
+    let mut file_index: usize = 0;
+
+    for msg in messages {
+        let images = msg.images.as_ref().filter(|imgs| !imgs.is_empty());
+
+        if msg.role != MessageRole::User || images.is_none() {
+            rewritten.push(msg.clone());
+            continue;
+        }
+
+        let images = images.expect("checked above");
+        let mut file_refs = Vec::with_capacity(images.len());
+
+        for image in images {
+            let path = write_image_file(temp_dir.path(), image, file_index)?;
+            file_refs.push(path);
+            file_index += 1;
+        }
+
+        let mut content = msg.content.clone();
+        content.push_str("\n\n[Attached images — read these files to view them]");
+        for path in &file_refs {
+            let _ = write!(content, "\n- {}", path.display());
+        }
+
+        let mut rewritten_msg = ChatMessage::user(content);
+        // Preserve the original images field (downstream code may still want it)
+        rewritten_msg.images.clone_from(&msg.images);
+        rewritten.push(rewritten_msg);
+
+        debug!(
+            image_count = file_refs.len(),
+            dir = %temp_dir.path().display(),
+            "Materialized images for user message"
+        );
+    }
+
+    Ok((rewritten, Some(temp_dir)))
+}
 
 /// Build a single prompt string from a slice of chat messages
 ///
@@ -33,6 +145,42 @@ pub fn build_prompt(messages: &[ChatMessage]) -> String {
         "Built prompt from messages"
     );
     prompt
+}
+
+/// Build a prompt with images materialized to temp files
+///
+/// If any user messages contain attached images, they are decoded from base64,
+/// written to a temp directory, and file path references are appended to the
+/// message content. The returned `PreparedPrompt` holds the temp directory
+/// handle — keep it alive until the CLI subprocess finishes.
+///
+/// # Errors
+///
+/// Returns an error if image decoding or temp file creation fails.
+pub fn prepare_prompt(messages: &[ChatMessage]) -> Result<PreparedPrompt, RunnerError> {
+    let (rewritten, image_dir) = materialize_images(messages)?;
+    let prompt = build_prompt(&rewritten);
+    if image_dir.is_some() {
+        debug!("Built prompt with materialized images");
+    }
+    Ok(PreparedPrompt { prompt, image_dir })
+}
+
+/// Build a prompt with images materialized, excluding system messages
+///
+/// Combines [`materialize_images`] with the system-message filtering of
+/// [`build_user_prompt`]. Use when the CLI accepts a separate `--system-prompt` flag.
+///
+/// # Errors
+///
+/// Returns an error if image decoding or temp file creation fails.
+pub fn prepare_user_prompt(messages: &[ChatMessage]) -> Result<PreparedPrompt, RunnerError> {
+    let (rewritten, image_dir) = materialize_images(messages)?;
+    let prompt = build_user_prompt(&rewritten);
+    if image_dir.is_some() {
+        debug!("Built user prompt with materialized images");
+    }
+    Ok(PreparedPrompt { prompt, image_dir })
 }
 
 /// Extract the content of the first system message, if any
@@ -79,6 +227,18 @@ pub fn build_user_prompt(messages: &[ChatMessage]) -> String {
         "Built user prompt (system messages excluded)"
     );
     prompt
+}
+
+/// Log a warning when images are present but the runner cannot process them
+///
+/// Called by CLI runners that do not have native vision support. The images
+/// are materialized to temp files via [`prepare_prompt`] / [`prepare_user_prompt`],
+/// but this warning helps with debugging when image analysis seems incomplete.
+pub fn warn_images_via_tempfile(runner_name: &str, image_count: usize) {
+    warn!(
+        runner = runner_name,
+        image_count, "Images materialized to temp files for CLI runner (no native vision support)"
+    );
 }
 
 #[cfg(test)]
@@ -148,5 +308,90 @@ mod tests {
     fn test_build_user_prompt_only_system_messages() {
         let messages = vec![ChatMessage::system("Only system")];
         assert_eq!(build_user_prompt(&messages), "");
+    }
+
+    #[test]
+    fn test_prepare_prompt_no_images() {
+        let messages = vec![ChatMessage::user("Hello")];
+        let prepared = prepare_prompt(&messages).unwrap();
+        assert_eq!(prepared.prompt, "[user]\nHello");
+        assert!(prepared.image_dir.is_none());
+    }
+
+    #[test]
+    fn test_prepare_prompt_with_images() {
+        // 1x1 red PNG pixel as base64
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+        let image = ImagePart::new(png_b64, "image/png").unwrap();
+        let messages = vec![ChatMessage::user_with_images("Describe this", vec![image])];
+
+        let prepared = prepare_prompt(&messages).unwrap();
+        assert!(prepared.prompt.contains("Describe this"));
+        assert!(prepared.prompt.contains("[Attached images"));
+        assert!(prepared.prompt.contains(".png"));
+        assert!(prepared.image_dir.is_some());
+
+        // Verify the temp file exists and has valid PNG data
+        let dir = prepared.image_dir.as_ref().unwrap();
+        let image_file = dir.path().join("0.png");
+        assert!(image_file.exists());
+        let data = std::fs::read(&image_file).unwrap();
+        assert_eq!(&data[..4], b"\x89PNG");
+    }
+
+    #[test]
+    fn test_prepare_user_prompt_with_images_excludes_system() {
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+        let image = ImagePart::new(png_b64, "image/png").unwrap();
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user_with_images("Look at this", vec![image]),
+        ];
+
+        let prepared = prepare_user_prompt(&messages).unwrap();
+        assert!(!prepared.prompt.contains("[system]"));
+        assert!(prepared.prompt.contains("Look at this"));
+        assert!(prepared.prompt.contains("[Attached images"));
+    }
+
+    #[test]
+    fn test_prepare_prompt_multiple_images() {
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+        let img1 = ImagePart::new(png_b64, "image/png").unwrap();
+        let img2 = ImagePart::new(png_b64, "image/jpeg").unwrap();
+        let messages = vec![ChatMessage::user_with_images(
+            "Two images",
+            vec![img1, img2],
+        )];
+
+        let prepared = prepare_prompt(&messages).unwrap();
+        assert!(prepared.prompt.contains("0.png"));
+        assert!(prepared.prompt.contains("1.jpg"));
+    }
+
+    #[test]
+    fn test_prepare_prompt_assistant_images_ignored() {
+        // Only user messages should have images materialized
+        let mut msg = ChatMessage::assistant("Response");
+        msg.images = Some(vec![ImagePart::new(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+            "image/png",
+        )
+        .unwrap()]);
+        let messages = vec![msg];
+
+        let prepared = prepare_prompt(&messages).unwrap();
+        assert!(!prepared.prompt.contains("[Attached images"));
+        // TempDir is still created because has_any_images checks all messages
+        // but no files are written for non-user messages
+    }
+
+    #[test]
+    fn test_mime_to_extension() {
+        assert_eq!(mime_to_extension("image/png"), "png");
+        assert_eq!(mime_to_extension("image/jpeg"), "jpg");
+        assert_eq!(mime_to_extension("image/webp"), "webp");
+        assert_eq!(mime_to_extension("image/gif"), "gif");
+        assert_eq!(mime_to_extension("image/bmp"), "bin");
     }
 }

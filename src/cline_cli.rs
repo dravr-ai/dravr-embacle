@@ -21,7 +21,7 @@ use tracing::instrument;
 
 use crate::config::RunnerConfig;
 use crate::process::{read_stderr_capped, run_cli_command};
-use crate::prompt::build_user_prompt;
+use crate::prompt::prepare_user_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
@@ -139,8 +139,9 @@ impl LlmProvider for ClineCliRunner {
 
     #[instrument(skip_all, fields(runner = "cline"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt);
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt);
 
         if let Some(model) = &request.model {
             if let Some(tid) = self.base.get_session(model).await {
@@ -164,8 +165,9 @@ impl LlmProvider for ClineCliRunner {
 
     #[instrument(skip_all, fields(runner = "cline"))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt);
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt);
 
         if let Some(model) = &request.model {
             if let Some(tid) = self.base.get_session(model).await {

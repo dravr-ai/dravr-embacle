@@ -21,7 +21,7 @@ use tracing::{debug, instrument};
 
 use crate::config::RunnerConfig;
 use crate::process::{read_stderr_capped, run_cli_command};
-use crate::prompt::build_prompt;
+use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
@@ -194,14 +194,15 @@ impl CopilotRunner {
 #[async_trait]
 impl LlmProvider for CopilotRunner {
     // Copilot CLI has no --system-prompt flag; system messages are
-    // embedded into the prompt via build_prompt(). Streaming is
+    // embedded into the prompt via prepare_prompt(). Streaming is
     // supported by reading stdout line by line.
     crate::delegate_provider_base!("copilot", "GitHub Copilot CLI", LlmCapabilities::STREAMING);
 
     #[instrument(skip_all, fields(runner = "copilot"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prompt = build_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt, true);
+        let prepared = prepare_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt, true);
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "copilot")?;
@@ -211,8 +212,9 @@ impl LlmProvider for CopilotRunner {
 
     #[instrument(skip_all, fields(runner = "copilot"))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
-        let prompt = build_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt, true);
+        let prepared = prepare_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt, true);
 
         // Enable streaming
         cmd.args(["--stream", "on"]);

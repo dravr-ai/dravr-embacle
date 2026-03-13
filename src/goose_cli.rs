@@ -22,7 +22,7 @@ use tracing::instrument;
 
 use crate::config::RunnerConfig;
 use crate::process::{read_stderr_capped, run_cli_command};
-use crate::prompt::build_user_prompt;
+use crate::prompt::prepare_user_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
@@ -135,7 +135,8 @@ impl LlmProvider for GooseCliRunner {
 
     #[instrument(skip_all, fields(runner = "goose"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
 
         // Write prompt to a temp file since Goose reads from `-i <path>`
         let mut prompt_file = NamedTempFile::new().map_err(|e| {
@@ -162,7 +163,8 @@ impl LlmProvider for GooseCliRunner {
 
     #[instrument(skip_all, fields(runner = "goose"))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
 
         let mut cmd = self.build_command_base("stream-json");
         cmd.args(["-i", "-"]);
@@ -186,8 +188,9 @@ impl LlmProvider for GooseCliRunner {
             .stdin
             .take()
             .ok_or_else(|| RunnerError::internal("Failed to capture goose stdin for streaming"))?;
+        let prompt_owned = prompt.to_owned();
         tokio::spawn(async move {
-            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.write_all(prompt_owned.as_bytes()).await;
             let _ = stdin.shutdown().await;
         });
 

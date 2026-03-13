@@ -35,6 +35,7 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 bitflags = { version = "2", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

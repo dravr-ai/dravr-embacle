@@ -23,7 +23,7 @@ use tracing::instrument;
 
 use crate::config::RunnerConfig;
 use crate::process::{read_stderr_capped, run_cli_command};
-use crate::prompt::build_user_prompt;
+use crate::prompt::prepare_user_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
@@ -153,8 +153,9 @@ impl LlmProvider for CursorAgentRunner {
 
     #[instrument(skip_all, fields(runner = "cursor_agent"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt, "json");
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt, "json");
 
         if let Some(model) = &request.model {
             if let Some(sid) = self.base.get_session(model).await {
@@ -178,8 +179,9 @@ impl LlmProvider for CursorAgentRunner {
 
     #[instrument(skip_all, fields(runner = "cursor_agent"))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
-        let prompt = build_user_prompt(&request.messages);
-        let mut cmd = self.build_command(&prompt, "stream-json");
+        let prepared = prepare_user_prompt(&request.messages)?;
+        let prompt = &prepared.prompt;
+        let mut cmd = self.build_command(prompt, "stream-json");
 
         if let Some(model) = &request.model {
             if let Some(sid) = self.base.get_session(model).await {
