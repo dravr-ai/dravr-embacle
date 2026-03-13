@@ -235,6 +235,11 @@ pub mod copilot_headless;
 #[cfg(feature = "copilot-headless")]
 pub mod copilot_headless_config;
 
+// C FFI bindings (behind feature flag)
+#[cfg(feature = "ffi")]
+#[allow(unsafe_code)]
+mod ffi;
+
 // Re-export the runner structs for ergonomic access
 pub use agent::{AgentExecutor, AgentResult, OnTurnCallback, TurnInfo};
 pub use auth::ProviderReadiness;

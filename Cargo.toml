@@ -22,6 +22,9 @@ exclude = [".claude/", ".githooks/", ".github/", "scripts/", "AGENTS.md", "crate
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [features]
 default = []
 # Enable Copilot Headless provider (ACP protocol via copilot --acp)
@@ -32,6 +35,8 @@ openai-api = ["dep:reqwest", "tokio/sync"]
 config-file = ["dep:toml", "dep:dirs"]
 # Enable OpenTelemetry metrics export
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
+# Enable C FFI static library for Swift/C integration (implies copilot-headless)
+ffi = ["copilot-headless"]
 
 [dependencies]
 async-trait = "0.1"

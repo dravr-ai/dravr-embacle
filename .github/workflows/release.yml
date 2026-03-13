@@ -333,12 +333,48 @@ jobs:
           # Remove leading whitespace from heredoc
           sed -i 's/^          //' Formula/embacle.rb
 
+      - name: Compute source tarball SHA for FFI formula
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          curl -sL "https://github.com/dravr-ai/dravr-embacle/archive/refs/tags/v${VERSION}.tar.gz" -o source.tar.gz
+          SHA_SRC=$(shasum -a 256 source.tar.gz | awk '{print $1}')
+          rm source.tar.gz
+
+          cat > Formula/embacle-ffi.rb <<FORMULA
+          # typed: false
+          # frozen_string_literal: true
+
+          class EmbacleFfi < Formula
+            desc "C FFI static library for embacle LLM runners (Swift/C integration)"
+            homepage "https://github.com/dravr-ai/dravr-embacle"
+            url "https://github.com/dravr-ai/dravr-embacle/archive/refs/tags/v${VERSION}.tar.gz"
+            sha256 "${SHA_SRC}"
+            license "Apache-2.0"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "build", "--release", "--features", "ffi"
+              lib.install "target/release/libembacle.a"
+              include.install "include/embacle.h"
+            end
+
+            test do
+              assert_match "embacle_init", shell_output("nm #{lib}/libembacle.a")
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/embacle-ffi.rb
+
       - name: Commit and push
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/embacle.rb
+          git add Formula/embacle.rb Formula/embacle-ffi.rb
           git commit -m "chore: bump embacle to v${VERSION}"
           git push

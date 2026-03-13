@@ -408,6 +408,67 @@ Override the entrypoint to run the MCP server instead:
 docker run --entrypoint embacle-mcp ghcr.io/dravr-ai/embacle --provider copilot
 ```
 
+## C FFI Static Library (Swift / C Integration)
+
+Embacle provides a C FFI static library (`libembacle.a`) that exposes copilot chat completion to Swift and C programs. The FFI surface is 4 functions: init, chat completion, free string, and shutdown.
+
+### Install via Homebrew
+
+```bash
+brew tap dravr-ai/tap
+brew install embacle-ffi
+```
+
+This builds from source (requires Rust) and installs `libembacle.a` and `embacle.h` to Homebrew's prefix.
+
+### Install via script
+
+```bash
+./scripts/install-ffi.sh                        # → /usr/local
+./scripts/install-ffi.sh --prefix $HOME/.local  # → custom prefix
+./scripts/install-ffi.sh --uninstall            # remove
+```
+
+### Build manually
+
+```bash
+cargo build --release --features ffi
+# Output: target/release/libembacle.a
+# Header: include/embacle.h
+```
+
+### Swift / SPM usage
+
+Add a `systemLibrary` target in your `Package.swift` with a modulemap that links `embacle`:
+
+```swift
+.systemLibrary(name: "CEmbacle")
+```
+
+With a `module.modulemap`:
+```
+module CEmbacle {
+    header "embacle.h"
+    link "embacle"
+    export *
+}
+```
+
+The FFI accepts OpenAI-compatible JSON — the same format as the REST API:
+
+```c
+embacle_init();
+char* response = embacle_chat_completion(
+    "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+    60  /* timeout seconds */
+);
+/* use response JSON... */
+embacle_free_string(response);
+embacle_shutdown();
+```
+
+Vision payloads work via multipart content with `image_url` data URIs.
+
 ## Architecture
 
 ```
