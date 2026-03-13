@@ -20,7 +20,7 @@ Instead of integrating with LLM APIs directly (which require API keys, SDKs, and
 - [Copilot Headless](#copilot-headless-feature-flag)
 - [Vision / Image Support](#vision--image-support)
 - [Docker](#docker)
-- [C FFI Static Library](#c-ffi-static-library-swift--c-integration)
+- [C FFI Static Library](#c-ffi-static-library)
 - [Architecture](#architecture)
 - [Tested With](#tested-with)
 - [License](#license)
@@ -427,9 +427,9 @@ Override the entrypoint to run the MCP server instead:
 docker run --entrypoint embacle-mcp ghcr.io/dravr-ai/embacle --provider copilot
 ```
 
-## C FFI Static Library (Swift / C Integration)
+## C FFI Static Library
 
-Embacle provides a C FFI static library (`libembacle.a`) that exposes copilot chat completion to Swift and C programs. The FFI surface is 4 functions: init, chat completion, free string, and shutdown.
+Embacle provides a C FFI static library (`libembacle.a`) that exposes copilot chat completion to any language that can call C functions — Swift, Objective-C, Python, Go, Ruby, and more. The FFI surface is 4 functions: init, chat completion, free string, and shutdown.
 
 ### Install via Homebrew
 
@@ -438,7 +438,15 @@ brew tap dravr-ai/tap
 brew install embacle-ffi
 ```
 
-This builds from source (requires Rust) and installs `libembacle.a` and `embacle.h` to Homebrew's prefix.
+This builds from source (requires Rust) and installs `libembacle.a` and `embacle.h` to Homebrew's prefix. The formula is published automatically with each release.
+
+For CI environments:
+
+```bash
+brew tap dravr-ai/tap
+brew install embacle-ffi
+# libembacle.a and embacle.h are now available under $(brew --prefix)/lib and $(brew --prefix)/include
+```
 
 ### Install via script
 
@@ -456,9 +464,9 @@ cargo build --release --features ffi
 # Header: include/embacle.h
 ```
 
-### Swift / SPM usage
+### Swift / SPM example
 
-Add a `systemLibrary` target in your `Package.swift` with a modulemap that links `embacle`:
+For Swift Package Manager, add a `systemLibrary` target in your `Package.swift` with a modulemap that links `embacle`:
 
 ```swift
 .systemLibrary(name: "CEmbacle")
