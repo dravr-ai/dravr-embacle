@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0] — 2026-03-13
+
+### Added
+
+- feat: add vision/image support and wire CopilotHeadless into provider system
+
+### Fixed
+
+- fix: resolve clippy and test count for copilot-headless wiring
+
+
+
 ## [0.11.0] — 2026-03-12
 
 ### Added
