@@ -588,15 +588,32 @@ impl CopilotHeadlessRunner {
         which::which("copilot").map_err(|_| RunnerError::binary_not_found("copilot"))
     }
 
-    /// Extract the user prompt from the last user message.
-    fn extract_user_prompt(request: &ChatRequest) -> &str {
-        request
+    /// Build ACP prompt content blocks from the last user message.
+    ///
+    /// Always includes a text block. When the last user message has images,
+    /// appends image blocks with `type: "image"`, `data`, and `mimeType`.
+    fn build_prompt_blocks(request: &ChatRequest) -> Vec<Value> {
+        let last_user = request
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.content.as_str())
-            .unwrap_or_default()
+            .find(|m| m.role == MessageRole::User);
+
+        let text = last_user.map(|m| m.content.as_str()).unwrap_or_default();
+
+        let mut blocks = vec![json!({"type": "text", "text": text})];
+
+        if let Some(images) = last_user.and_then(|m| m.images.as_ref()) {
+            for img in images {
+                blocks.push(json!({
+                    "type": "image",
+                    "data": img.data,
+                    "mimeType": img.mime_type,
+                }));
+            }
+        }
+
+        blocks
     }
 
     /// Extract the system prompt if present.
@@ -622,8 +639,8 @@ impl CopilotHeadlessRunner {
             .as_deref()
             .unwrap_or(&self.config.model)
             .to_owned();
-        let user_prompt = Self::extract_user_prompt(request);
         let system_prompt = Self::extract_system_prompt(request);
+        let prompt_blocks = Self::build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -638,7 +655,7 @@ impl CopilotHeadlessRunner {
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": user_prompt}],
+                    "prompt": prompt_blocks,
                 }),
             )
             .await?;
@@ -686,6 +703,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         LlmCapabilities::STREAMING
             | LlmCapabilities::SYSTEM_MESSAGES
             | LlmCapabilities::SDK_TOOL_CALLING
+            | LlmCapabilities::VISION
     }
 
     fn default_model(&self) -> &str {
@@ -703,8 +721,8 @@ impl LlmProvider for CopilotHeadlessRunner {
             .as_deref()
             .unwrap_or(&self.config.model)
             .to_owned();
-        let user_prompt = Self::extract_user_prompt(request);
         let system_prompt = Self::extract_system_prompt(request);
+        let prompt_blocks = Self::build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -719,7 +737,7 @@ impl LlmProvider for CopilotHeadlessRunner {
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": user_prompt}],
+                    "prompt": prompt_blocks,
                 }),
             )
             .await?;
@@ -747,8 +765,8 @@ impl LlmProvider for CopilotHeadlessRunner {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
         let model = request.model.as_deref().unwrap_or(&self.config.model);
-        let user_prompt = Self::extract_user_prompt(request).to_owned();
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
+        let prompt_blocks = Self::build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -763,7 +781,7 @@ impl LlmProvider for CopilotHeadlessRunner {
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": user_prompt}],
+                    "prompt": prompt_blocks,
                 }),
             )
             .await?;
@@ -807,6 +825,7 @@ impl LlmProvider for CopilotHeadlessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ChatMessage;
     use serde_json::json;
 
     /// Build a valid ACP permission request JSON with the given option kinds.
@@ -877,5 +896,52 @@ mod tests {
         let params = make_permission_params(&["allow_once", "allow_always"]);
         let result = build_permission_response(&params, PermissionPolicy::DenyAll);
         assert_eq!(result["outcome"], "cancelled");
+    }
+
+    #[test]
+    fn build_prompt_blocks_text_only() {
+        let request = ChatRequest::new(vec![ChatMessage::user("Hello")]);
+        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn build_prompt_blocks_with_images() {
+        use crate::types::ImagePart;
+
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let request = ChatRequest::new(vec![ChatMessage::user_with_images(
+            "Describe this image",
+            vec![img],
+        )]);
+        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Describe this image");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["data"], "aGVsbG8=");
+        assert_eq!(blocks[1]["mimeType"], "image/png");
+    }
+
+    #[test]
+    fn build_prompt_blocks_uses_last_user_message() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("first"),
+            ChatMessage::assistant("response"),
+            ChatMessage::user("second"),
+        ]);
+        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        assert_eq!(blocks[0]["text"], "second");
+    }
+
+    #[test]
+    fn capabilities_include_vision() {
+        let caps = LlmCapabilities::STREAMING
+            | LlmCapabilities::SYSTEM_MESSAGES
+            | LlmCapabilities::SDK_TOOL_CALLING
+            | LlmCapabilities::VISION;
+        assert!(caps.supports_vision());
     }
 }

@@ -279,6 +279,41 @@ impl MessageRole {
     }
 }
 
+/// Supported MIME types for image content
+const VALID_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// An image attached to a chat message
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImagePart {
+    /// Base64-encoded image data
+    pub data: String,
+    /// MIME type (e.g., "image/png", "image/jpeg")
+    pub mime_type: String,
+}
+
+impl ImagePart {
+    /// Create a new image part, validating the MIME type.
+    ///
+    /// Accepted MIME types: `image/png`, `image/jpeg`, `image/webp`, `image/gif`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunnerError`] if the MIME type is not supported.
+    pub fn new(data: impl Into<String>, mime_type: impl Into<String>) -> Result<Self, RunnerError> {
+        let mime_type = mime_type.into();
+        if !VALID_IMAGE_MIME_TYPES.contains(&mime_type.as_str()) {
+            return Err(RunnerError::config(format!(
+                "Unsupported image MIME type '{mime_type}'; expected one of: {}",
+                VALID_IMAGE_MIME_TYPES.join(", ")
+            )));
+        }
+        Ok(Self {
+            data: data.into(),
+            mime_type,
+        })
+    }
+}
+
 /// A single message in a chat conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -286,6 +321,9 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// Content of the message
     pub content: String,
+    /// Images attached to the message (only meaningful for `User` role)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImagePart>>,
     /// Tool calls requested by the assistant (only for `Assistant` role)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRequest>>,
@@ -304,6 +342,7 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            images: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -322,6 +361,19 @@ impl ChatMessage {
         Self::new(MessageRole::User, content)
     }
 
+    /// Create a user message with attached images
+    #[must_use]
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImagePart>) -> Self {
+        Self {
+            role: MessageRole::User,
+            content: content.into(),
+            images: Some(images),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
     /// Create an assistant message
     #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -338,6 +390,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
+            images: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
@@ -525,6 +578,14 @@ impl ChatRequest {
     pub fn with_response_format(mut self, response_format: ResponseFormat) -> Self {
         self.response_format = Some(response_format);
         self
+    }
+
+    /// Check whether any message in this request contains images
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|m| m.images.as_ref().is_some_and(|imgs| !imgs.is_empty()))
     }
 }
 
@@ -731,6 +792,83 @@ mod tests {
         assert!(user.tool_calls.is_none());
         assert!(user.tool_call_id.is_none());
         assert!(user.name.is_none());
+        assert!(user.images.is_none());
+    }
+
+    #[test]
+    fn image_part_valid_mime_types() {
+        for mime in &["image/png", "image/jpeg", "image/webp", "image/gif"] {
+            let part = ImagePart::new("base64data", *mime);
+            assert!(part.is_ok(), "Expected {mime} to be valid");
+        }
+    }
+
+    #[test]
+    fn image_part_invalid_mime_type() {
+        let err = ImagePart::new("data", "image/bmp").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("image/bmp"));
+    }
+
+    #[test]
+    fn user_with_images_constructor() {
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let msg = ChatMessage::user_with_images("describe this", vec![img]);
+        assert_eq!(msg.role, MessageRole::User);
+        assert_eq!(msg.content, "describe this");
+        let images = msg.images.as_ref().unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn chat_request_has_images() {
+        let img = ImagePart::new("data", "image/jpeg").unwrap();
+        let with = ChatRequest::new(vec![ChatMessage::user_with_images("x", vec![img])]);
+        assert!(with.has_images());
+
+        let without = ChatRequest::new(vec![ChatMessage::user("text only")]);
+        assert!(!without.has_images());
+    }
+
+    #[test]
+    fn chat_request_has_images_empty_vec() {
+        let msg = ChatMessage::user_with_images("x", vec![]);
+        let req = ChatRequest::new(vec![msg]);
+        assert!(!req.has_images());
+    }
+
+    #[test]
+    fn image_part_serde_round_trip() {
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let json = serde_json::to_string(&img).unwrap();
+        let deserialized: ImagePart = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, img);
+    }
+
+    #[test]
+    fn chat_message_with_images_serde_round_trip() {
+        let img = ImagePart::new("data", "image/jpeg").unwrap();
+        let msg = ChatMessage::user_with_images("describe", vec![img]);
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.images.as_ref().unwrap().len(), 1);
+        assert_eq!(deserialized.images.unwrap()[0].mime_type, "image/jpeg");
+    }
+
+    #[test]
+    fn chat_message_without_images_backward_compat() {
+        let json = r#"{"role":"user","content":"hello"}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.images.is_none());
+        assert_eq!(msg.content, "hello");
+    }
+
+    #[test]
+    fn chat_message_images_not_serialized_when_none() {
+        let msg = ChatMessage::user("hello");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("images"));
     }
 
     #[test]

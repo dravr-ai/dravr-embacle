@@ -26,6 +26,12 @@ use crate::{
 pub async fn create_runner(
     runner_type: CliRunnerType,
 ) -> Result<Box<dyn LlmProvider>, RunnerError> {
+    // CopilotHeadless uses its own config (env-based), not RunnerConfig
+    #[cfg(feature = "copilot-headless")]
+    if runner_type == CliRunnerType::CopilotHeadless {
+        return Ok(Box::new(crate::CopilotHeadlessRunner::from_env().await));
+    }
+
     let binary_name = runner_type.binary_name();
     let env_key = runner_type.env_override_key();
     let env_override = env::var(env_key).ok();
@@ -46,6 +52,8 @@ pub async fn create_runner(
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => unreachable!("handled above"),
     };
 
     Ok(runner)
@@ -72,13 +80,35 @@ pub async fn create_runner_with_config(
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
+        // CopilotHeadless ignores RunnerConfig — uses env-based config
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env().await),
     }
 }
 
 /// All provider types supported by embacle, in discovery priority order
+#[cfg(not(feature = "copilot-headless"))]
 pub const ALL_PROVIDERS: &[CliRunnerType] = &[
     CliRunnerType::ClaudeCode,
     CliRunnerType::Copilot,
+    CliRunnerType::CursorAgent,
+    CliRunnerType::OpenCode,
+    CliRunnerType::GeminiCli,
+    CliRunnerType::CodexCli,
+    CliRunnerType::GooseCli,
+    CliRunnerType::ClineCli,
+    CliRunnerType::ContinueCli,
+    CliRunnerType::WarpCli,
+    CliRunnerType::KiroCli,
+    CliRunnerType::KiloCli,
+];
+
+/// All provider types supported by embacle, in discovery priority order
+#[cfg(feature = "copilot-headless")]
+pub const ALL_PROVIDERS: &[CliRunnerType] = &[
+    CliRunnerType::ClaudeCode,
+    CliRunnerType::Copilot,
+    CliRunnerType::CopilotHeadless,
     CliRunnerType::CursorAgent,
     CliRunnerType::OpenCode,
     CliRunnerType::GeminiCli,
@@ -111,13 +141,21 @@ pub fn parse_runner_type(s: &str) -> Option<CliRunnerType> {
         "warp" | "warp_cli" | "warpcli" | "warp-cli" | "oz" => Some(CliRunnerType::WarpCli),
         "kiro" | "kiro_cli" | "kirocli" | "kiro-cli" => Some(CliRunnerType::KiroCli),
         "kilo" | "kilo_cli" | "kilocli" | "kilo-cli" | "kilocode" => Some(CliRunnerType::KiloCli),
+        #[cfg(feature = "copilot-headless")]
+        "copilot_headless" | "copilot-headless" | "copilotheadless" | "headless" => {
+            Some(CliRunnerType::CopilotHeadless)
+        }
         _ => None,
     }
 }
 
 /// Format the list of valid provider names for error messages
 pub const fn valid_provider_names() -> &'static str {
-    "claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
+    if cfg!(feature = "copilot-headless") {
+        "claude_code, copilot, copilot_headless, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
+    } else {
+        "claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
+    }
 }
 
 #[cfg(test)]
@@ -202,7 +240,11 @@ mod tests {
     }
 
     #[test]
-    fn all_providers_has_twelve_entries() {
-        assert_eq!(ALL_PROVIDERS.len(), 12);
+    fn all_providers_count() {
+        if cfg!(feature = "copilot-headless") {
+            assert_eq!(ALL_PROVIDERS.len(), 13);
+        } else {
+            assert_eq!(ALL_PROVIDERS.len(), 12);
+        }
     }
 }

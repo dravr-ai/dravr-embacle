@@ -475,6 +475,7 @@ impl LlmProvider for OpenAiApiRunner {
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities::STREAMING
             | LlmCapabilities::FUNCTION_CALLING
+            | LlmCapabilities::VISION
             | LlmCapabilities::SYSTEM_MESSAGES
             | LlmCapabilities::TEMPERATURE
             | LlmCapabilities::MAX_TOKENS
@@ -646,9 +647,31 @@ impl LlmProvider for OpenAiApiRunner {
 // ============================================================================
 
 /// Convert a `ChatMessage` into the API wire format
+///
+/// When the message has attached images, emits a multipart content array
+/// per the `OpenAI` vision API: `[{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:..."}}]`.
+/// Otherwise, emits a simple string content value.
 fn map_message(msg: &ChatMessage) -> ApiMessage {
+    let has_images = msg.images.as_ref().is_some_and(|imgs| !imgs.is_empty());
+
     let content = if msg.content.is_empty() && msg.tool_calls.is_some() {
         serde_json::Value::Null
+    } else if has_images {
+        let mut parts = vec![serde_json::json!({
+            "type": "text",
+            "text": msg.content,
+        })];
+        if let Some(ref images) = msg.images {
+            for img in images {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", img.mime_type, img.data),
+                    },
+                }));
+            }
+        }
+        serde_json::Value::Array(parts)
     } else {
         serde_json::Value::String(msg.content.clone())
     };
@@ -1210,8 +1233,64 @@ mod tests {
         assert!(caps.supports_top_p());
         assert!(caps.supports_stop_sequences());
         assert!(caps.supports_response_format());
-        assert!(!caps.supports_vision());
+        assert!(caps.supports_vision());
         assert!(!caps.supports_sdk_tool_calling());
+    }
+
+    #[test]
+    fn map_message_user_without_images() {
+        let msg = ChatMessage::user("Hello");
+        let api_msg = map_message(&msg);
+        assert_eq!(
+            api_msg.content,
+            serde_json::Value::String("Hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn map_message_user_with_images() {
+        use crate::types::ImagePart;
+
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let msg = ChatMessage::user_with_images("Describe this", vec![img]);
+        let api_msg = map_message(&msg);
+
+        let content = api_msg.content.as_array().expect("should be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn map_message_user_with_empty_images_stays_string() {
+        let msg = ChatMessage::user_with_images("Hello", vec![]);
+        let api_msg = map_message(&msg);
+        assert_eq!(
+            api_msg.content,
+            serde_json::Value::String("Hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn map_message_with_images_full_serialization() {
+        use crate::types::ImagePart;
+
+        let img = ImagePart::new("AAAA", "image/jpeg").unwrap();
+        let msg = ChatMessage::user_with_images("What is this?", vec![img]);
+        let api_msg = map_message(&msg);
+        let json = serde_json::to_value(&api_msg).unwrap();
+
+        assert!(json["content"].is_array());
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(
+            json["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
     }
 
     #[test]

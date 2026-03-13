@@ -116,6 +116,16 @@ pub fn validate_capabilities(
         warnings.push(msg);
     }
 
+    if request.has_images() && !capabilities.supports_vision() {
+        let msg = format!(
+            "{provider_name} does not support vision/images; image content will be ignored"
+        );
+        if strict {
+            return Err(RunnerError::config(msg));
+        }
+        warnings.push(msg);
+    }
+
     Ok(warnings)
 }
 
@@ -271,5 +281,34 @@ mod tests {
         let warnings = validate_capabilities("test", caps, &request, false).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("function calling"));
+    }
+
+    #[test]
+    fn strict_rejects_images_without_vision() {
+        let caps = LlmCapabilities::STREAMING;
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
+        let err = validate_capabilities("test", caps, &request, true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("vision"));
+    }
+
+    #[test]
+    fn permissive_warns_for_images_without_vision() {
+        let caps = LlmCapabilities::STREAMING;
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
+        let warnings = validate_capabilities("test", caps, &request, false).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("vision"));
+    }
+
+    #[test]
+    fn allows_images_with_vision_capability() {
+        let caps = LlmCapabilities::STREAMING | LlmCapabilities::VISION;
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
+        let warnings = validate_capabilities("test", caps, &request, true).unwrap();
+        assert!(warnings.is_empty());
     }
 }

@@ -274,7 +274,7 @@ pub use structured_output::{request_structured_output, StructuredOutputRequest};
 pub use warp_cli::WarpCliRunner;
 
 // Core tool calling type re-exports
-pub use types::{ResponseFormat, ToolCallRequest, ToolChoice, ToolDefinition};
+pub use types::{ImagePart, ResponseFormat, ToolCallRequest, ToolChoice, ToolDefinition};
 
 // Tool simulation re-exports
 pub use tool_simulation::{

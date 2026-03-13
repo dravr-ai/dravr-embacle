@@ -119,6 +119,8 @@ async fn detect_version(
         | CliRunnerType::WarpCli
         | CliRunnerType::KiroCli
         | CliRunnerType::KiloCli => "--version",
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => "--version",
     };
 
     let output = Command::new(binary_path)
@@ -189,6 +191,8 @@ const fn minimum_version(runner_type: CliRunnerType) -> (u32, u32, u32) {
         CliRunnerType::WarpCli => parse_const_version(WARP_CLI_MIN_VERSION),
         CliRunnerType::KiroCli => parse_const_version(KIRO_CLI_MIN_VERSION),
         CliRunnerType::KiloCli => parse_const_version(KILO_CLI_MIN_VERSION),
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => parse_const_version(COPILOT_MIN_VERSION),
     }
 }
 
@@ -253,6 +257,9 @@ const fn capabilities_for_runner(runner_type: CliRunnerType) -> (bool, bool, boo
         CliRunnerType::CodexCli => (true, true, false, false),
         // Kiro CLI: plain text output (no JSON), no streaming, session resume via --resume
         CliRunnerType::KiroCli => (false, false, false, true),
+        // Copilot Headless: ACP protocol, not a CLI runner — capabilities managed by LlmProvider
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => (true, true, true, false),
     }
 }
 

@@ -24,7 +24,7 @@ name = "embacle-server"
 path = "src/main.rs"
 
 [dependencies]
-embacle = { path = "../..", version = "0.11.0", features = ["config-file", "otel"] }
+embacle = { path = "../..", version = "0.11.0", features = ["config-file", "copilot-headless", "otel"] }
 embacle-mcp = { path = "../embacle-mcp", version = "0.11.0" }
 async-trait = "0.1"
 axum = "0.8"

@@ -121,6 +121,8 @@ pub async fn check_readiness(
         CliRunnerType::WarpCli => check_version_probe_unverified(binary_path, "oz").await,
         CliRunnerType::KiroCli => check_version_probe_unverified(binary_path, "kiro-cli").await,
         CliRunnerType::KiloCli => check_version_probe_unverified(binary_path, "kilo").await,
+        #[cfg(feature = "copilot-headless")]
+        CliRunnerType::CopilotHeadless => check_copilot_readiness(binary_path).await,
     }
 }
 

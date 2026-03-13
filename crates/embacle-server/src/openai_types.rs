@@ -136,13 +136,68 @@ pub enum ModelField {
     Multiple(Vec<String>),
 }
 
+/// Message content that can be either a plain string or an array of content parts
+///
+/// Per the OpenAI API spec, the `content` field of a message can be either a simple
+/// string or an array of typed content parts (text, image_url, etc.).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content
+    Text(String),
+    /// Array of typed content parts (text, image_url, etc.)
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract the text content, concatenating text parts if multipart
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// A single content part within a multipart message
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content part
+    #[serde(rename = "text")]
+    Text {
+        /// The text content
+        text: String,
+    },
+    /// Image URL content part (including data URIs)
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        /// Image URL details
+        image_url: ImageUrlDetail,
+    },
+}
+
+/// Image URL details within a content part
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageUrlDetail {
+    /// The image URL (can be a data URI like `data:image/png;base64,...`)
+    pub url: String,
+}
+
 /// OpenAI-compatible message in a chat completion request
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionMessage {
     /// Role: "system", "user", "assistant", or "tool"
     pub role: String,
     /// Message content (None for tool-call-only assistant messages)
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// Tool calls requested by the assistant
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -506,6 +561,68 @@ mod tests {
         assert_eq!(req.messages[0].role, "tool");
         assert_eq!(req.messages[0].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(req.messages[0].name.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn deserialize_multipart_content() {
+        let json = r#"{
+            "model": "copilot",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
+                ]
+            }]
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let content = req.messages[0].content.as_ref().expect("content present");
+        match content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(
+                    matches!(&parts[0], ContentPart::Text { text } if text == "What is in this image?")
+                );
+                assert!(
+                    matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url.contains("base64"))
+                );
+            }
+            MessageContent::Text(_) => panic!("expected Parts variant"),
+        }
+    }
+
+    #[test]
+    fn message_content_as_text_plain_string() {
+        let content = MessageContent::Text("hello".to_owned());
+        assert_eq!(content.as_text(), "hello");
+    }
+
+    #[test]
+    fn message_content_as_text_multipart() {
+        let content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "describe ".to_owned(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlDetail {
+                    url: "data:image/png;base64,abc".to_owned(),
+                },
+            },
+            ContentPart::Text {
+                text: "this image".to_owned(),
+            },
+        ]);
+        assert_eq!(content.as_text(), "describe this image");
+    }
+
+    #[test]
+    fn deserialize_plain_string_content_backward_compat() {
+        let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        match req.messages[0].content.as_ref().expect("content present") {
+            MessageContent::Text(s) => assert_eq!(s, "hi"),
+            MessageContent::Parts(_) => panic!("expected Text variant"),
+        }
     }
 
     #[test]

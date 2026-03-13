@@ -40,6 +40,9 @@ pub enum CliRunnerType {
     KiroCli,
     /// Kilo Code CLI (`kilo`)
     KiloCli,
+    /// GitHub Copilot Headless via ACP protocol (`copilot --acp`)
+    #[cfg(feature = "copilot-headless")]
+    CopilotHeadless,
 }
 
 impl CliRunnerType {
@@ -59,6 +62,8 @@ impl CliRunnerType {
             Self::WarpCli => "oz",
             Self::KiroCli => "kiro-cli",
             Self::KiloCli => "kilo",
+            #[cfg(feature = "copilot-headless")]
+            Self::CopilotHeadless => "copilot",
         }
     }
 
@@ -78,6 +83,8 @@ impl CliRunnerType {
             Self::WarpCli => "WARP_CLI_BINARY",
             Self::KiroCli => "KIRO_CLI_BINARY",
             Self::KiloCli => "KILO_CLI_BINARY",
+            #[cfg(feature = "copilot-headless")]
+            Self::CopilotHeadless => "COPILOT_CLI_PATH",
         }
     }
 }
@@ -97,6 +104,8 @@ impl fmt::Display for CliRunnerType {
             Self::WarpCli => write!(f, "warp_cli"),
             Self::KiroCli => write!(f, "kiro_cli"),
             Self::KiloCli => write!(f, "kilo_cli"),
+            #[cfg(feature = "copilot-headless")]
+            Self::CopilotHeadless => write!(f, "copilot_headless"),
         }
     }
 }

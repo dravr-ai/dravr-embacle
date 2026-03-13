@@ -16,9 +16,10 @@ use embacle::FunctionDeclaration;
 use tracing::{debug, error, warn};
 
 use crate::openai_types::{
-    ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, Choice, ErrorResponse,
-    ModelField, MultiplexProviderResult, MultiplexResponse, ResponseFormatRequest, ResponseMessage,
-    StopField, ToolCall, ToolCallFunction, ToolChoice, Usage,
+    ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, Choice, ContentPart,
+    ErrorResponse, MessageContent, ModelField, MultiplexProviderResult, MultiplexResponse,
+    ResponseFormatRequest, ResponseMessage, StopField, ToolCall, ToolCallFunction, ToolChoice,
+    Usage,
 };
 use crate::provider_resolver::resolve_model;
 use crate::runner::multiplex::{MultiplexEngine, MultiplexParams};
@@ -446,11 +447,52 @@ fn build_response_message(
     }
 }
 
+/// Extract text content from a `MessageContent`, returning an empty string for None
+fn content_as_text(content: &Option<MessageContent>) -> String {
+    content
+        .as_ref()
+        .map(MessageContent::as_text)
+        .unwrap_or_default()
+}
+
+/// Parse a `data:` URI into an `ImagePart`
+///
+/// Expected format: `data:<mime_type>;base64,<data>`
+fn parse_data_uri(url: &str) -> Option<embacle::ImagePart> {
+    let rest = url.strip_prefix("data:")?;
+    let (mime_type, data) = rest.split_once(";base64,")?;
+    embacle::ImagePart::new(data, mime_type).ok()
+}
+
+/// Extract images from a `MessageContent::Parts` variant
+fn extract_images(content: &Option<MessageContent>) -> Option<Vec<embacle::ImagePart>> {
+    let parts = match content {
+        Some(MessageContent::Parts(parts)) => parts,
+        _ => return None,
+    };
+
+    let images: Vec<embacle::ImagePart> = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::ImageUrl { image_url } => parse_data_uri(&image_url.url),
+            ContentPart::Text { .. } => None,
+        })
+        .collect();
+
+    if images.is_empty() {
+        None
+    } else {
+        Some(images)
+    }
+}
+
 /// Convert `OpenAI` message format to embacle `ChatMessage`
 ///
 /// Handles all `OpenAI` roles including "tool" messages and assistant messages
 /// with `tool_calls`. Tool messages are collected and formatted as `<tool_result>`
 /// blocks. Assistant messages with `tool_calls` are reconstructed as `<tool_call>` blocks.
+/// User messages with multipart content (text + images) are converted to `ChatMessage`
+/// with attached `ImagePart` entries.
 fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
     let mut result = Vec::with_capacity(messages.len());
     let mut i = 0;
@@ -459,17 +501,23 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
         let m = &messages[i];
         match m.role.as_str() {
             "system" => {
-                result.push(ChatMessage::system(m.content.as_deref().unwrap_or("")));
+                result.push(ChatMessage::system(content_as_text(&m.content)));
                 i += 1;
             }
             "user" => {
-                result.push(ChatMessage::user(m.content.as_deref().unwrap_or("")));
+                let text = content_as_text(&m.content);
+                let images = extract_images(&m.content);
+                if let Some(imgs) = images {
+                    result.push(ChatMessage::user_with_images(text, imgs));
+                } else {
+                    result.push(ChatMessage::user(text));
+                }
                 i += 1;
             }
             "assistant" => {
                 if let Some(ref tool_calls) = m.tool_calls {
                     // Reconstruct <tool_call> XML blocks from stored tool calls
-                    let mut text = m.content.clone().unwrap_or_default();
+                    let mut text = content_as_text(&m.content);
                     for tc in tool_calls {
                         text.push_str("\n<tool_call>\n");
                         let payload = serde_json::json!({
@@ -484,7 +532,7 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
                     }
                     result.push(ChatMessage::assistant(text));
                 } else {
-                    result.push(ChatMessage::assistant(m.content.as_deref().unwrap_or("")));
+                    result.push(ChatMessage::assistant(content_as_text(&m.content)));
                 }
                 i += 1;
             }
@@ -494,14 +542,13 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
                 while i < messages.len() && messages[i].role == "tool" {
                     let tool_msg = &messages[i];
                     let name = tool_msg.name.as_deref().unwrap_or("unknown");
-                    let response_value: serde_json::Value =
-                        tool_msg.content.as_deref().map_or_else(
-                            || serde_json::Value::Null,
-                            |c| {
-                                serde_json::from_str(c)
-                                    .unwrap_or_else(|_| serde_json::Value::String(c.to_owned()))
-                            },
-                        );
+                    let content_text = content_as_text(&tool_msg.content);
+                    let response_value: serde_json::Value = if content_text.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::from_str(&content_text)
+                            .unwrap_or_else(|_| serde_json::Value::String(content_text))
+                    };
                     tool_responses.push(embacle::FunctionResponse {
                         name: name.to_owned(),
                         response: response_value,
@@ -513,7 +560,7 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
             }
             other => {
                 warn!(role = other, "Unknown message role, mapping to user");
-                result.push(ChatMessage::user(m.content.as_deref().unwrap_or("")));
+                result.push(ChatMessage::user(content_as_text(&m.content)));
                 i += 1;
             }
         }
@@ -648,33 +695,28 @@ pub fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::openai_types::{FunctionObject, ToolCall, ToolCallFunction, ToolDefinition};
+    use crate::openai_types::{
+        ContentPart, FunctionObject, ImageUrlDetail, ToolCall, ToolCallFunction, ToolDefinition,
+    };
     use embacle::types::MessageRole;
+
+    /// Helper to create a `ChatCompletionMessage` with plain text content
+    fn text_msg(role: &str, content: Option<&str>) -> ChatCompletionMessage {
+        ChatCompletionMessage {
+            role: role.to_owned(),
+            content: content.map(|c| MessageContent::Text(c.to_owned())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
 
     #[test]
     fn convert_messages_maps_roles() {
         let openai_msgs = vec![
-            ChatCompletionMessage {
-                role: "system".to_owned(),
-                content: Some("You are helpful".to_owned()),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            },
-            ChatCompletionMessage {
-                role: "user".to_owned(),
-                content: Some("Hello".to_owned()),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            },
-            ChatCompletionMessage {
-                role: "assistant".to_owned(),
-                content: Some("Hi there".to_owned()),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            },
+            text_msg("system", Some("You are helpful")),
+            text_msg("user", Some("Hello")),
+            text_msg("assistant", Some("Hi there")),
         ];
 
         let messages = convert_messages(&openai_msgs);
@@ -686,13 +728,7 @@ mod tests {
 
     #[test]
     fn convert_unknown_role_defaults_to_user() {
-        let openai_msgs = vec![ChatCompletionMessage {
-            role: "function".to_owned(),
-            content: Some("result".to_owned()),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }];
+        let openai_msgs = vec![text_msg("function", Some("result"))];
 
         let messages = convert_messages(&openai_msgs);
         assert_eq!(messages[0].role, MessageRole::User);
@@ -729,14 +765,14 @@ mod tests {
         let openai_msgs = vec![
             ChatCompletionMessage {
                 role: "tool".to_owned(),
-                content: Some(r#"{"temp":72}"#.to_owned()),
+                content: Some(MessageContent::Text(r#"{"temp":72}"#.to_owned())),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_owned()),
                 name: Some("get_weather".to_owned()),
             },
             ChatCompletionMessage {
                 role: "tool".to_owned(),
-                content: Some(r#"{"time":"14:30"}"#.to_owned()),
+                content: Some(MessageContent::Text(r#"{"time":"14:30"}"#.to_owned())),
                 tool_calls: None,
                 tool_call_id: Some("call_2".to_owned()),
                 name: Some("get_time".to_owned()),
@@ -754,16 +790,60 @@ mod tests {
 
     #[test]
     fn convert_messages_none_content() {
+        let openai_msgs = vec![text_msg("user", None)];
+
+        let messages = convert_messages(&openai_msgs);
+        assert_eq!(messages[0].content, "");
+    }
+
+    #[test]
+    fn convert_multipart_user_message_extracts_images() {
         let openai_msgs = vec![ChatCompletionMessage {
             role: "user".to_owned(),
-            content: None,
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "What is this?".to_owned(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlDetail {
+                        url: "data:image/png;base64,aGVsbG8=".to_owned(),
+                    },
+                },
+            ])),
             tool_calls: None,
             tool_call_id: None,
             name: None,
         }];
 
         let messages = convert_messages(&openai_msgs);
-        assert_eq!(messages[0].content, "");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "What is this?");
+        let images = messages[0].images.as_ref().expect("images present");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn parse_data_uri_valid() {
+        let img = parse_data_uri("data:image/jpeg;base64,AAAA").expect("should parse");
+        assert_eq!(img.mime_type, "image/jpeg");
+        assert_eq!(img.data, "AAAA");
+    }
+
+    #[test]
+    fn parse_data_uri_invalid_format() {
+        assert!(parse_data_uri("https://example.com/image.png").is_none());
+        assert!(parse_data_uri("data:text/plain;base64,abc").is_none());
+        assert!(parse_data_uri("data:image/png;abc").is_none());
+    }
+
+    #[test]
+    fn convert_plain_string_content_backward_compat() {
+        let openai_msgs = vec![text_msg("user", Some("hello"))];
+        let messages = convert_messages(&openai_msgs);
+        assert_eq!(messages[0].content, "hello");
+        assert!(messages[0].images.is_none());
     }
 
     #[test]
@@ -795,6 +875,17 @@ mod tests {
         let auto_choice = ToolChoice::Mode("auto".to_owned());
         assert!(!is_tool_choice_none(Some(&auto_choice)));
         assert!(!is_tool_choice_none(None));
+    }
+
+    #[test]
+    fn content_as_text_none() {
+        assert_eq!(content_as_text(&None), "");
+    }
+
+    #[test]
+    fn content_as_text_plain() {
+        let content = Some(MessageContent::Text("hello".to_owned()));
+        assert_eq!(content_as_text(&content), "hello");
     }
 
     #[test]

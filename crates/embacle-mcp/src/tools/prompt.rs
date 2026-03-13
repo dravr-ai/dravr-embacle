@@ -41,6 +41,24 @@ impl McpTool for Prompt {
                                 },
                                 "content": {
                                     "type": "string"
+                                },
+                                "images": {
+                                    "type": "array",
+                                    "description": "Optional images attached to the message (user role only)",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {
+                                                "type": "string",
+                                                "description": "Base64-encoded image data"
+                                            },
+                                            "mime_type": {
+                                                "type": "string",
+                                                "description": "MIME type (image/png, image/jpeg, image/webp, image/gif)"
+                                            }
+                                        },
+                                        "required": ["data", "mime_type"]
+                                    }
                                 }
                             },
                             "required": ["role", "content"]
@@ -126,6 +144,35 @@ async fn execute_multiplex(state: &SharedState, messages: &[ChatMessage]) -> Cal
     }
 }
 
+/// Parse image objects from a message's "images" array
+fn parse_images(msg: &Value, index: usize) -> Result<Option<Vec<embacle::ImagePart>>, String> {
+    let Some(arr) = msg.get("images").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+
+    if arr.is_empty() {
+        return Ok(None);
+    }
+
+    let mut images = Vec::with_capacity(arr.len());
+    for (j, img_val) in arr.iter().enumerate() {
+        let data = img_val
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("Message {index}, image {j}: missing 'data'"))?;
+        let mime_type = img_val
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("Message {index}, image {j}: missing 'mime_type'"))?;
+
+        let part = embacle::ImagePart::new(data, mime_type)
+            .map_err(|e| format!("Message {index}, image {j}: {e}"))?;
+        images.push(part);
+    }
+
+    Ok(Some(images))
+}
+
 /// Parse chat messages from the MCP tool arguments JSON
 fn parse_messages(arguments: &Value) -> Result<Vec<ChatMessage>, String> {
     let arr = arguments
@@ -152,7 +199,10 @@ fn parse_messages(arguments: &Value) -> Result<Vec<ChatMessage>, String> {
             other => return Err(format!("Message {i}: invalid role '{other}'")),
         };
 
-        messages.push(ChatMessage::new(role, content));
+        let images = parse_images(msg, i)?;
+        let mut message = ChatMessage::new(role, content);
+        message.images = images;
+        messages.push(message);
     }
 
     if messages.is_empty() {
@@ -197,5 +247,47 @@ mod tests {
         let args = json!({"messages": [{"role": "bot", "content": "hi"}]});
         let err = parse_messages(&args).unwrap_err();
         assert!(err.contains("invalid role"));
+    }
+
+    #[test]
+    fn parse_messages_with_images() {
+        let args = json!({
+            "messages": [{
+                "role": "user",
+                "content": "Describe this",
+                "images": [{
+                    "data": "aGVsbG8=",
+                    "mime_type": "image/png"
+                }]
+            }]
+        });
+        let msgs = parse_messages(&args).expect("should parse");
+        assert_eq!(msgs.len(), 1);
+        let images = msgs[0].images.as_ref().expect("images present");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn parse_messages_without_images() {
+        let args = json!({
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let msgs = parse_messages(&args).expect("should parse");
+        assert!(msgs[0].images.is_none());
+    }
+
+    #[test]
+    fn parse_messages_invalid_mime_type() {
+        let args = json!({
+            "messages": [{
+                "role": "user",
+                "content": "Describe",
+                "images": [{"data": "abc", "mime_type": "image/bmp"}]
+            }]
+        });
+        let err = parse_messages(&args).unwrap_err();
+        assert!(err.contains("image/bmp"));
     }
 }
