@@ -62,7 +62,7 @@ dirs = { version = "6", optional = true }
 
 # Optional: OpenTelemetry metrics export
 opentelemetry = { version = "0.28", optional = true }
-opentelemetry_sdk = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
