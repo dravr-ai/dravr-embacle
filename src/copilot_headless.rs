@@ -593,13 +593,23 @@ impl CopilotHeadlessRunner {
     /// Always includes a text block. When the last user message has images,
     /// appends image blocks with `type: "image"`, `data`, and `mimeType`.
     fn build_prompt_blocks(request: &ChatRequest) -> Vec<Value> {
+        let system = Self::extract_system_prompt(request);
         let last_user = request
             .messages
             .iter()
             .rev()
             .find(|m| m.role == MessageRole::User);
 
-        let text = last_user.map(|m| m.content.as_str()).unwrap_or_default();
+        let user_text = last_user.map(|m| m.content.as_str()).unwrap_or_default();
+
+        // Inject the system prompt into the prompt text so the model sees it
+        // even if the ACP systemPrompt parameter in session/new is deprioritized.
+        let text = match system {
+            Some(sys) => {
+                format!("<system-instructions>\n{sys}\n</system-instructions>\n\n{user_text}")
+            }
+            None => user_text.to_owned(),
+        };
 
         let mut blocks = vec![json!({"type": "text", "text": text})];
 
@@ -899,12 +909,28 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_blocks_text_only() {
+    fn build_prompt_blocks_text_only_no_system() {
         let request = ChatRequest::new(vec![ChatMessage::user("Hello")]);
         let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn build_prompt_blocks_injects_system_prompt() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("You are a fitness assistant"),
+            ChatMessage::user("Hello"),
+        ]);
+        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("<system-instructions>"));
+        assert!(text.contains("You are a fitness assistant"));
+        assert!(text.contains("</system-instructions>"));
+        assert!(text.contains("Hello"));
     }
 
     #[test]
@@ -919,7 +945,10 @@ mod tests {
         let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[0]["text"], "Describe this image");
+        assert!(blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Describe this image"));
         assert_eq!(blocks[1]["type"], "image");
         assert_eq!(blocks[1]["data"], "aGVsbG8=");
         assert_eq!(blocks[1]["mimeType"], "image/png");
@@ -933,7 +962,7 @@ mod tests {
             ChatMessage::user("second"),
         ]);
         let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
-        assert_eq!(blocks[0]["text"], "second");
+        assert!(blocks[0]["text"].as_str().unwrap().contains("second"));
     }
 
     #[test]
