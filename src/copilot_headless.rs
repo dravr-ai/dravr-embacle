@@ -101,16 +101,45 @@ impl AcpTransport {
         Ok(())
     }
 
+    /// Default per-message read timeout (90 seconds).
+    ///
+    /// If the copilot process is alive but not sending any messages for this
+    /// duration, the read is considered failed. This catches hung processes
+    /// that don't produce output but haven't exited.
+    /// Override with `EMBACLE_ACP_MESSAGE_TIMEOUT_SECS`.
+    fn message_timeout() -> std::time::Duration {
+        let secs = std::env::var("EMBACLE_ACP_MESSAGE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(90);
+        std::time::Duration::from_secs(secs)
+    }
+
     /// Read the next NDJSON message, skipping blank lines.
+    ///
+    /// Times out if no message arrives within [`Self::message_timeout`],
+    /// detecting hung copilot processes that are alive but not responding.
     async fn read_message(&mut self) -> Result<Value, RunnerError> {
         let mut line = String::new();
         loop {
             line.clear();
-            let n = self
-                .reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| RunnerError::internal(format!("Read failed: {e}")))?;
+            let read_result =
+                tokio::time::timeout(Self::message_timeout(), self.reader.read_line(&mut line))
+                    .await;
+
+            let n = match read_result {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    return Err(RunnerError::internal(format!("Read failed: {e}")));
+                }
+                Err(_) => {
+                    return Err(RunnerError::internal(format!(
+                        "ACP message read timed out after {}s — copilot process may be hung",
+                        Self::message_timeout().as_secs()
+                    )));
+                }
+            };
+
             if n == 0 {
                 return Err(RunnerError::internal("ACP connection closed unexpectedly"));
             }
