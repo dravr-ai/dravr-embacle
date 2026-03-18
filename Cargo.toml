@@ -18,6 +18,66 @@ categories = ["command-line-utilities", "api-bindings"]
 readme = "README.md"
 exclude = [".claude/", ".githooks/", ".github/", "scripts/", "AGENTS.md", "crates/"]
 
+# ============================================================================
+# Build Profiles
+# ============================================================================
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# ============================================================================
+# Workspace Lint Configuration
+# ============================================================================
+# Shared across all workspace crates via [lints] workspace = true.
+# Individual crates inherit these settings automatically.
+#
+# ZERO TOLERANCE ENFORCEMENT:
+#   cargo clippy (reads this config, applies level = "deny")
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Base configuration: Enable clippy lint groups at DENY level
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+
+# Type conversion casts - allowed when properly validated
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+
+# Const fn suggestions - clippy suggests const for methods that can't be const
+missing_const_for_fn = "allow"
+
+# Significant drop tightening - false positives with async lock guards
+significant_drop_tightening = "allow"
+
+# Module naming - allow repetition for clarity
+module_name_repetitions = "allow"
+
+# Multiple dependency versions - unavoidable in some transitive deps
+multiple_crate_versions = "allow"
+
+# Missing errors doc - not all error returns need doc comments
+missing_errors_doc = "allow"
+
+# must_use candidate - too noisy for builders and constructors
+must_use_candidate = "allow"
+
+# return_self_not_must_use - builder pattern methods
+return_self_not_must_use = "allow"
+
+# redundant_pub_crate - explicit visibility is clearer
+redundant_pub_crate = "allow"
+
+# unnecessary_literal_bound - false positives with async trait lifetimes
+unnecessary_literal_bound = "allow"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -72,19 +132,5 @@ serde_json = "1.0"
 name = "test_claude_e2e"
 path = "examples/test_claude_e2e.rs"
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-
-# Allow these clippy lints project-wide
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-must_use_candidate = "allow"
-return_self_not_must_use = "allow"
-redundant_pub_crate = "allow"
-multiple_crate_versions = "allow"
-unnecessary_literal_bound = "allow"
+[lints]
+workspace = true

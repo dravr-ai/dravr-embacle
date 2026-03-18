@@ -332,9 +332,8 @@ async fn collect_stderr(child: &mut Child) -> String {
         loop {
             buf.clear();
             match reader.read_line(&mut buf).await {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(_) => output.push_str(&buf),
-                Err(_) => break,
             }
             if output.len() > 4096 {
                 output.push_str("...(truncated)");
@@ -507,7 +506,7 @@ async fn collect_complete(
         }
         // Log method notifications for visibility (every 10th to avoid spam)
         if let Some(method) = msg.get("method").and_then(Value::as_str) {
-            if message_count <= 5 || message_count % 10 == 0 {
+            if message_count <= 5 || message_count.is_multiple_of(10) {
                 debug!(method, message_count, "ACP notification received");
             }
         }
@@ -748,12 +747,10 @@ impl CopilotHeadlessRunner {
 
         // Inject the system prompt into the prompt text so the model sees it
         // even if the ACP systemPrompt parameter in session/new is deprioritized.
-        let text = match system {
-            Some(sys) => {
-                format!("<system-instructions>\n{sys}\n</system-instructions>\n\n{user_text}")
-            }
-            None => user_text.to_owned(),
-        };
+        let text = system.map_or_else(
+            || user_text.to_owned(),
+            |sys| format!("<system-instructions>\n{sys}\n</system-instructions>\n\n{user_text}"),
+        );
 
         let mut blocks = vec![json!({"type": "text", "text": text})];
 
@@ -934,7 +931,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         )
         .await;
 
-        if let Err(_) = &result {
+        if result.is_err() {
             let stderr_output = collect_stderr(&mut child).await;
             warn!(stderr = %stderr_output, "ACP complete timed out");
         }
