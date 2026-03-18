@@ -165,11 +165,12 @@ fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child
     Ok(child)
 }
 
-/// Maximum time to wait for the ACP handshake + session creation (30 seconds).
+/// Maximum time to wait for the ACP handshake + session creation (60 seconds).
 ///
-/// If the copilot binary hangs during initialization (auth issues, network
-/// problems), this prevents blocking for the full 5-minute prompt timeout.
-const ACP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Copilot CLI may need 20–25s for first-run package extraction in containers,
+/// plus time for auth handshake. 60s accommodates cold starts while still
+/// failing faster than the full 5-minute prompt timeout.
+const ACP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Initialize ACP connection and create a session.
 ///
