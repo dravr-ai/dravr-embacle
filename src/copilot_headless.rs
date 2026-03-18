@@ -644,9 +644,10 @@ pub struct HeadlessToolResponse {
 /// Spawns a new copilot subprocess per request using NDJSON framing.
 /// Uses types from `agent-client-protocol-schema` for protocol message deserialization.
 ///
-/// Copilot manages its own tool execution loop internally (`SDK_TOOL_CALLING`).
-/// Tool calls are observed and reported via [`HeadlessToolResponse`] from
-/// [`converse()`](Self::converse), but the caller does not need to execute tools.
+/// Copilot manages its own tool execution internally (GitHub tools, code search),
+/// but cannot execute external MCP tools. Tool calls are observed and reported
+/// via [`HeadlessToolResponse`] from [`converse()`](Self::converse).
+/// For custom tools, callers should use text-based tool calling (CLI tool loop).
 pub struct CopilotHeadlessRunner {
     config: CopilotHeadlessConfig,
     available_models: Vec<String>,
@@ -833,10 +834,11 @@ impl LlmProvider for CopilotHeadlessRunner {
     }
 
     fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities::STREAMING
-            | LlmCapabilities::SYSTEM_MESSAGES
-            | LlmCapabilities::SDK_TOOL_CALLING
-            | LlmCapabilities::VISION
+        // SDK_TOOL_CALLING is intentionally omitted: Copilot ACP manages its own
+        // tools internally (GitHub, code search) and cannot execute external MCP tools.
+        // Without this flag, callers fall through to text-based tool calling where
+        // the host application parses <tool_call> blocks and executes tools itself.
+        LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION
     }
 
     fn default_model(&self) -> &str {
@@ -1098,11 +1100,10 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_include_vision() {
-        let caps = LlmCapabilities::STREAMING
-            | LlmCapabilities::SYSTEM_MESSAGES
-            | LlmCapabilities::SDK_TOOL_CALLING
-            | LlmCapabilities::VISION;
+    fn capabilities_include_vision_but_not_sdk_tool_calling() {
+        let caps =
+            LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION;
         assert!(caps.supports_vision());
+        assert!(!caps.supports_sdk_tool_calling());
     }
 }
