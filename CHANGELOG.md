@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.1] — 2026-03-18
+
+### Fixed
+
+- fix: inject system prompt into ACP prompt blocks
+
+
+
 ## [0.13.0] — 2026-03-13
 
 ### Added
