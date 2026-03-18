@@ -21,11 +21,17 @@ use crate::types::{
     StreamChunk, TokenUsage,
 };
 
-/// Maximum time to wait for an ACP prompt to complete (5 minutes).
-///
-/// Copilot headless sessions can involve multi-step tool calling, so this is
-/// more generous than the default CLI runner timeout (120s).
-const ACP_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Default prompt timeout (5 minutes). Override with `EMBACLE_ACP_PROMPT_TIMEOUT_SECS`.
+const DEFAULT_ACP_PROMPT_TIMEOUT_SECS: u64 = 300;
+
+/// Read prompt timeout from env, falling back to [`DEFAULT_ACP_PROMPT_TIMEOUT_SECS`].
+fn acp_prompt_timeout() -> std::time::Duration {
+    let secs = std::env::var("EMBACLE_ACP_PROMPT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ACP_PROMPT_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
 
 // ---------------------------------------------------------------------------
 // NDJSON transport
@@ -165,17 +171,26 @@ fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child
     Ok(child)
 }
 
-/// Maximum time to wait for the ACP handshake + session creation (60 seconds).
+/// Default session setup timeout (60 seconds).
 ///
 /// Copilot CLI may need 20–25s for first-run package extraction in containers,
-/// plus time for auth handshake. 60s accommodates cold starts while still
-/// failing faster than the full 5-minute prompt timeout.
-const ACP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// plus time for auth handshake. Override with `EMBACLE_ACP_SESSION_TIMEOUT_SECS`.
+const DEFAULT_ACP_SESSION_TIMEOUT_SECS: u64 = 60;
+
+/// Read session setup timeout from `EMBACLE_ACP_SESSION_TIMEOUT_SECS` env var,
+/// falling back to [`DEFAULT_ACP_SESSION_TIMEOUT_SECS`].
+fn acp_session_timeout() -> std::time::Duration {
+    let secs = std::env::var("EMBACLE_ACP_SESSION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ACP_SESSION_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
 
 /// Initialize ACP connection and create a session.
 ///
 /// Returns the transport and session id ready for prompting.
-/// Times out after [`ACP_SESSION_TIMEOUT`] to detect hung copilot processes early.
+/// Times out after [`acp_session_timeout`] to detect hung copilot processes early.
 async fn setup_session(
     cli_path: &PathBuf,
     github_token: Option<&str>,
@@ -196,7 +211,7 @@ async fn setup_session(
     let mut transport = AcpTransport::new(stdin, stdout);
 
     // Wrap handshake + session creation in a timeout to detect hung processes early
-    let session_result = tokio::time::timeout(ACP_SESSION_TIMEOUT, async {
+    let session_result = tokio::time::timeout(acp_session_timeout(), async {
         // Initialize handshake
         info!("ACP: sending initialize handshake");
         let init_id = transport
@@ -263,13 +278,13 @@ async fn setup_session(
             let stderr_output = collect_stderr(&mut child).await;
             warn!(
                 stderr = %stderr_output,
-                timeout_secs = ACP_SESSION_TIMEOUT.as_secs(),
+                timeout_secs = acp_session_timeout().as_secs(),
                 "ACP session setup timed out — copilot process may be hung (auth issue?)"
             );
             let _ = child.kill().await;
             Err(RunnerError::timeout(format!(
                 "copilot-acp: session setup timed out after {}s (check copilot auth)",
-                ACP_SESSION_TIMEOUT.as_secs()
+                acp_session_timeout().as_secs()
             )))
         }
     }
@@ -772,7 +787,7 @@ impl CopilotHeadlessRunner {
             .await?;
 
         let result = tokio::time::timeout(
-            ACP_PROMPT_TIMEOUT,
+            acp_prompt_timeout(),
             collect_complete(
                 &mut transport,
                 prompt_id,
@@ -798,7 +813,7 @@ impl CopilotHeadlessRunner {
                 let stderr_output = collect_stderr(&mut child).await;
                 warn!(
                     stderr = %stderr_output,
-                    timeout_secs = ACP_PROMPT_TIMEOUT.as_secs(),
+                    timeout_secs = acp_prompt_timeout().as_secs(),
                     "ACP converse timed out"
                 );
             }
@@ -809,7 +824,7 @@ impl CopilotHeadlessRunner {
         let result = result.map_err(|_| {
             RunnerError::timeout(format!(
                 "copilot-acp: prompt timed out after {}s",
-                ACP_PROMPT_TIMEOUT.as_secs()
+                acp_prompt_timeout().as_secs()
             ))
         })?;
 
@@ -880,7 +895,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             .await?;
 
         let result = tokio::time::timeout(
-            ACP_PROMPT_TIMEOUT,
+            acp_prompt_timeout(),
             collect_complete(
                 &mut transport,
                 prompt_id,
@@ -901,7 +916,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             .map_err(|_| {
                 RunnerError::timeout(format!(
                     "copilot-acp: prompt timed out after {}s",
-                    ACP_PROMPT_TIMEOUT.as_secs()
+                    acp_prompt_timeout().as_secs()
                 ))
             })?
             .map(|(response, _tool_calls)| response)
@@ -936,7 +951,7 @@ impl LlmProvider for CopilotHeadlessRunner {
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(
-                ACP_PROMPT_TIMEOUT,
+                acp_prompt_timeout(),
                 collect_streaming(&mut transport, prompt_id, &chunk_tx, policy),
             )
             .await;
@@ -947,7 +962,7 @@ impl LlmProvider for CopilotHeadlessRunner {
                 Err(_) => {
                     let _ = chunk_tx.send(Err(RunnerError::timeout(format!(
                         "copilot-acp: prompt timed out after {}s",
-                        ACP_PROMPT_TIMEOUT.as_secs()
+                        acp_prompt_timeout().as_secs()
                     ))));
                 }
                 Ok(Ok(())) => {}
