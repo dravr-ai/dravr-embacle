@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::copilot::{copilot_fallback_models, discover_copilot_models};
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
@@ -146,19 +146,35 @@ fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child
     cmd.arg("--acp")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
 
     if let Some(token) = github_token {
         cmd.env("COPILOT_GITHUB_TOKEN", token);
     }
 
-    cmd.spawn()
-        .map_err(|e| RunnerError::internal(format!("Failed to spawn copilot --acp: {e}")))
+    info!(cli_path = %cli_path.display(), "Spawning copilot --acp subprocess");
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| RunnerError::internal(format!("Failed to spawn copilot --acp: {e}")))?;
+
+    info!(
+        pid = child.id().unwrap_or(0),
+        "copilot --acp subprocess started"
+    );
+    Ok(child)
 }
+
+/// Maximum time to wait for the ACP handshake + session creation (30 seconds).
+///
+/// If the copilot binary hangs during initialization (auth issues, network
+/// problems), this prevents blocking for the full 5-minute prompt timeout.
+const ACP_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Initialize ACP connection and create a session.
 ///
 /// Returns the transport and session id ready for prompting.
+/// Times out after [`ACP_SESSION_TIMEOUT`] to detect hung copilot processes early.
 async fn setup_session(
     cli_path: &PathBuf,
     github_token: Option<&str>,
@@ -178,48 +194,118 @@ async fn setup_session(
 
     let mut transport = AcpTransport::new(stdin, stdout);
 
-    // Initialize handshake
-    let init_id = transport
-        .send_request(
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "clientInfo": {
-                    "name": "embacle",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "capabilities": {},
-            }),
-        )
-        .await?;
-    transport.read_response(init_id).await?;
+    // Wrap handshake + session creation in a timeout to detect hung processes early
+    let session_result = tokio::time::timeout(ACP_SESSION_TIMEOUT, async {
+        // Initialize handshake
+        info!("ACP: sending initialize handshake");
+        let init_id = transport
+            .send_request(
+                "initialize",
+                json!({
+                    "protocolVersion": 1,
+                    "clientInfo": {
+                        "name": "embacle",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "capabilities": {},
+                }),
+            )
+            .await?;
+        let init_resp = transport.read_response(init_id).await?;
+        info!("ACP: initialize handshake complete");
+        debug!(response = %init_resp, "ACP initialize response");
 
-    // Create session with model and optional system prompt
-    let mut session_params = json!({
-        "model": model,
-        "cwd": std::env::current_dir()
-            .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
-        "mcpServers": [],
-    });
-    if let Some(sys) = system_prompt {
-        session_params["systemPrompt"] = Value::String(sys.to_owned());
+        // Create session with model and optional system prompt
+        let mut session_params = json!({
+            "model": model,
+            "cwd": std::env::current_dir()
+                .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
+            "mcpServers": [],
+        });
+        if let Some(sys) = system_prompt {
+            session_params["systemPrompt"] = Value::String(sys.to_owned());
+        }
+
+        info!(model = %model, has_system_prompt = system_prompt.is_some(), "ACP: creating session");
+        let session_id_req = transport
+            .send_request("session/new", session_params)
+            .await?;
+        let session_result = transport.read_response(session_id_req).await?;
+
+        let session_id = session_result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RunnerError::external_service("copilot-acp", "Missing sessionId in response")
+            })?
+            .to_owned();
+
+        info!(session_id = %session_id, model = %model, "ACP session created");
+        Ok::<_, RunnerError>((session_id,))
+    })
+    .await;
+
+    match session_result {
+        Ok(Ok((session_id,))) => Ok((transport, child, session_id)),
+        Ok(Err(e)) => {
+            // Collect stderr for diagnostics before killing
+            let stderr_output = collect_stderr(&mut child).await;
+            warn!(
+                error = %e,
+                stderr = %stderr_output,
+                "ACP session setup failed"
+            );
+            let _ = child.kill().await;
+            Err(e)
+        }
+        Err(_elapsed) => {
+            let stderr_output = collect_stderr(&mut child).await;
+            warn!(
+                stderr = %stderr_output,
+                timeout_secs = ACP_SESSION_TIMEOUT.as_secs(),
+                "ACP session setup timed out — copilot process may be hung (auth issue?)"
+            );
+            let _ = child.kill().await;
+            Err(RunnerError::timeout(format!(
+                "copilot-acp: session setup timed out after {}s (check copilot auth)",
+                ACP_SESSION_TIMEOUT.as_secs()
+            )))
+        }
     }
+}
 
-    let session_id_req = transport
-        .send_request("session/new", session_params)
-        .await?;
-    let session_result = transport.read_response(session_id_req).await?;
-
-    let session_id = session_result
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            RunnerError::external_service("copilot-acp", "Missing sessionId in response")
-        })?
-        .to_owned();
-
-    debug!(session_id = %session_id, model = %model, "ACP session created");
-    Ok((transport, child, session_id))
+/// Collect any available stderr output from the child process (non-blocking, best-effort).
+async fn collect_stderr(child: &mut Child) -> String {
+    let Some(stderr) = child.stderr.take() else {
+        return "(no stderr captured)".to_owned();
+    };
+    let mut reader = BufReader::new(stderr);
+    let mut output = String::new();
+    // Read up to 4KB of stderr, with a short timeout
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf).await {
+                Ok(0) => break,
+                Ok(_) => output.push_str(&buf),
+                Err(_) => break,
+            }
+            if output.len() > 4096 {
+                output.push_str("...(truncated)");
+                break;
+            }
+        }
+    })
+    .await;
+    if result.is_err() && output.is_empty() {
+        return "(stderr read timed out — process may still be running)".to_owned();
+    }
+    if output.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        output
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,9 +451,21 @@ async fn collect_complete(
     policy: PermissionPolicy,
 ) -> Result<(ChatResponse, Vec<ObservedToolCall>), RunnerError> {
     let mut acc = TurnAccumulator::new();
+    let mut message_count: u32 = 0;
 
     loop {
         let msg = transport.read_message().await?;
+        message_count += 1;
+
+        if message_count == 1 {
+            info!("ACP: receiving first message from copilot");
+        }
+        // Log method notifications for visibility (every 10th to avoid spam)
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            if message_count <= 5 || message_count % 10 == 0 {
+                debug!(method, message_count, "ACP notification received");
+            }
+        }
 
         // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
@@ -660,6 +758,7 @@ impl CopilotHeadlessRunner {
         )
         .await?;
 
+        info!(session_id = %session_id, "ACP: sending prompt");
         let prompt_id = transport
             .send_request(
                 "session/prompt",
@@ -679,14 +778,38 @@ impl CopilotHeadlessRunner {
                 self.config.permission_policy,
             ),
         )
-        .await
-        .map_err(|_| {
+        .await;
+
+        match &result {
+            Ok(Ok((response, tool_calls))) => {
+                info!(
+                    content_len = response.content.len(),
+                    tool_calls = tool_calls.len(),
+                    "ACP converse completed successfully"
+                );
+            }
+            Ok(Err(e)) => {
+                let stderr_output = collect_stderr(&mut child).await;
+                warn!(error = %e, stderr = %stderr_output, "ACP converse failed");
+            }
+            Err(_) => {
+                let stderr_output = collect_stderr(&mut child).await;
+                warn!(
+                    stderr = %stderr_output,
+                    timeout_secs = ACP_PROMPT_TIMEOUT.as_secs(),
+                    "ACP converse timed out"
+                );
+            }
+        }
+
+        let _ = child.kill().await;
+
+        let result = result.map_err(|_| {
             RunnerError::timeout(format!(
                 "copilot-acp: prompt timed out after {}s",
                 ACP_PROMPT_TIMEOUT.as_secs()
             ))
         })?;
-        let _ = child.kill().await;
 
         let (response, tool_calls) = result?;
         Ok(HeadlessToolResponse {
@@ -742,6 +865,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         )
         .await?;
 
+        info!(session_id = %session_id, "ACP complete: sending prompt");
         let prompt_id = transport
             .send_request(
                 "session/prompt",
@@ -761,15 +885,23 @@ impl LlmProvider for CopilotHeadlessRunner {
                 self.config.permission_policy,
             ),
         )
-        .await
-        .map_err(|_| {
-            RunnerError::timeout(format!(
-                "copilot-acp: prompt timed out after {}s",
-                ACP_PROMPT_TIMEOUT.as_secs()
-            ))
-        })?;
+        .await;
+
+        if let Err(_) = &result {
+            let stderr_output = collect_stderr(&mut child).await;
+            warn!(stderr = %stderr_output, "ACP complete timed out");
+        }
+
         let _ = child.kill().await;
-        result.map(|(response, _tool_calls)| response)
+
+        result
+            .map_err(|_| {
+                RunnerError::timeout(format!(
+                    "copilot-acp: prompt timed out after {}s",
+                    ACP_PROMPT_TIMEOUT.as_secs()
+                ))
+            })?
+            .map(|(response, _tool_calls)| response)
     }
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
