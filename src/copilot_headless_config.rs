@@ -19,6 +19,11 @@ pub enum PermissionPolicy {
     DenyAll,
 }
 
+/// Default number of conversation history turns injected into the ACP prompt.
+/// Each "turn" is one user or assistant message. Override with
+/// `COPILOT_HEADLESS_MAX_HISTORY_TURNS`.
+pub const DEFAULT_MAX_HISTORY_TURNS: usize = 20;
+
 /// Configuration for the Copilot Headless (ACP) provider.
 #[derive(Debug, Clone)]
 pub struct CopilotHeadlessConfig {
@@ -30,6 +35,9 @@ pub struct CopilotHeadlessConfig {
     pub github_token: Option<String>,
     /// Policy for handling permission requests from the copilot subprocess.
     pub permission_policy: PermissionPolicy,
+    /// Maximum number of prior conversation messages (user + assistant) to include
+    /// in the ACP prompt for multi-turn context. Set to 0 to disable history injection.
+    pub max_history_turns: usize,
 }
 
 impl CopilotHeadlessConfig {
@@ -39,6 +47,7 @@ impl CopilotHeadlessConfig {
     /// - `COPILOT_CLI_PATH` — Override path to copilot binary
     /// - `COPILOT_HEADLESS_MODEL` — Default model (default: `claude-opus-4.6-fast`)
     /// - `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` — GitHub auth token
+    /// - `COPILOT_HEADLESS_MAX_HISTORY_TURNS` — Max conversation history turns (default: 20)
     #[must_use]
     pub fn from_env() -> Self {
         let cli_path = env::var("COPILOT_CLI_PATH").ok().map(PathBuf::from);
@@ -60,11 +69,17 @@ impl CopilotHeadlessConfig {
             _ => PermissionPolicy::AutoApprove,
         };
 
+        let max_history_turns = env::var("COPILOT_HEADLESS_MAX_HISTORY_TURNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_HISTORY_TURNS);
+
         Self {
             cli_path,
             model,
             github_token,
             permission_policy,
+            max_history_turns,
         }
     }
 }
@@ -76,6 +91,80 @@ impl Default for CopilotHeadlessConfig {
             model: "claude-opus-4.6-fast".to_owned(),
             github_token: None,
             permission_policy: PermissionPolicy::default(),
+            max_history_turns: DEFAULT_MAX_HISTORY_TURNS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_max_history_turns_is_20() {
+        assert_eq!(DEFAULT_MAX_HISTORY_TURNS, 20);
+    }
+
+    #[test]
+    fn default_config_uses_default_max_history_turns() {
+        let config = CopilotHeadlessConfig::default();
+        assert_eq!(config.max_history_turns, 20);
+    }
+
+    #[test]
+    fn config_max_history_turns_overridable() {
+        let config = CopilotHeadlessConfig {
+            max_history_turns: 50,
+            ..CopilotHeadlessConfig::default()
+        };
+        assert_eq!(config.max_history_turns, 50);
+    }
+
+    #[test]
+    fn config_max_history_turns_can_be_zero() {
+        let config = CopilotHeadlessConfig {
+            max_history_turns: 0,
+            ..CopilotHeadlessConfig::default()
+        };
+        assert_eq!(config.max_history_turns, 0);
+    }
+
+    /// Env var tests run sequentially in a single test to avoid race conditions
+    /// (env vars are process-global state shared across parallel test threads).
+    #[test]
+    fn from_env_max_history_turns_parsing() {
+        let key = "COPILOT_HEADLESS_MAX_HISTORY_TURNS";
+
+        // Default when env var is not set
+        env::remove_var(key);
+        let config = CopilotHeadlessConfig::from_env();
+        assert_eq!(
+            config.max_history_turns, DEFAULT_MAX_HISTORY_TURNS,
+            "should use default when env var absent"
+        );
+
+        // Valid integer value
+        env::set_var(key, "42");
+        let config = CopilotHeadlessConfig::from_env();
+        assert_eq!(config.max_history_turns, 42, "should parse valid integer");
+
+        // Invalid value falls back to default
+        env::set_var(key, "not_a_number");
+        let config = CopilotHeadlessConfig::from_env();
+        assert_eq!(
+            config.max_history_turns, DEFAULT_MAX_HISTORY_TURNS,
+            "should fall back to default on invalid input"
+        );
+
+        // Zero is a valid value (disables history)
+        env::set_var(key, "0");
+        let config = CopilotHeadlessConfig::from_env();
+        assert_eq!(
+            config.max_history_turns, 0,
+            "should accept zero to disable history"
+        );
+
+        // Cleanup
+        env::remove_var(key);
     }
 }

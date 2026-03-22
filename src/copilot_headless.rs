@@ -17,8 +17,8 @@ use tracing::{debug, info, warn};
 use crate::copilot::{copilot_fallback_models, discover_copilot_models};
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, MessageRole, RunnerError,
-    StreamChunk, TokenUsage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, MessageRole,
+    RunnerError, StreamChunk, TokenUsage,
 };
 
 /// Default prompt timeout (5 minutes). Override with `EMBACLE_ACP_PROMPT_TIMEOUT_SECS`.
@@ -731,26 +731,83 @@ impl CopilotHeadlessRunner {
         which::which("copilot").map_err(|_| RunnerError::binary_not_found("copilot"))
     }
 
-    /// Build ACP prompt content blocks from the last user message.
+    /// Build ACP prompt content blocks from the conversation messages.
+    ///
+    /// ACP creates a fresh session per request with no built-in multi-turn memory.
+    /// To provide conversation continuity, prior user/assistant exchanges are
+    /// serialized into a `<conversation-history>` block prepended to the prompt.
+    /// The system prompt is injected into `<system-instructions>`.
+    ///
+    /// The number of history messages is capped by `max_history_turns` from
+    /// [`CopilotHeadlessConfig`]. Only the most recent turns are kept.
     ///
     /// Always includes a text block. When the last user message has images,
     /// appends image blocks with `type: "image"`, `data`, and `mimeType`.
-    fn build_prompt_blocks(request: &ChatRequest) -> Vec<Value> {
+    fn build_prompt_blocks(&self, request: &ChatRequest) -> Vec<Value> {
         let system = Self::extract_system_prompt(request);
-        let last_user = request
+        let max_turns = self.config.max_history_turns;
+
+        // Separate non-system messages into history (all but last user) + last user
+        let non_system: Vec<&ChatMessage> = request
             .messages
             .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::User);
+            .filter(|m| m.role != MessageRole::System)
+            .collect();
+
+        let (history, last_user) = if non_system.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let last_idx = non_system.iter().rposition(|m| m.role == MessageRole::User);
+            match last_idx {
+                Some(idx) => {
+                    let hist = non_system[..idx].to_vec();
+                    (hist, Some(non_system[idx]))
+                }
+                None => (non_system, None),
+            }
+        };
 
         let user_text = last_user.map(|m| m.content.as_str()).unwrap_or_default();
 
-        // Inject the system prompt into the prompt text so the model sees it
-        // even if the ACP systemPrompt parameter in session/new is deprioritized.
-        let text = system.map_or_else(
-            || user_text.to_owned(),
-            |sys| format!("<system-instructions>\n{sys}\n</system-instructions>\n\n{user_text}"),
-        );
+        // Apply max_history_turns limit — keep only the most recent turns
+        let truncated_history = if max_turns == 0 || history.is_empty() {
+            &[][..]
+        } else if history.len() > max_turns {
+            &history[history.len() - max_turns..]
+        } else {
+            &history
+        };
+
+        // Serialize prior turns into a conversation history block
+        let history_block = if truncated_history.is_empty() {
+            String::new()
+        } else {
+            let mut buf = String::from("<conversation-history>\n");
+            for msg in truncated_history {
+                let role_label = match msg.role {
+                    MessageRole::User => "User",
+                    MessageRole::Assistant => "Assistant",
+                    MessageRole::Tool => "Tool",
+                    MessageRole::System => continue,
+                };
+                buf.push_str(role_label);
+                buf.push_str(": ");
+                buf.push_str(&msg.content);
+                buf.push('\n');
+            }
+            buf.push_str("</conversation-history>\n\n");
+            buf
+        };
+
+        // Assemble: system instructions + conversation history + current user message
+        let mut text = String::new();
+        if let Some(sys) = system {
+            text.push_str("<system-instructions>\n");
+            text.push_str(sys);
+            text.push_str("\n</system-instructions>\n\n");
+        }
+        text.push_str(&history_block);
+        text.push_str(user_text);
 
         let mut blocks = vec![json!({"type": "text", "text": text})];
 
@@ -791,7 +848,7 @@ impl CopilotHeadlessRunner {
             .unwrap_or(&self.config.model)
             .to_owned();
         let system_prompt = Self::extract_system_prompt(request);
-        let prompt_blocks = Self::build_prompt_blocks(request);
+        let prompt_blocks = self.build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -899,7 +956,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             .unwrap_or(&self.config.model)
             .to_owned();
         let system_prompt = Self::extract_system_prompt(request);
-        let prompt_blocks = Self::build_prompt_blocks(request);
+        let prompt_blocks = self.build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -952,7 +1009,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let cli_path = self.resolve_cli_path()?;
         let model = request.model.as_deref().unwrap_or(&self.config.model);
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
-        let prompt_blocks = Self::build_prompt_blocks(request);
+        let prompt_blocks = self.build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
@@ -1084,10 +1141,22 @@ mod tests {
         assert_eq!(result["outcome"], "cancelled");
     }
 
+    /// Create a test runner with configurable `max_history_turns`.
+    fn test_runner(max_history_turns: usize) -> CopilotHeadlessRunner {
+        CopilotHeadlessRunner {
+            config: CopilotHeadlessConfig {
+                max_history_turns,
+                ..CopilotHeadlessConfig::default()
+            },
+            available_models: vec![],
+        }
+    }
+
     #[test]
     fn build_prompt_blocks_text_only_no_system() {
+        let runner = test_runner(20);
         let request = ChatRequest::new(vec![ChatMessage::user("Hello")]);
-        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        let blocks = runner.build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "Hello");
@@ -1095,11 +1164,12 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_injects_system_prompt() {
+        let runner = test_runner(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("You are a fitness assistant"),
             ChatMessage::user("Hello"),
         ]);
-        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        let blocks = runner.build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         let text = blocks[0]["text"].as_str().unwrap();
@@ -1113,12 +1183,13 @@ mod tests {
     fn build_prompt_blocks_with_images() {
         use crate::types::ImagePart;
 
+        let runner = test_runner(20);
         let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
         let request = ChatRequest::new(vec![ChatMessage::user_with_images(
             "Describe this image",
             vec![img],
         )]);
-        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
+        let blocks = runner.build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "text");
         assert!(blocks[0]["text"]
@@ -1132,13 +1203,233 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_uses_last_user_message() {
+        let runner = test_runner(20);
         let request = ChatRequest::new(vec![
             ChatMessage::user("first"),
             ChatMessage::assistant("response"),
             ChatMessage::user("second"),
         ]);
-        let blocks = CopilotHeadlessRunner::build_prompt_blocks(&request);
-        assert!(blocks[0]["text"].as_str().unwrap().contains("second"));
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("second"));
+        // The last user message should NOT be in the history section
+        assert!(!text.ends_with("second\n</conversation-history>"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_includes_conversation_history() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("You are helpful"),
+            ChatMessage::user("What is my pace?"),
+            ChatMessage::assistant("Your average pace is 5:30/km"),
+            ChatMessage::user("And my heart rate?"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // System prompt injected
+        assert!(text.contains("<system-instructions>"));
+        assert!(text.contains("You are helpful"));
+
+        // Conversation history block present with prior turns
+        assert!(text.contains("<conversation-history>"));
+        assert!(text.contains("User: What is my pace?"));
+        assert!(text.contains("Assistant: Your average pace is 5:30/km"));
+        assert!(text.contains("</conversation-history>"));
+
+        // Current user message at the end (outside history block)
+        assert!(text.contains("And my heart rate?"));
+        // Current message should NOT be inside the history block
+        assert!(!text.contains("User: And my heart rate?"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_no_history_for_single_turn() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("Be helpful"),
+            ChatMessage::user("Hello"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+        // No history block when there's only one user message
+        assert!(!text.contains("<conversation-history>"));
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_truncates_history_to_max_turns() {
+        let runner = test_runner(2); // Only keep 2 most recent history messages
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("msg1"),
+            ChatMessage::assistant("reply1"),
+            ChatMessage::user("msg2"),
+            ChatMessage::assistant("reply2"),
+            ChatMessage::user("msg3"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // Only the 2 most recent history messages should be included
+        assert!(!text.contains("User: msg1"));
+        assert!(!text.contains("Assistant: reply1"));
+        assert!(text.contains("User: msg2"));
+        assert!(text.contains("Assistant: reply2"));
+        assert!(text.contains("msg3")); // Current message
+    }
+
+    #[test]
+    fn build_prompt_blocks_zero_max_turns_disables_history() {
+        let runner = test_runner(0);
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("first"),
+            ChatMessage::assistant("response"),
+            ChatMessage::user("second"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(!text.contains("<conversation-history>"));
+        assert!(text.contains("second"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_max_turns_one_keeps_last_history_message() {
+        let runner = test_runner(1);
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("msg1"),
+            ChatMessage::assistant("reply1"),
+            ChatMessage::user("msg2"),
+            ChatMessage::assistant("reply2"),
+            ChatMessage::user("current"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // Only the single most recent history message (reply2)
+        assert!(!text.contains("User: msg1"));
+        assert!(!text.contains("reply1"));
+        assert!(!text.contains("User: msg2"));
+        assert!(text.contains("Assistant: reply2"));
+        assert!(text.contains("current"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_tool_messages_included_in_history() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("Check my activities"),
+            ChatMessage::tool("get_activities", "call_1", "{\"activities\": []}"),
+            ChatMessage::assistant("No activities found"),
+            ChatMessage::user("Try again"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        assert!(text.contains("<conversation-history>"));
+        assert!(text.contains("User: Check my activities"));
+        assert!(text.contains("Tool: "));
+        assert!(text.contains("Assistant: No activities found"));
+        assert!(text.contains("Try again"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_empty_messages() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![]);
+        let blocks = runner.build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 1);
+        // Empty prompt — no crash
+        assert_eq!(blocks[0]["text"], "");
+    }
+
+    #[test]
+    fn build_prompt_blocks_only_system_message() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![ChatMessage::system("Be helpful")]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("<system-instructions>"));
+        assert!(text.contains("Be helpful"));
+        assert!(!text.contains("<conversation-history>"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_long_conversation_keeps_most_recent() {
+        let runner = test_runner(4);
+        let mut messages = vec![ChatMessage::system("system")];
+        for i in 1..=10 {
+            messages.push(ChatMessage::user(format!("user_{i}")));
+            messages.push(ChatMessage::assistant(format!("reply_{i}")));
+        }
+        messages.push(ChatMessage::user("current"));
+        let request = ChatRequest::new(messages);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // Only last 4 history messages kept (user_9, reply_9, user_10, reply_10)
+        assert!(!text.contains("user_8"));
+        assert!(!text.contains("reply_8"));
+        assert!(text.contains("User: user_9"));
+        assert!(text.contains("Assistant: reply_9"));
+        assert!(text.contains("User: user_10"));
+        assert!(text.contains("Assistant: reply_10"));
+        assert!(text.contains("current"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_preserves_section_ordering() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("sys prompt"),
+            ChatMessage::user("q1"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("q2"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // Verify ordering: system-instructions < conversation-history < current message
+        let sys_pos = text.find("<system-instructions>").unwrap();
+        let hist_pos = text.find("<conversation-history>").unwrap();
+        let current_pos = text.find("q2").unwrap();
+        assert!(sys_pos < hist_pos, "system must come before history");
+        assert!(
+            hist_pos < current_pos,
+            "history must come before current message"
+        );
+    }
+
+    #[test]
+    fn build_prompt_blocks_history_exact_at_max_turns() {
+        let runner = test_runner(2);
+        // Exactly 2 history messages — should include all, no truncation
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("q1"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("current"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        assert!(text.contains("User: q1"));
+        assert!(text.contains("Assistant: a1"));
+        assert!(text.contains("current"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_multiple_system_messages_uses_first() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("first system"),
+            ChatMessage::system("second system"),
+            ChatMessage::user("hello"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // extract_system_prompt returns the first system message
+        assert!(text.contains("first system"));
     }
 
     #[test]

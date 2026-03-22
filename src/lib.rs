@@ -303,4 +303,6 @@ pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
 #[cfg(feature = "copilot-headless")]
 pub use copilot_headless::{CopilotHeadlessRunner, HeadlessToolResponse, ObservedToolCall};
 #[cfg(feature = "copilot-headless")]
-pub use copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
+pub use copilot_headless_config::{
+    CopilotHeadlessConfig, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS,
+};
