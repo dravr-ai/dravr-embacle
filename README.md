@@ -538,10 +538,10 @@ Your Application
             ├── MCP Tool Bridge
             │   └── McpToolBridge       → MCP tool definitions ↔ text-based tool loop
             │
-            ├── MCP Server (library + binary crate)
+            ├── MCP Server (library + binary crate, powered by dravr-tronc)
             │   └── embacle-mcp         → JSON-RPC 2.0 over stdio or HTTP/SSE
             │
-            ├── Unified REST API + MCP Server (binary crate)
+            ├── Unified REST API + MCP Server (binary crate, powered by dravr-tronc)
             │   └── embacle-server      → OpenAI-compatible HTTP, MCP Streamable HTTP, SSE streaming, multiplex
             │
             └── Tool Simulation (text-based tool calling for CLI runners)

@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use embacle::types::RunnerError;
-use embacle_mcp::transport::McpTransport;
 use embacle_mcp::ServerState;
 use tokio::sync::RwLock;
 
@@ -39,27 +38,9 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
-
-    // stdio transport needs stderr-only logging to keep stdout clean for JSON-RPC
-    let is_stdio = cli.transport == "stdio";
-    if is_stdio {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .init();
-    }
+    dravr_tronc::server::tracing_init::init(&cli.transport);
 
     // Initialize OpenTelemetry metrics (export pipeline configured via OTEL_EXPORTER_* env vars)
     let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
@@ -108,13 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.transport.as_str() {
         "stdio" => {
-            let server = Arc::new(embacle_mcp::McpServer::new(
-                Arc::clone(&state),
+            let server = Arc::new(dravr_tronc::McpServer::new(
+                "embacle-mcp",
+                env!("CARGO_PKG_VERSION"),
                 embacle_mcp::build_tool_registry(),
+                Arc::clone(&state),
             ));
-            embacle_mcp::transport::stdio::StdioTransport
-                .serve(server)
-                .await?;
+            dravr_tronc::mcp::transport::stdio::run(server).await?;
         }
         "http" => {
             let app = router::build(state);
