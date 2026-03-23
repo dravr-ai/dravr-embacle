@@ -62,7 +62,7 @@ docker run -p 3000:3000 ghcr.io/dravr-ai/embacle --provider copilot
 
 ```toml
 [dependencies]
-embacle = "0.13"
+embacle = "0.14"
 ```
 
 ## Supported Runners
@@ -259,7 +259,7 @@ Enable the `openai-api` feature for HTTP-based communication with any OpenAI-com
 
 ```toml
 [dependencies]
-embacle = { version = "0.13", features = ["openai-api"] }
+embacle = { version = "0.14", features = ["openai-api"] }
 ```
 
 ```rust
@@ -297,7 +297,7 @@ Enable the `copilot-headless` feature for ACP-based communication with SDK-manag
 
 ```toml
 [dependencies]
-embacle = { version = "0.13", features = ["copilot-headless"] }
+embacle = { version = "0.14", features = ["copilot-headless"] }
 ```
 
 ```rust

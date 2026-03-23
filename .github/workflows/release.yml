@@ -125,6 +125,15 @@ jobs:
             } > CHANGELOG.md
           fi
 
+      - name: Update README version
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          MAJOR_MINOR="${VERSION%.*}"
+          if [ -f README.md ]; then
+            sed -i "s/embacle = { version = \"[0-9]*\.[0-9]*\"/embacle = { version = \"${MAJOR_MINOR}\"/" README.md
+            sed -i "s/embacle = \"[0-9]*\.[0-9]*\"/embacle = \"${MAJOR_MINOR}\"/" README.md
+          fi
+
       - name: Commit, tag, push
         run: |
           VERSION="${{ steps.bump.outputs.version }}"
