@@ -26,7 +26,7 @@ path = "src/main.rs"
 [dependencies]
 embacle = { path = "../..", version = "0.14.1", features = ["config-file", "copilot-headless", "otel"] }
 embacle-mcp = { path = "../embacle-mcp", version = "0.14.1" }
-dravr-tronc = "0.1.0"
+dravr-tronc = { version = "0.2", features = ["notifications"] }
 async-trait = "0.1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }

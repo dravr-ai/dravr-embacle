@@ -40,7 +40,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
-    dravr_tronc::server::tracing_init::init(&cli.transport);
+    dravr_tronc::server::tracing_init::init_with_notifications(&cli.transport);
 
     // Initialize OpenTelemetry metrics (export pipeline configured via OTEL_EXPORTER_* env vars)
     let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
