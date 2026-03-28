@@ -163,8 +163,10 @@ fn inject_schema_instruction(messages: &mut Vec<ChatMessage>, instruction: &str)
 
 /// Extract JSON content from a response, handling markdown code fences.
 ///
-/// Uses a brace-depth counter to find the outermost `{...}` block.
-fn extract_json_from_response(content: &str) -> String {
+/// CLI runners often wrap JSON in markdown fences (e.g. `` ```json ... ``` ``).
+/// This function strips those fences and returns the raw JSON object using a
+/// brace-depth counter to find the outermost `{...}` block.
+pub fn extract_json_from_response(content: &str) -> String {
     let trimmed = content.trim();
 
     // Fast path: already starts with `{`

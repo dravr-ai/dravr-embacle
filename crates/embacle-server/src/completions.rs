@@ -11,7 +11,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use embacle::types::{ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, RunnerError};
+use embacle::types::{
+    ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, ResponseFormat, RunnerError,
+};
 use embacle::FunctionDeclaration;
 use tracing::{debug, error, warn};
 
@@ -170,6 +172,27 @@ async fn handle_single(
     .await
 }
 
+/// Check if the response format requests JSON output
+fn wants_json(format: Option<&ResponseFormat>) -> bool {
+    matches!(
+        format,
+        Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+    )
+}
+
+/// Strip markdown code fences from content when JSON output is requested.
+///
+/// CLI runners often wrap JSON in `` ```json ... ``` `` fences. When the client
+/// has requested `response_format: json_object` or `json_schema`, extract the
+/// raw JSON so the response is directly parseable.
+fn strip_json_fences(content: String, json_mode: bool) -> String {
+    if json_mode {
+        embacle::extract_json_from_response(&content)
+    } else {
+        content
+    }
+}
+
 /// Dispatch the completion request to the appropriate execution path
 ///
 /// Routes between four modes:
@@ -186,6 +209,8 @@ async fn dispatch_completion(
     supports_streaming: bool,
     warnings: Option<Vec<String>>,
 ) -> Response {
+    let json_mode = wants_json(chat_request.response_format.as_ref());
+
     if stream && (has_tools || !supports_streaming) {
         // Downgrade to non-streaming complete(), emit result as SSE
         if has_tools {
@@ -199,9 +224,10 @@ async fn dispatch_completion(
         match runner.complete(&chat_request).await {
             Ok(response) => {
                 let model_name = format!("{runner_type}:{}", response.model);
+                let content = strip_json_fences(response.content, json_mode);
                 let (message, finish_reason) = build_response_message(
                     has_tools,
-                    response.content,
+                    content,
                     response.finish_reason,
                     response.tool_calls.as_ref(),
                 );
@@ -215,7 +241,11 @@ async fn dispatch_completion(
         match runner.complete_stream(&chat_request).await {
             Ok(s) => {
                 let model_name = format!("{runner_type}:{}", runner.default_model());
-                streaming::sse_response(s, &model_name)
+                if json_mode {
+                    streaming::sse_response_strip_fences(s, &model_name)
+                } else {
+                    streaming::sse_response(s, &model_name)
+                }
             }
             Err(e) => runner_error_to_response(&e),
         }
@@ -229,9 +259,10 @@ async fn dispatch_completion(
                     total: u.total_tokens,
                 });
 
+                let content = strip_json_fences(response.content, json_mode);
                 let (message, finish_reason) = build_response_message(
                     has_tools,
-                    response.content,
+                    content,
                     response.finish_reason,
                     response.tool_calls.as_ref(),
                 );
@@ -958,5 +989,36 @@ mod tests {
 
         assert!(messages[1].content.starts_with("## Tools"));
         assert!(messages[1].content.contains("Hello"));
+    }
+
+    #[test]
+    fn wants_json_matches_json_formats() {
+        use embacle::types::ResponseFormat;
+
+        assert!(!wants_json(None));
+        assert!(!wants_json(Some(&ResponseFormat::Text)));
+        assert!(wants_json(Some(&ResponseFormat::JsonObject)));
+        assert!(wants_json(Some(&ResponseFormat::JsonSchema {
+            name: "test".to_owned(),
+            schema: serde_json::json!({}),
+        })));
+    }
+
+    #[test]
+    fn strip_json_fences_removes_markdown_wrapper() {
+        let fenced = "```json\n{\"key\":\"value\"}\n```".to_owned();
+        assert_eq!(strip_json_fences(fenced, true), "{\"key\":\"value\"}");
+    }
+
+    #[test]
+    fn strip_json_fences_passes_through_in_text_mode() {
+        let fenced = "```json\n{\"key\":\"value\"}\n```".to_owned();
+        assert_eq!(strip_json_fences(fenced.clone(), false), fenced);
+    }
+
+    #[test]
+    fn strip_json_fences_leaves_clean_json_unchanged() {
+        let clean = "{\"key\":\"value\"}".to_owned();
+        assert_eq!(strip_json_fences(clean.clone(), true), clean);
     }
 }

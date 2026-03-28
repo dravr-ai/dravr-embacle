@@ -110,6 +110,53 @@ pub fn sse_response(stream: ChatStream, model: &str) -> Response {
         .into_response()
 }
 
+/// Convert a `ChatStream` into an SSE response, stripping markdown code fences
+///
+/// Used when `response_format` requests JSON. CLI runners often wrap JSON in
+/// `` ```json ... ``` `` fences that arrive as separate stream chunks. This
+/// variant filters those fence lines out so the client receives clean JSON.
+pub fn sse_response_strip_fences(stream: ChatStream, model: &str) -> Response {
+    let filtered = strip_fence_chunks(stream);
+    sse_response(filtered, model)
+}
+
+/// Wrap a `ChatStream` to remove chunks that are markdown code fences
+///
+/// Fence-only chunks (`` ```json ``, `` ``` ``) are dropped entirely.
+/// Final chunks with fence content have their delta cleared so the
+/// finish signal still propagates.
+fn strip_fence_chunks(stream: ChatStream) -> ChatStream {
+    use embacle::types::StreamChunk;
+
+    Box::pin(stream.filter_map(|result| async move {
+        match result {
+            Ok(chunk) => {
+                if is_markdown_fence(&chunk.delta) {
+                    if chunk.is_final {
+                        // Preserve the final signal with empty content
+                        Some(Ok(StreamChunk {
+                            delta: String::new(),
+                            is_final: true,
+                            finish_reason: chunk.finish_reason,
+                        }))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(Ok(chunk))
+                }
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }))
+}
+
+/// Check if a stream chunk is a markdown code fence line (e.g. `` ```json `` or `` ``` ``)
+fn is_markdown_fence(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("```") && trimmed.bytes().skip(3).all(|b| b.is_ascii_alphanumeric())
+}
+
 /// Emit a complete non-streaming response as an SSE event sequence
 ///
 /// Used when the caller requested `stream: true` but the backend performed a
@@ -171,4 +218,67 @@ pub fn sse_single_response(message: ResponseMessage, finish_reason: &str, model:
     Sse::new(combined)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_markdown_fence_detects_fences() {
+        assert!(is_markdown_fence("```json\n"));
+        assert!(is_markdown_fence("```\n"));
+        assert!(is_markdown_fence("```json"));
+        assert!(is_markdown_fence("```"));
+        assert!(is_markdown_fence("  ```json  "));
+    }
+
+    #[test]
+    fn is_markdown_fence_rejects_non_fences() {
+        assert!(!is_markdown_fence("{\"key\": \"value\"}"));
+        assert!(!is_markdown_fence("some text"));
+        assert!(!is_markdown_fence(""));
+        assert!(!is_markdown_fence("```json is cool```"));
+        assert!(!is_markdown_fence("``` code here"));
+    }
+
+    #[tokio::test]
+    async fn strip_fence_chunks_removes_fences() {
+        use embacle::types::StreamChunk;
+
+        let chunks = vec![
+            Ok(StreamChunk {
+                delta: "```json\n".to_owned(),
+                is_final: false,
+                finish_reason: None,
+            }),
+            Ok(StreamChunk {
+                delta: "{\"key\":\"value\"}\n".to_owned(),
+                is_final: false,
+                finish_reason: None,
+            }),
+            Ok(StreamChunk {
+                delta: "```\n".to_owned(),
+                is_final: true,
+                finish_reason: Some("stop".to_owned()),
+            }),
+        ];
+
+        let stream: ChatStream = Box::pin(futures::stream::iter(chunks));
+        let filtered = strip_fence_chunks(stream);
+
+        let results: Vec<_> = filtered.collect().await;
+        assert_eq!(results.len(), 2);
+
+        // First result is the actual JSON content
+        let first = results[0].as_ref().unwrap();
+        assert_eq!(first.delta, "{\"key\":\"value\"}\n");
+        assert!(!first.is_final);
+
+        // Second result is the final signal with empty delta (fence stripped)
+        let second = results[1].as_ref().unwrap();
+        assert!(second.delta.is_empty());
+        assert!(second.is_final);
+        assert_eq!(second.finish_reason.as_deref(), Some("stop"));
+    }
 }

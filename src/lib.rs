@@ -275,7 +275,9 @@ pub use metrics::{
 };
 pub use opencode::OpenCodeRunner;
 pub use quality_gate::{QualityGateProvider, QualityPolicy};
-pub use structured_output::{request_structured_output, StructuredOutputRequest};
+pub use structured_output::{
+    extract_json_from_response, request_structured_output, StructuredOutputRequest,
+};
 pub use warp_cli::WarpCliRunner;
 
 // Core tool calling type re-exports
