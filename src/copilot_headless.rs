@@ -38,7 +38,7 @@ fn acp_prompt_timeout() -> std::time::Duration {
 /// Always includes `sessionId` and `prompt` blocks. When `max_tokens` is
 /// specified, forwards it as `maxTokens` so the ACP provider can respect
 /// the caller's output length limit.
-fn build_prompt_params(session_id: &str, prompt: Vec<Value>, max_tokens: Option<u32>) -> Value {
+fn build_prompt_params(session_id: &str, prompt: &[Value], max_tokens: Option<u32>) -> Value {
     let mut params = json!({
         "sessionId": session_id,
         "prompt": prompt,
@@ -885,7 +885,7 @@ impl CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
+                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -990,7 +990,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
+                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -1039,7 +1039,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
+                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -1485,7 +1485,7 @@ mod tests {
     #[test]
     fn build_prompt_params_without_max_tokens() {
         let blocks = vec![json!({"type": "text", "text": "hello"})];
-        let params = build_prompt_params("sess-1", blocks, None);
+        let params = build_prompt_params("sess-1", &blocks, None);
         assert_eq!(params["sessionId"], "sess-1");
         assert!(params["prompt"].is_array());
         assert!(params.get("maxTokens").is_none());
@@ -1494,7 +1494,7 @@ mod tests {
     #[test]
     fn build_prompt_params_with_max_tokens() {
         let blocks = vec![json!({"type": "text", "text": "hello"})];
-        let params = build_prompt_params("sess-2", blocks, Some(1024));
+        let params = build_prompt_params("sess-2", &blocks, Some(1024));
         assert_eq!(params["sessionId"], "sess-2");
         assert_eq!(params["maxTokens"], 1024);
     }
@@ -1505,7 +1505,7 @@ mod tests {
             json!({"type": "text", "text": "hello"}),
             json!({"type": "image", "data": "abc", "mimeType": "image/png"}),
         ];
-        let params = build_prompt_params("s1", blocks, Some(512));
+        let params = build_prompt_params("s1", &blocks, Some(512));
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt[0]["type"], "text");
