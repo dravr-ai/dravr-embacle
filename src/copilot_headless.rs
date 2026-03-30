@@ -753,9 +753,9 @@ impl CopilotHeadlessRunner {
     /// To provide conversation continuity, prior user/assistant exchanges are
     /// serialized into a `<conversation-history>` block prepended to the prompt.
     ///
-    /// The system prompt is already passed via the ACP `session/new` `systemPrompt`
-    /// parameter. When `inject_system_in_prompt` is enabled, it is additionally
-    /// embedded in the prompt text wrapped in `<system-instructions>` tags.
+    /// The system prompt is passed via ACP `session/new` `systemPrompt` and also
+    /// prepended as plain text to the prompt so the model reliably sees it.
+    /// Set `inject_system_in_prompt` to `false` to skip the prompt-text injection.
     ///
     /// The number of history messages is capped by `max_history_turns` from
     /// [`CopilotHeadlessConfig`]. Only the most recent turns are kept.
@@ -822,12 +822,11 @@ impl CopilotHeadlessRunner {
             buf
         };
 
-        // Assemble: system instructions + conversation history + current user message
+        // Assemble: system prompt + conversation history + current user message
         let mut text = String::new();
         if let Some(sys) = system {
-            text.push_str("<system-instructions>\n");
             text.push_str(sys);
-            text.push_str("\n</system-instructions>\n\n");
+            text.push_str("\n\n");
         }
         text.push_str(&history_block);
         text.push_str(user_text);
@@ -1166,12 +1165,12 @@ mod tests {
         }
     }
 
-    /// Create a test runner with system prompt injection enabled.
-    fn test_runner_with_system_injection(max_history_turns: usize) -> CopilotHeadlessRunner {
+    /// Create a test runner with system prompt injection disabled.
+    fn test_runner_no_system_injection(max_history_turns: usize) -> CopilotHeadlessRunner {
         CopilotHeadlessRunner {
             config: CopilotHeadlessConfig {
                 max_history_turns,
-                inject_system_in_prompt: true,
+                inject_system_in_prompt: false,
                 ..CopilotHeadlessConfig::default()
             },
             available_models: vec![],
@@ -1189,24 +1188,8 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_blocks_skips_system_prompt_by_default() {
+    fn build_prompt_blocks_injects_system_prompt_as_plain_text() {
         let runner = test_runner(20);
-        let request = ChatRequest::new(vec![
-            ChatMessage::system("You are a fitness assistant"),
-            ChatMessage::user("Hello"),
-        ]);
-        let blocks = runner.build_prompt_blocks(&request);
-        assert_eq!(blocks.len(), 1);
-        let text = blocks[0]["text"].as_str().unwrap();
-        // System prompt is NOT re-injected into prompt text (passed via session/new only)
-        assert!(!text.contains("<system-instructions>"));
-        assert!(!text.contains("You are a fitness assistant"));
-        assert!(text.contains("Hello"));
-    }
-
-    #[test]
-    fn build_prompt_blocks_injects_system_prompt_when_enabled() {
-        let runner = test_runner_with_system_injection(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("You are a fitness assistant"),
             ChatMessage::user("Hello"),
@@ -1215,9 +1198,23 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         let text = blocks[0]["text"].as_str().unwrap();
-        assert!(text.contains("<system-instructions>"));
+        // System prompt injected as plain text — no XML tags
         assert!(text.contains("You are a fitness assistant"));
-        assert!(text.contains("</system-instructions>"));
+        assert!(!text.contains("<system-instructions>"));
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_skips_system_when_injection_disabled() {
+        let runner = test_runner_no_system_injection(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("You are a fitness assistant"),
+            ChatMessage::user("Hello"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 1);
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(!text.contains("You are a fitness assistant"));
         assert!(text.contains("Hello"));
     }
 
@@ -1270,7 +1267,8 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
 
-        // System prompt NOT re-injected (passed via session/new only)
+        // System prompt injected as plain text
+        assert!(text.contains("You are helpful"));
         assert!(!text.contains("<system-instructions>"));
 
         // Conversation history block present with prior turns
@@ -1390,9 +1388,9 @@ mod tests {
         let request = ChatRequest::new(vec![ChatMessage::system("Be helpful")]);
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
-        // System prompt NOT in prompt text by default
+        // System prompt as plain text, no XML tags, no history
+        assert!(text.contains("Be helpful"));
         assert!(!text.contains("<system-instructions>"));
-        assert!(!text.contains("Be helpful"));
         assert!(!text.contains("<conversation-history>"));
     }
 
@@ -1421,7 +1419,7 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_preserves_section_ordering() {
-        let runner = test_runner_with_system_injection(20);
+        let runner = test_runner(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("sys prompt"),
             ChatMessage::user("q1"),
@@ -1431,8 +1429,8 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
 
-        // Verify ordering: system-instructions < conversation-history < current message
-        let sys_pos = text.find("<system-instructions>").unwrap();
+        // Verify ordering: system prompt < conversation-history < current message
+        let sys_pos = text.find("sys prompt").unwrap();
         let hist_pos = text.find("<conversation-history>").unwrap();
         let current_pos = text.find("q2").unwrap();
         assert!(sys_pos < hist_pos, "system must come before history");
@@ -1461,7 +1459,7 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_multiple_system_messages_uses_first() {
-        let runner = test_runner_with_system_injection(20);
+        let runner = test_runner(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("first system"),
             ChatMessage::system("second system"),
@@ -1513,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn default_mode_multi_turn_system_not_in_prompt_text() {
+    fn default_mode_multi_turn_system_as_plain_text() {
         let runner = test_runner(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("Return JSON only"),
@@ -1524,19 +1522,19 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
 
-        // System prompt must NOT appear anywhere in the prompt text
-        assert!(!text.contains("Return JSON only"));
+        // System prompt as plain text — no XML tags
+        assert!(text.contains("Return JSON only"));
         assert!(!text.contains("<system-instructions>"));
 
-        // But conversation history and current message are present
+        // Conversation history and current message also present
         assert!(text.contains("<conversation-history>"));
         assert!(text.contains("User: First question"));
         assert!(text.contains("Second question"));
     }
 
     #[test]
-    fn inject_mode_multi_turn_system_in_prompt_text() {
-        let runner = test_runner_with_system_injection(20);
+    fn disabled_injection_multi_turn_no_system_in_prompt() {
+        let runner = test_runner_no_system_injection(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("Return JSON only"),
             ChatMessage::user("First question"),
@@ -1546,19 +1544,17 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
 
-        // System prompt IS present in prompt text when inject is enabled
-        assert!(text.contains("<system-instructions>"));
-        assert!(text.contains("Return JSON only"));
-        assert!(text.contains("</system-instructions>"));
+        // System prompt NOT in text when injection is disabled
+        assert!(!text.contains("Return JSON only"));
 
-        // History and current message also present
+        // History and current message still present
         assert!(text.contains("<conversation-history>"));
         assert!(text.contains("User: First question"));
         assert!(text.contains("Second question"));
     }
 
     #[test]
-    fn default_mode_with_images_no_system_leak() {
+    fn default_mode_with_images_includes_system() {
         use crate::types::ImagePart;
 
         let runner = test_runner(20);
@@ -1569,9 +1565,10 @@ mod tests {
         ]);
         let blocks = runner.build_prompt_blocks(&request);
 
-        // Text block should NOT contain system prompt
+        // System prompt present as plain text
         let text = blocks[0]["text"].as_str().unwrap();
-        assert!(!text.contains("Analyze images precisely"));
+        assert!(text.contains("Analyze images precisely"));
+        assert!(!text.contains("<system-instructions>"));
         assert!(text.contains("What is this?"));
 
         // Image block still present

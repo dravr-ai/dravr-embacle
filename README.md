@@ -344,7 +344,7 @@ Configuration via environment variables:
 | `COPILOT_HEADLESS_MODEL` | `claude-opus-4.6-fast` | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
 | `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
-| `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` | `false` | Re-inject system prompt as `<system-instructions>` in prompt text |
+| `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` | `true` | Prepend system prompt as plain text in prompt (set `false` to rely on ACP `systemPrompt` only) |
 
 ## Vision / Image Support
 

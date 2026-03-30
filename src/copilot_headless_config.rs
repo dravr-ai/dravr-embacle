@@ -38,9 +38,10 @@ pub struct CopilotHeadlessConfig {
     /// Maximum number of prior conversation messages (user + assistant) to include
     /// in the ACP prompt for multi-turn context. Set to 0 to disable history injection.
     pub max_history_turns: usize,
-    /// Re-inject the system prompt into the prompt text wrapped in
-    /// `<system-instructions>` tags, in addition to passing it via `session/new`.
-    /// Default: false (rely on the ACP `systemPrompt` parameter only).
+    /// Prepend the system prompt as plain text in the prompt, in addition to
+    /// passing it via `session/new`. This ensures the model reliably sees the
+    /// system instructions regardless of how the ACP provider handles `systemPrompt`.
+    /// Default: true.
     pub inject_system_in_prompt: bool,
 }
 
@@ -80,8 +81,8 @@ impl CopilotHeadlessConfig {
             .unwrap_or(DEFAULT_MAX_HISTORY_TURNS);
 
         let inject_system_in_prompt = env::var("COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
 
         Self {
             cli_path,
@@ -102,7 +103,7 @@ impl Default for CopilotHeadlessConfig {
             github_token: None,
             permission_policy: PermissionPolicy::default(),
             max_history_turns: DEFAULT_MAX_HISTORY_TURNS,
-            inject_system_in_prompt: false,
+            inject_system_in_prompt: true,
         }
     }
 }
@@ -141,18 +142,18 @@ mod tests {
     }
 
     #[test]
-    fn default_inject_system_in_prompt_is_false() {
+    fn default_inject_system_in_prompt_is_true() {
         let config = CopilotHeadlessConfig::default();
-        assert!(!config.inject_system_in_prompt);
+        assert!(config.inject_system_in_prompt);
     }
 
     #[test]
     fn config_inject_system_in_prompt_overridable() {
         let config = CopilotHeadlessConfig {
-            inject_system_in_prompt: true,
+            inject_system_in_prompt: false,
             ..CopilotHeadlessConfig::default()
         };
-        assert!(config.inject_system_in_prompt);
+        assert!(!config.inject_system_in_prompt);
     }
 
     /// Env var tests run sequentially in a single test to avoid race conditions
@@ -203,25 +204,25 @@ mod tests {
         env::remove_var(key);
         let config = CopilotHeadlessConfig::from_env();
         assert!(
-            !config.inject_system_in_prompt,
-            "should default to false when env var absent"
+            config.inject_system_in_prompt,
+            "should default to true when env var absent"
         );
 
-        // Truthy values
-        for val in ["true", "1", "yes", "TRUE", "Yes"] {
-            env::set_var(key, val);
-            let config = CopilotHeadlessConfig::from_env();
-            assert!(config.inject_system_in_prompt, "should be true for {val:?}");
-        }
-
-        // Falsy / unrecognized values
-        for val in ["false", "0", "no", "random"] {
+        // Falsy values explicitly disable injection
+        for val in ["false", "0", "no"] {
             env::set_var(key, val);
             let config = CopilotHeadlessConfig::from_env();
             assert!(
                 !config.inject_system_in_prompt,
                 "should be false for {val:?}"
             );
+        }
+
+        // Truthy / unrecognized values keep injection enabled
+        for val in ["true", "1", "yes", "TRUE", "Yes", "random"] {
+            env::set_var(key, val);
+            let config = CopilotHeadlessConfig::from_env();
+            assert!(config.inject_system_in_prompt, "should be true for {val:?}");
         }
 
         // Cleanup
