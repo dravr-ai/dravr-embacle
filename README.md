@@ -9,6 +9,33 @@ Standalone Rust library that wraps 12 AI CLI tools and SDKs as pluggable LLM pro
 
 Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to CLI tools that users already have installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
 
+## Run It
+
+Embacle ships as two ready-to-run servers — no code required:
+
+**OpenAI-compatible HTTP server** — drop-in replacement for any OpenAI client:
+
+```bash
+embacle-server --provider copilot --port 3000
+```
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "copilot", "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+**MCP server** — connect Claude Desktop, editors, or any MCP client directly:
+
+```bash
+# stdio (editor integration)
+embacle-mcp --provider copilot
+
+# HTTP (network-accessible)
+embacle-mcp --transport http --port 3000 --provider copilot
+```
+
+Both modes support all 12 CLI runners, streaming, model routing, and vision. See [REST API Server](#rest-api-server-embacle-server) and [MCP Server](#mcp-server-embacle-mcp) for full details.
+
 ## Table of Contents
 
 - [Install](#install)
@@ -36,20 +63,8 @@ brew install embacle
 
 This installs two binaries:
 
-- **`embacle-server`** — OpenAI-compatible REST API + MCP server (start with `embacle-server --provider copilot`)
+- **`embacle-server`** — OpenAI-compatible REST API + MCP server
 - **`embacle-mcp`** — standalone MCP server for editor integration
-
-Once installed, start the server and send requests with any OpenAI-compatible client:
-
-```bash
-embacle-server --provider copilot --port 3000
-```
-
-```bash
-curl http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "copilot", "messages": [{"role": "user", "content": "hello"}]}'
-```
 
 ### Docker
 
