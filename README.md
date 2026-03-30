@@ -334,13 +334,17 @@ async fn main() -> Result<(), embacle::types::RunnerError> {
 }
 ```
 
-The headless runner spawns `copilot --acp` per request and communicates via NDJSON-framed JSON-RPC. Configuration via environment variables:
+The headless runner spawns `copilot --acp` per request and communicates via NDJSON-framed JSON-RPC. The system prompt is passed via ACP's `session/new` `systemPrompt` parameter. Conversation history from prior turns is serialized into a `<conversation-history>` block in the prompt text for multi-turn continuity. The `max_tokens` field from `ChatRequest` is forwarded to ACP's `session/prompt` as `maxTokens`.
+
+Configuration via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COPILOT_CLI_PATH` | auto-detect | Override path to copilot binary |
 | `COPILOT_HEADLESS_MODEL` | `claude-opus-4.6-fast` | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
+| `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
+| `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` | `false` | Re-inject system prompt as `<system-instructions>` in prompt text |
 
 ## Vision / Image Support
 

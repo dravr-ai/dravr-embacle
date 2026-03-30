@@ -146,6 +146,15 @@ mod tests {
         assert!(!config.inject_system_in_prompt);
     }
 
+    #[test]
+    fn config_inject_system_in_prompt_overridable() {
+        let config = CopilotHeadlessConfig {
+            inject_system_in_prompt: true,
+            ..CopilotHeadlessConfig::default()
+        };
+        assert!(config.inject_system_in_prompt);
+    }
+
     /// Env var tests run sequentially in a single test to avoid race conditions
     /// (env vars are process-global state shared across parallel test threads).
     #[test]
@@ -180,6 +189,40 @@ mod tests {
             config.max_history_turns, 0,
             "should accept zero to disable history"
         );
+
+        // Cleanup
+        env::remove_var(key);
+    }
+
+    /// Env var test for `inject_system_in_prompt` — sequential to avoid race conditions.
+    #[test]
+    fn from_env_inject_system_in_prompt_parsing() {
+        let key = "COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT";
+
+        // Default when env var is not set
+        env::remove_var(key);
+        let config = CopilotHeadlessConfig::from_env();
+        assert!(
+            !config.inject_system_in_prompt,
+            "should default to false when env var absent"
+        );
+
+        // Truthy values
+        for val in ["true", "1", "yes", "TRUE", "Yes"] {
+            env::set_var(key, val);
+            let config = CopilotHeadlessConfig::from_env();
+            assert!(config.inject_system_in_prompt, "should be true for {val:?}");
+        }
+
+        // Falsy / unrecognized values
+        for val in ["false", "0", "no", "random"] {
+            env::set_var(key, val);
+            let config = CopilotHeadlessConfig::from_env();
+            assert!(
+                !config.inject_system_in_prompt,
+                "should be false for {val:?}"
+            );
+        }
 
         // Cleanup
         env::remove_var(key);

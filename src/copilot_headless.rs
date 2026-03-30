@@ -1498,4 +1498,84 @@ mod tests {
         assert_eq!(params["sessionId"], "sess-2");
         assert_eq!(params["maxTokens"], 1024);
     }
+
+    #[test]
+    fn build_prompt_params_preserves_prompt_blocks() {
+        let blocks = vec![
+            json!({"type": "text", "text": "hello"}),
+            json!({"type": "image", "data": "abc", "mimeType": "image/png"}),
+        ];
+        let params = build_prompt_params("s1", blocks, Some(512));
+        let prompt = params["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), 2);
+        assert_eq!(prompt[0]["type"], "text");
+        assert_eq!(prompt[1]["type"], "image");
+    }
+
+    #[test]
+    fn default_mode_multi_turn_system_not_in_prompt_text() {
+        let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("Return JSON only"),
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("{\"answer\": 1}"),
+            ChatMessage::user("Second question"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // System prompt must NOT appear anywhere in the prompt text
+        assert!(!text.contains("Return JSON only"));
+        assert!(!text.contains("<system-instructions>"));
+
+        // But conversation history and current message are present
+        assert!(text.contains("<conversation-history>"));
+        assert!(text.contains("User: First question"));
+        assert!(text.contains("Second question"));
+    }
+
+    #[test]
+    fn inject_mode_multi_turn_system_in_prompt_text() {
+        let runner = test_runner_with_system_injection(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("Return JSON only"),
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("{\"answer\": 1}"),
+            ChatMessage::user("Second question"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        let text = blocks[0]["text"].as_str().unwrap();
+
+        // System prompt IS present in prompt text when inject is enabled
+        assert!(text.contains("<system-instructions>"));
+        assert!(text.contains("Return JSON only"));
+        assert!(text.contains("</system-instructions>"));
+
+        // History and current message also present
+        assert!(text.contains("<conversation-history>"));
+        assert!(text.contains("User: First question"));
+        assert!(text.contains("Second question"));
+    }
+
+    #[test]
+    fn default_mode_with_images_no_system_leak() {
+        use crate::types::ImagePart;
+
+        let runner = test_runner(20);
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("Analyze images precisely"),
+            ChatMessage::user_with_images("What is this?", vec![img]),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+
+        // Text block should NOT contain system prompt
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(!text.contains("Analyze images precisely"));
+        assert!(text.contains("What is this?"));
+
+        // Image block still present
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "image");
+    }
 }
