@@ -33,6 +33,22 @@ fn acp_prompt_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Build the JSON params for an ACP `session/prompt` request.
+///
+/// Always includes `sessionId` and `prompt` blocks. When `max_tokens` is
+/// specified, forwards it as `maxTokens` so the ACP provider can respect
+/// the caller's output length limit.
+fn build_prompt_params(session_id: &str, prompt: Vec<Value>, max_tokens: Option<u32>) -> Value {
+    let mut params = json!({
+        "sessionId": session_id,
+        "prompt": prompt,
+    });
+    if let Some(mt) = max_tokens {
+        params["maxTokens"] = Value::from(mt);
+    }
+    params
+}
+
 // ---------------------------------------------------------------------------
 // NDJSON transport
 // ---------------------------------------------------------------------------
@@ -736,7 +752,10 @@ impl CopilotHeadlessRunner {
     /// ACP creates a fresh session per request with no built-in multi-turn memory.
     /// To provide conversation continuity, prior user/assistant exchanges are
     /// serialized into a `<conversation-history>` block prepended to the prompt.
-    /// The system prompt is injected into `<system-instructions>`.
+    ///
+    /// The system prompt is already passed via the ACP `session/new` `systemPrompt`
+    /// parameter. When `inject_system_in_prompt` is enabled, it is additionally
+    /// embedded in the prompt text wrapped in `<system-instructions>` tags.
     ///
     /// The number of history messages is capped by `max_history_turns` from
     /// [`CopilotHeadlessConfig`]. Only the most recent turns are kept.
@@ -744,7 +763,11 @@ impl CopilotHeadlessRunner {
     /// Always includes a text block. When the last user message has images,
     /// appends image blocks with `type: "image"`, `data`, and `mimeType`.
     fn build_prompt_blocks(&self, request: &ChatRequest) -> Vec<Value> {
-        let system = Self::extract_system_prompt(request);
+        let system = if self.config.inject_system_in_prompt {
+            Self::extract_system_prompt(request)
+        } else {
+            None
+        };
         let max_turns = self.config.max_history_turns;
 
         // Separate non-system messages into history (all but last user) + last user
@@ -862,10 +885,7 @@ impl CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": prompt_blocks,
-                }),
+                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -970,10 +990,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": prompt_blocks,
-                }),
+                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -1022,10 +1039,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let prompt_id = transport
             .send_request(
                 "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": prompt_blocks,
-                }),
+                build_prompt_params(&session_id, prompt_blocks, request.max_tokens),
             )
             .await?;
 
@@ -1152,6 +1166,18 @@ mod tests {
         }
     }
 
+    /// Create a test runner with system prompt injection enabled.
+    fn test_runner_with_system_injection(max_history_turns: usize) -> CopilotHeadlessRunner {
+        CopilotHeadlessRunner {
+            config: CopilotHeadlessConfig {
+                max_history_turns,
+                inject_system_in_prompt: true,
+                ..CopilotHeadlessConfig::default()
+            },
+            available_models: vec![],
+        }
+    }
+
     #[test]
     fn build_prompt_blocks_text_only_no_system() {
         let runner = test_runner(20);
@@ -1163,8 +1189,24 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_blocks_injects_system_prompt() {
+    fn build_prompt_blocks_skips_system_prompt_by_default() {
         let runner = test_runner(20);
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("You are a fitness assistant"),
+            ChatMessage::user("Hello"),
+        ]);
+        let blocks = runner.build_prompt_blocks(&request);
+        assert_eq!(blocks.len(), 1);
+        let text = blocks[0]["text"].as_str().unwrap();
+        // System prompt is NOT re-injected into prompt text (passed via session/new only)
+        assert!(!text.contains("<system-instructions>"));
+        assert!(!text.contains("You are a fitness assistant"));
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn build_prompt_blocks_injects_system_prompt_when_enabled() {
+        let runner = test_runner_with_system_injection(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("You are a fitness assistant"),
             ChatMessage::user("Hello"),
@@ -1228,9 +1270,8 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
 
-        // System prompt injected
-        assert!(text.contains("<system-instructions>"));
-        assert!(text.contains("You are helpful"));
+        // System prompt NOT re-injected (passed via session/new only)
+        assert!(!text.contains("<system-instructions>"));
 
         // Conversation history block present with prior turns
         assert!(text.contains("<conversation-history>"));
@@ -1349,8 +1390,9 @@ mod tests {
         let request = ChatRequest::new(vec![ChatMessage::system("Be helpful")]);
         let blocks = runner.build_prompt_blocks(&request);
         let text = blocks[0]["text"].as_str().unwrap();
-        assert!(text.contains("<system-instructions>"));
-        assert!(text.contains("Be helpful"));
+        // System prompt NOT in prompt text by default
+        assert!(!text.contains("<system-instructions>"));
+        assert!(!text.contains("Be helpful"));
         assert!(!text.contains("<conversation-history>"));
     }
 
@@ -1379,7 +1421,7 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_preserves_section_ordering() {
-        let runner = test_runner(20);
+        let runner = test_runner_with_system_injection(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("sys prompt"),
             ChatMessage::user("q1"),
@@ -1419,7 +1461,7 @@ mod tests {
 
     #[test]
     fn build_prompt_blocks_multiple_system_messages_uses_first() {
-        let runner = test_runner(20);
+        let runner = test_runner_with_system_injection(20);
         let request = ChatRequest::new(vec![
             ChatMessage::system("first system"),
             ChatMessage::system("second system"),
@@ -1438,5 +1480,22 @@ mod tests {
             LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION;
         assert!(caps.supports_vision());
         assert!(!caps.supports_sdk_tool_calling());
+    }
+
+    #[test]
+    fn build_prompt_params_without_max_tokens() {
+        let blocks = vec![json!({"type": "text", "text": "hello"})];
+        let params = build_prompt_params("sess-1", blocks, None);
+        assert_eq!(params["sessionId"], "sess-1");
+        assert!(params["prompt"].is_array());
+        assert!(params.get("maxTokens").is_none());
+    }
+
+    #[test]
+    fn build_prompt_params_with_max_tokens() {
+        let blocks = vec![json!({"type": "text", "text": "hello"})];
+        let params = build_prompt_params("sess-2", blocks, Some(1024));
+        assert_eq!(params["sessionId"], "sess-2");
+        assert_eq!(params["maxTokens"], 1024);
     }
 }

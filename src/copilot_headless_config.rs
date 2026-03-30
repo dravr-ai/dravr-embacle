@@ -38,6 +38,10 @@ pub struct CopilotHeadlessConfig {
     /// Maximum number of prior conversation messages (user + assistant) to include
     /// in the ACP prompt for multi-turn context. Set to 0 to disable history injection.
     pub max_history_turns: usize,
+    /// Re-inject the system prompt into the prompt text wrapped in
+    /// `<system-instructions>` tags, in addition to passing it via `session/new`.
+    /// Default: false (rely on the ACP `systemPrompt` parameter only).
+    pub inject_system_in_prompt: bool,
 }
 
 impl CopilotHeadlessConfig {
@@ -48,6 +52,7 @@ impl CopilotHeadlessConfig {
     /// - `COPILOT_HEADLESS_MODEL` — Default model (default: `claude-opus-4.6-fast`)
     /// - `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` — GitHub auth token
     /// - `COPILOT_HEADLESS_MAX_HISTORY_TURNS` — Max conversation history turns (default: 20)
+    /// - `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` — Re-inject system prompt in prompt text (default: false)
     #[must_use]
     pub fn from_env() -> Self {
         let cli_path = env::var("COPILOT_CLI_PATH").ok().map(PathBuf::from);
@@ -74,12 +79,17 @@ impl CopilotHeadlessConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_HISTORY_TURNS);
 
+        let inject_system_in_prompt = env::var("COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+
         Self {
             cli_path,
             model,
             github_token,
             permission_policy,
             max_history_turns,
+            inject_system_in_prompt,
         }
     }
 }
@@ -92,6 +102,7 @@ impl Default for CopilotHeadlessConfig {
             github_token: None,
             permission_policy: PermissionPolicy::default(),
             max_history_turns: DEFAULT_MAX_HISTORY_TURNS,
+            inject_system_in_prompt: false,
         }
     }
 }
@@ -127,6 +138,12 @@ mod tests {
             ..CopilotHeadlessConfig::default()
         };
         assert_eq!(config.max_history_turns, 0);
+    }
+
+    #[test]
+    fn default_inject_system_in_prompt_is_false() {
+        let config = CopilotHeadlessConfig::default();
+        assert!(!config.inject_system_in_prompt);
     }
 
     /// Env var tests run sequentially in a single test to avoid race conditions
