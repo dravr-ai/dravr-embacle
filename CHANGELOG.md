@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.4] — 2026-03-30
+
+### Fixed
+
+- fix: stop re-injecting system prompt into ACP prompt text, forward max_tokens
+
+### Other
+
+- deps: bump opentelemetry and opentelemetry_sdk from 0.28 to 0.31
+- deps: bump toml from 0.8.23 to 1.1.0
+- deps: bump agent-client-protocol-schema from 0.11.3 to 0.11.4
+- deps: bump docker/build-push-action from 6 to 7
+- deps: bump docker/login-action from 3 to 4
+- deps: bump docker/setup-buildx-action from 3 to 4
+
+
+
 ## [0.14.3] — 2026-03-28
 
 
