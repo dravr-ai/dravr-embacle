@@ -747,6 +747,17 @@ impl CopilotHeadlessRunner {
         which::which("copilot").map_err(|_| RunnerError::binary_not_found("copilot"))
     }
 
+    /// Resolve the model to use for a request.
+    /// Provider-alias names ("copilot_headless", "copilot") are mapped to the
+    /// configured default model because they are not valid Copilot model identifiers.
+    /// Any other model name (e.g. "gpt-4.1", "claude-opus-4.6-fast") is passed through.
+    fn resolve_model(&self, requested: Option<&str>) -> String {
+        match requested {
+            Some(m) if m != "copilot_headless" && m != "copilot" => m.to_owned(),
+            _ => self.config.model.clone(),
+        }
+    }
+
     /// Build ACP prompt content blocks from the conversation messages.
     ///
     /// ACP creates a fresh session per request with no built-in multi-turn memory.
@@ -864,11 +875,7 @@ impl CopilotHeadlessRunner {
         request: &ChatRequest,
     ) -> Result<HeadlessToolResponse, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.config.model)
-            .to_owned();
+        let model = self.resolve_model(request.model.as_deref());
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
@@ -969,11 +976,7 @@ impl LlmProvider for CopilotHeadlessRunner {
 
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.config.model)
-            .to_owned();
+        let model = self.resolve_model(request.model.as_deref());
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
@@ -1023,14 +1026,14 @@ impl LlmProvider for CopilotHeadlessRunner {
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
-        let model = request.model.as_deref().unwrap_or(&self.config.model);
+        let model = self.resolve_model(request.model.as_deref());
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
         let prompt_blocks = self.build_prompt_blocks(request);
 
         let (mut transport, mut child, session_id) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
-            model,
+            &model,
             system_prompt.as_deref(),
         )
         .await?;
@@ -1574,5 +1577,32 @@ mod tests {
         // Image block still present
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[1]["type"], "image");
+    }
+
+    #[test]
+    fn resolve_model_uses_explicit_model() {
+        let runner = test_runner(20);
+        assert_eq!(runner.resolve_model(Some("gpt-4.1")), "gpt-4.1");
+    }
+
+    #[test]
+    fn resolve_model_maps_copilot_headless_to_default() {
+        let runner = test_runner(20);
+        let result = runner.resolve_model(Some("copilot_headless"));
+        assert_eq!(result, runner.config.model);
+    }
+
+    #[test]
+    fn resolve_model_maps_copilot_to_default() {
+        let runner = test_runner(20);
+        let result = runner.resolve_model(Some("copilot"));
+        assert_eq!(result, runner.config.model);
+    }
+
+    #[test]
+    fn resolve_model_uses_default_when_none() {
+        let runner = test_runner(20);
+        let result = runner.resolve_model(None);
+        assert_eq!(result, runner.config.model);
     }
 }
