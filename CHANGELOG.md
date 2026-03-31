@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.7] — 2026-03-31
+
+### Fixed
+
+- fix: repair broken expect annotations in openai_types test code
+- fix: add Safe annotation to test expect() calls in openai_types
+- fix: resolve error handling violations found by dravr-build-config validation
+
+
+
 ## [0.14.6] — 2026-03-30
 
 

@@ -6,7 +6,7 @@
 
 [package]
 name = "embacle-mcp"
-version = "0.14.6"
+version = "0.14.7"
 edition = "2021"
 license = "Apache-2.0"
 description = "MCP server for embacle LLM runners — expose AI CLI tools via Model Context Protocol"
@@ -24,7 +24,7 @@ name = "embacle-mcp"
 path = "src/main.rs"
 
 [dependencies]
-embacle = { path = "../..", version = "0.14.6" }
+embacle = { path = "../..", version = "0.14.7" }
 dravr-tronc = "0.2"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
