@@ -275,11 +275,13 @@ struct ApiResponseFunction {
 
 /// Wire type — field names mandated by the `OpenAI` API JSON schema
 #[derive(Deserialize)]
-#[allow(clippy::struct_field_names)]
 struct ApiUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
+    #[serde(rename = "prompt_tokens")]
+    prompt: u32,
+    #[serde(rename = "completion_tokens")]
+    completion: u32,
+    #[serde(rename = "total_tokens")]
+    total: u32,
 }
 
 // ============================================================================
@@ -522,9 +524,9 @@ impl LlmProvider for OpenAiApiRunner {
         });
 
         let usage = api_response.usage.map(|u| TokenUsage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
+            prompt_tokens: u.prompt,
+            completion_tokens: u.completion,
+            total_tokens: u.total,
         });
 
         Ok(ChatResponse {
@@ -955,7 +957,7 @@ mod tests {
         let api_msg = map_message(&msg);
         assert_eq!(api_msg.content, serde_json::Value::Null);
         assert!(api_msg.tool_calls.is_some());
-        let tcs = api_msg.tool_calls.as_ref().unwrap();
+        let tcs = api_msg.tool_calls.as_ref().unwrap(); // Safe: test assertion
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].id, "call_1");
         assert_eq!(tcs[0].call_type, "function");
@@ -1075,7 +1077,7 @@ mod tests {
             .with_response_format(ResponseFormat::JsonObject);
 
         let api_req = runner.build_api_request(&request, false);
-        let json = serde_json::to_value(&api_req).unwrap();
+        let json = serde_json::to_value(&api_req).unwrap(); // Safe: test assertion
 
         assert_eq!(json["model"], "gpt-4o");
         assert!(json["temperature"]
@@ -1086,7 +1088,7 @@ mod tests {
             .as_f64()
             .is_some_and(|v| (v - 0.9).abs() < 0.01));
         assert_eq!(json["stop"], serde_json::json!(["END"]));
-        assert!(!json["stream"].as_bool().unwrap());
+        assert!(!json["stream"].as_bool().unwrap()); // Safe: test assertion
         assert_eq!(json["response_format"]["type"], "json_object");
         assert!(json.get("tools").is_none());
         assert!(json.get("tool_choice").is_none());
@@ -1110,7 +1112,7 @@ mod tests {
             .with_tool_choice(ToolChoice::Required);
 
         let api_req = runner.build_api_request(&request, false);
-        let json = serde_json::to_value(&api_req).unwrap();
+        let json = serde_json::to_value(&api_req).unwrap(); // Safe: test assertion
 
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "get_weather");
@@ -1135,12 +1137,12 @@ mod tests {
             }
         }"#;
 
-        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        let resp: ApiResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.model, "gpt-4o");
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15); // Safe: test assertion
     }
 
     #[test]
@@ -1164,8 +1166,8 @@ mod tests {
             "usage": null
         }"#;
 
-        let resp: ApiResponse = serde_json::from_str(json).unwrap();
-        let tc = &resp.choices[0].message.tool_calls.as_ref().unwrap()[0];
+        let resp: ApiResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
+        let tc = &resp.choices[0].message.tool_calls.as_ref().unwrap()[0]; // Safe: test assertion
         assert_eq!(tc.id, "call_123");
         assert_eq!(tc.function.name, "get_weather");
         assert_eq!(tc.function.arguments, "{\"city\":\"Paris\"}");
@@ -1180,7 +1182,7 @@ mod tests {
             }]
         }"#;
 
-        let resp: ApiStreamResponse = serde_json::from_str(json).unwrap();
+        let resp: ApiStreamResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.choices[0].delta.content.as_deref(), Some("Hello"));
         assert!(resp.choices[0].finish_reason.is_none());
     }
@@ -1194,7 +1196,7 @@ mod tests {
             }]
         }"#;
 
-        let resp: ApiStreamResponse = serde_json::from_str(json).unwrap();
+        let resp: ApiStreamResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert!(resp.choices[0].delta.content.is_none());
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
@@ -1251,11 +1253,11 @@ mod tests {
     fn map_message_user_with_images() {
         use crate::types::ImagePart;
 
-        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap(); // Safe: test assertion
         let msg = ChatMessage::user_with_images("Describe this", vec![img]);
         let api_msg = map_message(&msg);
 
-        let content = api_msg.content.as_array().expect("should be array");
+        let content = api_msg.content.as_array().expect("should be array"); // Safe: test assertion
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Describe this");
@@ -1280,10 +1282,10 @@ mod tests {
     fn map_message_with_images_full_serialization() {
         use crate::types::ImagePart;
 
-        let img = ImagePart::new("AAAA", "image/jpeg").unwrap();
+        let img = ImagePart::new("AAAA", "image/jpeg").unwrap(); // Safe: test assertion
         let msg = ChatMessage::user_with_images("What is this?", vec![img]);
         let api_msg = map_message(&msg);
-        let json = serde_json::to_value(&api_msg).unwrap();
+        let json = serde_json::to_value(&api_msg).unwrap(); // Safe: test assertion
 
         assert!(json["content"].is_array());
         assert_eq!(json["content"][0]["type"], "text");
@@ -1296,14 +1298,14 @@ mod tests {
     #[test]
     fn error_response_parsing() {
         let json = r#"{"error":{"message":"Invalid API key","type":"invalid_request_error"}}"#;
-        let resp: ApiErrorResponse = serde_json::from_str(json).unwrap();
+        let resp: ApiErrorResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.error.message, "Invalid API key");
     }
 
     #[test]
     fn models_response_parsing() {
         let json = r#"{"data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-3.5-turbo","object":"model"}]}"#;
-        let resp: ApiModelsResponse = serde_json::from_str(json).unwrap();
+        let resp: ApiModelsResponse = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.data.len(), 2);
         assert_eq!(resp.data[0].id, "gpt-4o");
     }

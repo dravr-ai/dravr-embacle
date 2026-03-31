@@ -28,9 +28,23 @@ const WARP_CLI_MIN_VERSION: &str = "0.1.0";
 const KIRO_CLI_MIN_VERSION: &str = "1.0.0";
 const KILO_CLI_MIN_VERSION: &str = "7.0.0";
 
+bitflags::bitflags! {
+    /// Feature flags detected for a CLI runner binary
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CliFeatureFlags: u8 {
+        /// CLI supports JSON output mode
+        const JSON_OUTPUT    = 0b0001;
+        /// CLI supports streaming JSON output
+        const STREAMING      = 0b0010;
+        /// CLI supports system prompt flag
+        const SYSTEM_PROMPT  = 0b0100;
+        /// CLI supports session resume
+        const SESSION_RESUME = 0b1000;
+    }
+}
+
 /// Detected capabilities of a CLI runner binary
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct CliCapabilities {
     /// CLI runner type
     pub runner_type: CliRunnerType,
@@ -38,14 +52,8 @@ pub struct CliCapabilities {
     pub version_string: String,
     /// Parsed semantic version components (major, minor, patch)
     pub version: Option<(u32, u32, u32)>,
-    /// Whether JSON output mode is supported
-    pub json_output: bool,
-    /// Whether streaming JSON output is supported
-    pub streaming: bool,
-    /// Whether system prompt flag is supported
-    pub system_prompt: bool,
-    /// Whether session resume is supported
-    pub session_resume: bool,
+    /// Feature flags for the CLI binary
+    pub features: CliFeatureFlags,
     /// Whether the binary meets the minimum version requirement
     pub meets_minimum_version: bool,
 }
@@ -54,7 +62,31 @@ impl CliCapabilities {
     /// Check if this binary is fully compatible with the runner
     #[must_use]
     pub const fn is_compatible(&self) -> bool {
-        self.meets_minimum_version && self.json_output
+        self.meets_minimum_version && self.features.contains(CliFeatureFlags::JSON_OUTPUT)
+    }
+
+    /// Whether JSON output mode is supported
+    #[must_use]
+    pub const fn json_output(&self) -> bool {
+        self.features.contains(CliFeatureFlags::JSON_OUTPUT)
+    }
+
+    /// Whether streaming JSON output is supported
+    #[must_use]
+    pub const fn streaming(&self) -> bool {
+        self.features.contains(CliFeatureFlags::STREAMING)
+    }
+
+    /// Whether system prompt flag is supported
+    #[must_use]
+    pub const fn system_prompt(&self) -> bool {
+        self.features.contains(CliFeatureFlags::SYSTEM_PROMPT)
+    }
+
+    /// Whether session resume is supported
+    #[must_use]
+    pub const fn session_resume(&self) -> bool {
+        self.features.contains(CliFeatureFlags::SESSION_RESUME)
     }
 }
 
@@ -77,8 +109,7 @@ pub async fn detect_capabilities(
     let min_version = minimum_version(runner_type);
     let meets_minimum = parsed_version.is_some_and(|v| compare_versions(v, min_version));
 
-    let (json_output, streaming, system_prompt, session_resume) =
-        capabilities_for_runner(runner_type);
+    let features = capabilities_for_runner(runner_type);
 
     if !meets_minimum {
         warn!(
@@ -93,10 +124,7 @@ pub async fn detect_capabilities(
         runner_type,
         version_string,
         version: parsed_version,
-        json_output,
-        streaming,
-        system_prompt,
-        session_resume,
+        features,
         meets_minimum_version: meets_minimum,
     })
 }
@@ -235,31 +263,38 @@ const fn compare_versions(actual: (u32, u32, u32), minimum: (u32, u32, u32)) -> 
 
 /// Capability flags per runner type based on known CLI features
 ///
-/// Returns (`json_output`, `streaming`, `system_prompt`, `session_resume`)
+/// Returns a [`CliFeatureFlags`] bitflags value for the given runner type.
 #[must_use]
-const fn capabilities_for_runner(runner_type: CliRunnerType) -> (bool, bool, bool, bool) {
+const fn capabilities_for_runner(runner_type: CliRunnerType) -> CliFeatureFlags {
     match runner_type {
         // Claude Code: --output-format json, --output-format stream-json, --system-prompt, --continue
-        CliRunnerType::ClaudeCode => (true, true, true, true),
+        CliRunnerType::ClaudeCode => CliFeatureFlags::JSON_OUTPUT
+            .union(CliFeatureFlags::STREAMING)
+            .union(CliFeatureFlags::SYSTEM_PROMPT)
+            .union(CliFeatureFlags::SESSION_RESUME),
         // Copilot: plain text output, line-by-line streaming, no --system-prompt, no session resume
-        CliRunnerType::Copilot => (false, true, false, false),
+        CliRunnerType::Copilot => CliFeatureFlags::STREAMING,
         // Cursor Agent, Gemini CLI, Goose CLI, Cline CLI, Kilo CLI: JSON + streaming, no system prompt, session resume
         CliRunnerType::CursorAgent
         | CliRunnerType::GeminiCli
         | CliRunnerType::GooseCli
         | CliRunnerType::ClineCli
-        | CliRunnerType::KiloCli => (true, true, false, true),
+        | CliRunnerType::KiloCli => CliFeatureFlags::JSON_OUTPUT
+            .union(CliFeatureFlags::STREAMING)
+            .union(CliFeatureFlags::SESSION_RESUME),
         // OpenCode, Continue CLI, Warp oz: JSON output, no streaming, session resume
         CliRunnerType::OpenCode | CliRunnerType::ContinueCli | CliRunnerType::WarpCli => {
-            (true, false, false, true)
+            CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::SESSION_RESUME)
         }
         // Codex CLI: --json (JSONL), streaming via JSONL events
-        CliRunnerType::CodexCli => (true, true, false, false),
+        CliRunnerType::CodexCli => CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::STREAMING),
         // Kiro CLI: plain text output (no JSON), no streaming, session resume via --resume
-        CliRunnerType::KiroCli => (false, false, false, true),
+        CliRunnerType::KiroCli => CliFeatureFlags::SESSION_RESUME,
         // Copilot Headless: ACP protocol, not a CLI runner — capabilities managed by LlmProvider
         #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => (true, true, true, false),
+        CliRunnerType::CopilotHeadless => CliFeatureFlags::JSON_OUTPUT
+            .union(CliFeatureFlags::STREAMING)
+            .union(CliFeatureFlags::SYSTEM_PROMPT),
     }
 }
 
@@ -320,38 +355,38 @@ mod tests {
 
     #[test]
     fn test_capabilities_claude_code() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::ClaudeCode);
-        assert!(json);
-        assert!(stream);
-        assert!(sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::ClaudeCode);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_cursor_agent() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::CursorAgent);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::CursorAgent);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_opencode() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::OpenCode);
-        assert!(json);
-        assert!(!stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::OpenCode);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(!flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_kilo_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::KiloCli);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::KiloCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -360,10 +395,7 @@ mod tests {
             runner_type: CliRunnerType::ClaudeCode,
             version_string: "claude 1.0.18".to_owned(),
             version: Some((1, 0, 18)),
-            json_output: true,
-            streaming: true,
-            system_prompt: true,
-            session_resume: true,
+            features: CliFeatureFlags::all(),
             meets_minimum_version: true,
         };
         assert!(caps.is_compatible());
@@ -371,47 +403,47 @@ mod tests {
 
     #[test]
     fn test_capabilities_gemini_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::GeminiCli);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::GeminiCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_codex_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::CodexCli);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(!resume);
+        let flags = capabilities_for_runner(CliRunnerType::CodexCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(!flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_goose_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::GooseCli);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::GooseCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_cline_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::ClineCli);
-        assert!(json);
-        assert!(stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::ClineCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
     fn test_capabilities_continue_cli() {
-        let (json, stream, sys, resume) = capabilities_for_runner(CliRunnerType::ContinueCli);
-        assert!(json);
-        assert!(!stream);
-        assert!(!sys);
-        assert!(resume);
+        let flags = capabilities_for_runner(CliRunnerType::ContinueCli);
+        assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
+        assert!(!flags.contains(CliFeatureFlags::STREAMING));
+        assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
+        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -420,10 +452,7 @@ mod tests {
             runner_type: CliRunnerType::ClaudeCode,
             version_string: "claude 0.0.1".to_owned(),
             version: Some((0, 0, 1)),
-            json_output: true,
-            streaming: true,
-            system_prompt: true,
-            session_resume: true,
+            features: CliFeatureFlags::all(),
             meets_minimum_version: false,
         };
         assert!(!caps.is_compatible());

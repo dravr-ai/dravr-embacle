@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_parse_json_response_basic() {
         let json = br#"{"response":"hello from continue","status":"success","note":"completed"}"#;
-        let resp = ContinueCliRunner::parse_json_response(json).unwrap();
+        let resp = ContinueCliRunner::parse_json_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from continue");
         assert!(resp.usage.is_none());
     }
@@ -182,14 +182,14 @@ mod tests {
     fn test_parse_json_response_skips_lifecycle_events() {
         let ndjson = br#"{"status":"info","message":"Auto-compacting triggered"}
 {"response":"actual answer","status":"success"}"#;
-        let resp = ContinueCliRunner::parse_json_response(ndjson).unwrap();
+        let resp = ContinueCliRunner::parse_json_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "actual answer");
     }
 
     #[test]
     fn test_parse_json_response_empty_output() {
         let empty = b"";
-        let resp = ContinueCliRunner::parse_json_response(empty).unwrap();
+        let resp = ContinueCliRunner::parse_json_response(empty).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
     }
 

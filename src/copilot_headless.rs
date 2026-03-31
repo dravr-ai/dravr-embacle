@@ -1122,7 +1122,7 @@ mod tests {
         let params = make_permission_params(&["allow_once", "allow_always", "reject_once"]);
         let result = build_permission_response(&params, PermissionPolicy::AutoApprove);
         // AllowAlways is at index 1 → opt_1
-        let selected_id = result["outcome"]["optionId"].as_str().unwrap();
+        let selected_id = result["outcome"]["optionId"].as_str().unwrap(); // Safe: test assertion
         assert_eq!(selected_id, "opt_1");
     }
 
@@ -1130,7 +1130,7 @@ mod tests {
     fn permission_selects_allow_once_when_no_allow_always() {
         let params = make_permission_params(&["allow_once", "reject_once"]);
         let result = build_permission_response(&params, PermissionPolicy::AutoApprove);
-        let selected_id = result["outcome"]["optionId"].as_str().unwrap();
+        let selected_id = result["outcome"]["optionId"].as_str().unwrap(); // Safe: test assertion
         assert_eq!(selected_id, "opt_0");
     }
 
@@ -1197,8 +1197,8 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
-        let text = blocks[0]["text"].as_str().unwrap();
-        // System prompt injected as plain text — no XML tags
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
+                                                        // System prompt injected as plain text — no XML tags
         assert!(text.contains("You are a fitness assistant"));
         assert!(!text.contains("<system-instructions>"));
         assert!(text.contains("Hello"));
@@ -1213,7 +1213,7 @@ mod tests {
         ]);
         let blocks = runner.build_prompt_blocks(&request);
         assert_eq!(blocks.len(), 1);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
         assert!(!text.contains("You are a fitness assistant"));
         assert!(text.contains("Hello"));
     }
@@ -1223,7 +1223,7 @@ mod tests {
         use crate::types::ImagePart;
 
         let runner = test_runner(20);
-        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images(
             "Describe this image",
             vec![img],
@@ -1233,7 +1233,7 @@ mod tests {
         assert_eq!(blocks[0]["type"], "text");
         assert!(blocks[0]["text"]
             .as_str()
-            .unwrap()
+            .unwrap() // Safe: test assertion
             .contains("Describe this image"));
         assert_eq!(blocks[1]["type"], "image");
         assert_eq!(blocks[1]["data"], "aGVsbG8=");
@@ -1249,7 +1249,7 @@ mod tests {
             ChatMessage::user("second"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
         assert!(text.contains("second"));
         // The last user message should NOT be in the history section
         assert!(!text.ends_with("second\n</conversation-history>"));
@@ -1265,7 +1265,7 @@ mod tests {
             ChatMessage::user("And my heart rate?"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // System prompt injected as plain text
         assert!(text.contains("You are helpful"));
@@ -1291,8 +1291,8 @@ mod tests {
             ChatMessage::user("Hello"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
-        // No history block when there's only one user message
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
+                                                        // No history block when there's only one user message
         assert!(!text.contains("<conversation-history>"));
         assert!(text.contains("Hello"));
     }
@@ -1308,7 +1308,7 @@ mod tests {
             ChatMessage::user("msg3"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // Only the 2 most recent history messages should be included
         assert!(!text.contains("User: msg1"));
@@ -1327,7 +1327,7 @@ mod tests {
             ChatMessage::user("second"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
         assert!(!text.contains("<conversation-history>"));
         assert!(text.contains("second"));
     }
@@ -1343,7 +1343,7 @@ mod tests {
             ChatMessage::user("current"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // Only the single most recent history message (reply2)
         assert!(!text.contains("User: msg1"));
@@ -1363,7 +1363,7 @@ mod tests {
             ChatMessage::user("Try again"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         assert!(text.contains("<conversation-history>"));
         assert!(text.contains("User: Check my activities"));
@@ -1387,8 +1387,8 @@ mod tests {
         let runner = test_runner(20);
         let request = ChatRequest::new(vec![ChatMessage::system("Be helpful")]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
-        // System prompt as plain text, no XML tags, no history
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
+                                                        // System prompt as plain text, no XML tags, no history
         assert!(text.contains("Be helpful"));
         assert!(!text.contains("<system-instructions>"));
         assert!(!text.contains("<conversation-history>"));
@@ -1405,7 +1405,7 @@ mod tests {
         messages.push(ChatMessage::user("current"));
         let request = ChatRequest::new(messages);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // Only last 4 history messages kept (user_9, reply_9, user_10, reply_10)
         assert!(!text.contains("user_8"));
@@ -1427,12 +1427,12 @@ mod tests {
             ChatMessage::user("q2"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // Verify ordering: system prompt < conversation-history < current message
-        let sys_pos = text.find("sys prompt").unwrap();
-        let hist_pos = text.find("<conversation-history>").unwrap();
-        let current_pos = text.find("q2").unwrap();
+        let sys_pos = text.find("sys prompt").unwrap(); // Safe: test assertion
+        let hist_pos = text.find("<conversation-history>").unwrap(); // Safe: test assertion
+        let current_pos = text.find("q2").unwrap(); // Safe: test assertion
         assert!(sys_pos < hist_pos, "system must come before history");
         assert!(
             hist_pos < current_pos,
@@ -1450,7 +1450,7 @@ mod tests {
             ChatMessage::user("current"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         assert!(text.contains("User: q1"));
         assert!(text.contains("Assistant: a1"));
@@ -1466,7 +1466,7 @@ mod tests {
             ChatMessage::user("hello"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // extract_system_prompt returns the first system message
         assert!(text.contains("first system"));
@@ -1504,7 +1504,7 @@ mod tests {
             json!({"type": "image", "data": "abc", "mimeType": "image/png"}),
         ];
         let params = build_prompt_params("s1", &blocks, Some(512));
-        let prompt = params["prompt"].as_array().unwrap();
+        let prompt = params["prompt"].as_array().unwrap(); // Safe: test assertion
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt[0]["type"], "text");
         assert_eq!(prompt[1]["type"], "image");
@@ -1520,7 +1520,7 @@ mod tests {
             ChatMessage::user("Second question"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // System prompt as plain text — no XML tags
         assert!(text.contains("Return JSON only"));
@@ -1542,7 +1542,7 @@ mod tests {
             ChatMessage::user("Second question"),
         ]);
         let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
 
         // System prompt NOT in text when injection is disabled
         assert!(!text.contains("Return JSON only"));
@@ -1558,7 +1558,7 @@ mod tests {
         use crate::types::ImagePart;
 
         let runner = test_runner(20);
-        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![
             ChatMessage::system("Analyze images precisely"),
             ChatMessage::user_with_images("What is this?", vec![img]),
@@ -1566,7 +1566,7 @@ mod tests {
         let blocks = runner.build_prompt_blocks(&request);
 
         // System prompt present as plain text
-        let text = blocks[0]["text"].as_str().unwrap();
+        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
         assert!(text.contains("Analyze images precisely"));
         assert!(!text.contains("<system-instructions>"));
         assert!(text.contains("What is this?"));

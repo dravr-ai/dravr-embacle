@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn test_parse_json_response_basic() {
         let json = br#"{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"hello"}]}],"metadata":{"total_tokens":null,"status":"completed"}}"#;
-        let resp = GooseCliRunner::parse_json_response(json).unwrap();
+        let resp = GooseCliRunner::parse_json_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello");
         assert!(resp.usage.is_none());
     }
@@ -278,14 +278,14 @@ mod tests {
     #[test]
     fn test_parse_json_response_multi_content() {
         let json = br#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"part1"},{"type":"text","text":"part2"}]}],"metadata":{"status":"completed"}}"#;
-        let resp = GooseCliRunner::parse_json_response(json).unwrap();
+        let resp = GooseCliRunner::parse_json_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "part1part2");
     }
 
     #[test]
     fn test_parse_json_response_skips_user_messages() {
         let json = br#"{"messages":[{"role":"user","content":[{"type":"text","text":"ignored"}]},{"role":"assistant","content":[{"type":"text","text":"kept"}]}],"metadata":{}}"#;
-        let resp = GooseCliRunner::parse_json_response(json).unwrap();
+        let resp = GooseCliRunner::parse_json_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "kept");
     }
 

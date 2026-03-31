@@ -218,11 +218,11 @@ mod tests {
 {"type":"text","timestamp":1772896674817,"sessionID":"ses_abc123","part":{"type":"text","text":"PONG"}}
 {"type":"step_finish","timestamp":1772896674834,"sessionID":"ses_abc123","part":{"type":"step-finish","reason":"stop","tokens":{"total":14976,"input":14963,"output":13,"reasoning":0}}}"#;
 
-        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "PONG");
         assert_eq!(sid, Some("ses_abc123".to_owned()));
         assert_eq!(resp.finish_reason, Some("stop".to_owned()));
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 14963);
         assert_eq!(usage.completion_tokens, 13);
         assert_eq!(usage.total_tokens, 14976);
@@ -234,14 +234,14 @@ mod tests {
 {"type":"text","sessionID":"ses_1","part":{"type":"text","text":"World"}}
 {"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop","tokens":{"total":100,"input":80,"output":20}}}"#;
 
-        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello World");
     }
 
     #[test]
     fn test_parse_ndjson_response_empty_output() {
         let ndjson = b"";
-        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
         assert!(sid.is_none());
         assert!(resp.usage.is_none());
@@ -252,7 +252,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"OK"}}
 {"type":"step_finish","sessionID":"ses_x","part":{"type":"step-finish","reason":"stop"}}"#;
 
-        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
         assert!(resp.usage.is_none());
     }

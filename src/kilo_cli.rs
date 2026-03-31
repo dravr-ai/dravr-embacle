@@ -338,11 +338,11 @@ mod tests {
 {"type":"text","timestamp":1710000001000,"sessionID":"ses_kilo1","part":{"type":"text","text":"Hello from Kilo!"}}
 {"type":"step_finish","timestamp":1710000002000,"sessionID":"ses_kilo1","part":{"type":"step-finish","reason":"endTurn","cost":0.0042,"tokens":{"total":1500,"input":1000,"output":400,"reasoning":100}}}"#;
 
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello from Kilo!");
         assert_eq!(sid, Some("ses_kilo1".to_owned()));
         assert_eq!(resp.finish_reason, Some("endTurn".to_owned()));
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 1000);
         assert_eq!(usage.completion_tokens, 400);
         assert_eq!(usage.total_tokens, 1500);
@@ -354,14 +354,14 @@ mod tests {
 {"type":"text","sessionID":"ses_k2","part":{"type":"text","text":"World"}}
 {"type":"step_finish","sessionID":"ses_k2","part":{"type":"step-finish","reason":"stop","tokens":{"total":100,"input":80,"output":20}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello World");
     }
 
     #[test]
     fn test_parse_ndjson_response_empty_output() {
         let ndjson = b"";
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
         assert!(sid.is_none());
         assert!(resp.usage.is_none());
@@ -372,7 +372,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k3","part":{"type":"text","text":"OK"}}
 {"type":"step_finish","sessionID":"ses_k3","part":{"type":"step-finish","reason":"stop"}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
         assert!(resp.usage.is_none());
     }
@@ -392,7 +392,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k5","part":{"type":"text","text":"partial response"}}
 {"type":"error","sessionID":"ses_k5","error":{"name":"ContextOverflowError","data":{"message":"context too long"}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "partial response");
     }
 
@@ -403,10 +403,10 @@ mod tests {
 {"type":"text","timestamp":1710000002000,"sessionID":"ses_k6","part":{"type":"text","text":"Listed files."}}
 {"type":"step_finish","timestamp":1710000003000,"sessionID":"ses_k6","part":{"type":"step-finish","reason":"endTurn","tokens":{"input":500,"output":50}}}"#;
 
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Listed files.");
         assert_eq!(sid, Some("ses_k6".to_owned()));
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 500);
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 550);
@@ -417,9 +417,9 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k7","part":{"type":"text","text":"result"}}
 {"type":"step_finish","sessionID":"ses_k7","part":{"type":"step-finish","reason":"stop","tokens":{"input":200,"output":50,"reasoning":100,"total":350}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "result");
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.total_tokens, 350);
     }
 

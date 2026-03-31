@@ -271,12 +271,12 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // First result is the actual JSON content
-        let first = results[0].as_ref().unwrap();
+        let first = results[0].as_ref().unwrap(); // Safe: test assertion
         assert_eq!(first.delta, "{\"key\":\"value\"}\n");
         assert!(!first.is_final);
 
         // Second result is the final signal with empty delta (fence stripped)
-        let second = results[1].as_ref().unwrap();
+        let second = results[1].as_ref().unwrap(); // Safe: test assertion
         assert!(second.delta.is_empty());
         assert!(second.is_final);
         assert_eq!(second.finish_reason.as_deref(), Some("stop"));

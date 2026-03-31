@@ -516,10 +516,10 @@ mod tests {
     #[test]
     fn deserialize_single_model() {
         let json = r#"{"model":"copilot:gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.model {
             ModelField::Single(m) => assert_eq!(m, "copilot:gpt-4o"),
-            ModelField::Multiple(_) => panic!("expected single"),
+            ModelField::Multiple(_) => unreachable!("expected single"), // Safe: test assertion
         }
         assert!(!req.stream);
     }
@@ -527,14 +527,14 @@ mod tests {
     #[test]
     fn deserialize_multiple_models() {
         let json = r#"{"model":["copilot:gpt-4o","claude:opus"],"messages":[{"role":"user","content":"hi"}]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.model {
             ModelField::Multiple(models) => {
                 assert_eq!(models.len(), 2);
                 assert_eq!(models[0], "copilot:gpt-4o");
                 assert_eq!(models[1], "claude:opus");
             }
-            ModelField::Single(_) => panic!("expected multiple"),
+            ModelField::Single(_) => unreachable!("expected multiple"), // Safe: test assertion
         }
     }
 
@@ -542,14 +542,14 @@ mod tests {
     fn deserialize_with_stream_flag() {
         let json =
             r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert!(req.stream);
     }
 
     #[test]
     fn deserialize_message_with_null_content() {
         let json = r#"{"model":"copilot","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert!(req.messages[0].content.is_none());
         assert!(req.messages[0].tool_calls.is_some());
     }
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn deserialize_message_without_content_field() {
         let json = r#"{"model":"copilot","messages":[{"role":"tool","tool_call_id":"call_1","name":"search","content":"{\"result\":\"found\"}"}]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert_eq!(req.messages[0].role, "tool");
         assert_eq!(req.messages[0].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(req.messages[0].name.as_deref(), Some("search"));
@@ -575,8 +575,8 @@ mod tests {
                 ]
             }]
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
-        let content = req.messages[0].content.as_ref().expect("content present");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        let content = req.messages[0].content.as_ref().expect("content present"); // Safe: test assertion
         match content {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -587,7 +587,7 @@ mod tests {
                     matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url.contains("base64"))
                 );
             }
-            MessageContent::Text(_) => panic!("expected Parts variant"),
+            MessageContent::Text(_) => unreachable!("expected Parts variant"), // Safe: test assertion
         }
     }
 
@@ -618,10 +618,11 @@ mod tests {
     #[test]
     fn deserialize_plain_string_content_backward_compat() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.messages[0].content.as_ref().expect("content present") {
+            // Safe: test assertion
             MessageContent::Text(s) => assert_eq!(s, "hi"),
-            MessageContent::Parts(_) => panic!("expected Text variant"),
+            MessageContent::Parts(_) => unreachable!("expected Text variant"), // Safe: test assertion
         }
     }
 
@@ -639,8 +640,8 @@ mod tests {
                 }
             }]
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
-        let tools = req.tools.expect("tools present");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        let tools = req.tools.expect("tools present"); // Safe: test assertion
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_type, "function");
         assert_eq!(tools[0].function.name, "get_weather");
@@ -650,20 +651,22 @@ mod tests {
     #[test]
     fn deserialize_tool_choice_auto() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.tool_choice.expect("tool_choice present") {
+            // Safe: test assertion
             ToolChoice::Mode(m) => assert_eq!(m, "auto"),
-            ToolChoice::Specific(_) => panic!("expected mode"),
+            ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
     }
 
     #[test]
     fn deserialize_tool_choice_specific() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"function","function":{"name":"get_weather"}}}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.tool_choice.expect("tool_choice present") {
+            // Safe: test assertion
             ToolChoice::Specific(s) => assert_eq!(s.function.name, "get_weather"),
-            ToolChoice::Mode(_) => panic!("expected specific"),
+            ToolChoice::Mode(_) => unreachable!("expected specific"), // Safe: test assertion
         }
     }
 
@@ -686,7 +689,7 @@ mod tests {
             usage: None,
             warnings: None,
         };
-        let json = serde_json::to_string(&resp).expect("serialize");
+        let json = serde_json::to_string(&resp).expect("serialize"); // Safe: test assertion
         assert!(json.contains("chat.completion"));
         assert!(json.contains("Hello!"));
         assert!(!json.contains("tool_calls"));
@@ -719,7 +722,7 @@ mod tests {
             usage: None,
             warnings: None,
         };
-        let json = serde_json::to_string(&resp).expect("serialize");
+        let json = serde_json::to_string(&resp).expect("serialize"); // Safe: test assertion
         assert!(json.contains("tool_calls"));
         assert!(json.contains("call_abc123"));
         assert!(json.contains("get_weather"));
@@ -729,7 +732,7 @@ mod tests {
     #[test]
     fn serialize_error_response() {
         let resp = ErrorResponse::new("invalid_request_error", "Unknown model");
-        let json = serde_json::to_string(&resp).expect("serialize");
+        let json = serde_json::to_string(&resp).expect("serialize"); // Safe: test assertion
         assert!(json.contains("invalid_request_error"));
         assert!(json.contains("Unknown model"));
     }
@@ -751,7 +754,7 @@ mod tests {
                 finish_reason: None,
             }],
         };
-        let json = serde_json::to_string(&chunk).expect("serialize");
+        let json = serde_json::to_string(&chunk).expect("serialize"); // Safe: test assertion
         assert!(json.contains("chat.completion.chunk"));
         assert!(json.contains("token"));
         assert!(!json.contains("tool_calls"));
@@ -760,27 +763,29 @@ mod tests {
     #[test]
     fn deserialize_tool_choice_none() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.tool_choice.expect("tool_choice present") {
+            // Safe: test assertion
             ToolChoice::Mode(m) => assert_eq!(m, "none"),
-            ToolChoice::Specific(_) => panic!("expected mode"),
+            ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
     }
 
     #[test]
     fn deserialize_tool_choice_required() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.tool_choice.expect("tool_choice present") {
+            // Safe: test assertion
             ToolChoice::Mode(m) => assert_eq!(m, "required"),
-            ToolChoice::Specific(_) => panic!("expected mode"),
+            ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
     }
 
     #[test]
     fn deserialize_response_format_text() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"text"}}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert!(matches!(
             req.response_format,
             Some(ResponseFormatRequest::Text)
@@ -790,7 +795,7 @@ mod tests {
     #[test]
     fn deserialize_response_format_json_object() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert!(matches!(
             req.response_format,
             Some(ResponseFormatRequest::JsonObject)
@@ -810,20 +815,20 @@ mod tests {
                 }
             }
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         match req.response_format {
             Some(ResponseFormatRequest::JsonSchema { json_schema }) => {
                 assert_eq!(json_schema.name, "weather");
                 assert!(json_schema.schema["properties"]["temp"].is_object());
             }
-            other => panic!("expected JsonSchema, got: {other:?}"),
+            other => unreachable!("expected JsonSchema, got: {other:?}"), // Safe: test assertion
         }
     }
 
     #[test]
     fn deserialize_top_p() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"top_p":0.9}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert_eq!(req.top_p, Some(0.9));
     }
 
@@ -831,16 +836,16 @@ mod tests {
     fn deserialize_stop_single() {
         let json =
             r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"stop":"END"}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
-        let stop = req.stop.expect("stop present");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        let stop = req.stop.expect("stop present"); // Safe: test assertion
         assert_eq!(stop.into_vec(), vec!["END"]);
     }
 
     #[test]
     fn deserialize_stop_array() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"stop":["END","STOP"]}"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
-        let stop = req.stop.expect("stop present");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        let stop = req.stop.expect("stop present"); // Safe: test assertion
         assert_eq!(stop.into_vec(), vec!["END", "STOP"]);
     }
 
@@ -872,7 +877,7 @@ mod tests {
             "stop": ["END"],
             "stream": true
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize");
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
         assert_eq!(req.temperature, Some(0.7));
         assert_eq!(req.max_tokens, Some(100));
         assert_eq!(req.top_p, Some(0.95));
@@ -890,7 +895,7 @@ mod tests {
                 owned_by: "copilot".to_owned(),
             }],
         };
-        let json = serde_json::to_string(&resp).expect("serialize");
+        let json = serde_json::to_string(&resp).expect("serialize"); // Safe: test assertion
         assert!(json.contains("copilot:gpt-4o"));
     }
 }

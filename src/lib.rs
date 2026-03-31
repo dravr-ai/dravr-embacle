@@ -249,7 +249,7 @@ pub use claude_code::ClaudeCodeRunner;
 pub use cli_common::CliRunnerBase;
 pub use cline_cli::ClineCliRunner;
 pub use codex_cli::CodexCliRunner;
-pub use compat::CliCapabilities;
+pub use compat::{CliCapabilities, CliFeatureFlags};
 pub use config::{CliRunnerType, RunnerConfig};
 pub use container::{ContainerConfig, ContainerExecutor, NetworkMode};
 pub use continue_cli::ContinueCliRunner;

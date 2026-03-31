@@ -197,7 +197,7 @@ impl OtelInstruments {
 /// # fn example(provider: Box<dyn LlmProvider>) {
 /// let metered = MetricsProvider::new(provider);
 /// // ... use metered as LlmProvider ...
-/// let report = metered.report();
+/// let report = metered.report().unwrap(); // Safe: test assertion
 /// println!("calls={} avg_latency={}ms", report.call_count, report.avg_latency_ms);
 /// # }
 /// ```
@@ -234,13 +234,16 @@ impl MetricsProvider {
 
     /// Return a snapshot of the current metrics
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn report(&self) -> MetricsReport {
-        let state = self.state.lock().expect("metrics lock poisoned");
+    /// Returns [`RunnerError`] if the internal mutex is poisoned.
+    pub fn report(&self) -> Result<MetricsReport, RunnerError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RunnerError::internal("metrics lock poisoned"))?;
         let divisor = state.call_count.max(1);
-        MetricsReport {
+        Ok(MetricsReport {
             provider_name: self.inner.name().to_owned(),
             call_count: state.call_count,
             total_latency_ms: state.total_latency_ms,
@@ -250,17 +253,21 @@ impl MetricsProvider {
             total_tokens: state.total_tokens,
             errors_count: state.errors_count,
             total_cost: state.total_cost,
-        }
+        })
     }
 
     /// Reset all counters to zero
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn reset(&self) {
-        let mut state = self.state.lock().expect("metrics lock poisoned");
+    /// Returns [`RunnerError`] if the internal mutex is poisoned.
+    pub fn reset(&self) -> Result<(), RunnerError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RunnerError::internal("metrics lock poisoned"))?;
         *state = MetricsState::default();
+        Ok(())
     }
 
     /// Compute cost for a single call based on token counts and model name
@@ -320,7 +327,10 @@ impl LlmProvider for MetricsProvider {
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
-        let mut state = self.state.lock().expect("metrics lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RunnerError::internal("metrics lock poisoned"))?;
         state.call_count += 1;
         state.total_latency_ms += elapsed_ms;
 
@@ -445,7 +455,7 @@ mod tests {
 
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
                     content: "default".to_owned(),
@@ -473,7 +483,7 @@ mod tests {
     fn fresh_report_is_zeroed() {
         let provider = TestProvider::new(vec![]);
         let metered = MetricsProvider::new(Box::new(provider));
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.call_count, 0);
         assert_eq!(report.total_latency_ms, 0);
         assert_eq!(report.avg_latency_ms, 0);
@@ -516,10 +526,10 @@ mod tests {
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        metered.complete(&request).await.expect("first call");
-        metered.complete(&request).await.expect("second call");
+        metered.complete(&request).await.expect("first call"); // Safe: test assertion
+        metered.complete(&request).await.expect("second call"); // Safe: test assertion
 
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.call_count, 2);
         assert_eq!(report.total_prompt_tokens, 18);
         assert_eq!(report.total_completion_tokens, 8);
@@ -536,7 +546,7 @@ mod tests {
         let result = metered.complete(&request).await;
         assert!(result.is_err());
 
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.call_count, 1);
         assert_eq!(report.errors_count, 1);
     }
@@ -554,9 +564,9 @@ mod tests {
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("12345678")]); // 8 chars => 2 tokens
 
-        metered.complete(&request).await.expect("call");
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
 
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.total_prompt_tokens, 2);
         assert_eq!(report.total_completion_tokens, 4);
         assert_eq!(report.total_tokens, 6);
@@ -567,7 +577,7 @@ mod tests {
         let provider = TestProvider::new(vec![]);
         let metered = MetricsProvider::new(Box::new(provider));
         // No calls made — avg should be 0/max(0,1) = 0, not panic
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.avg_latency_ms, 0);
     }
 
@@ -588,11 +598,11 @@ mod tests {
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        metered.complete(&request).await.expect("call");
-        assert_eq!(metered.report().call_count, 1);
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+        assert_eq!(metered.report().unwrap().call_count, 1); // Safe: test assertion
 
-        metered.reset();
-        let report = metered.report();
+        metered.reset().unwrap(); // Safe: test assertion
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert_eq!(report.call_count, 0);
         assert_eq!(report.total_tokens, 0);
         assert_eq!(report.errors_count, 0);
@@ -619,11 +629,11 @@ mod tests {
         })]);
         let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call");
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
 
-        let report = metered.report();
-        // opus: 1000 prompt * 0.015/1000 + 500 completion * 0.075/1000
-        // = 0.015 + 0.0375 = 0.0525
+        let report = metered.report().unwrap(); // Safe: test assertion
+                                                // opus: 1000 prompt * 0.015/1000 + 500 completion * 0.075/1000
+                                                // = 0.015 + 0.0375 = 0.0525
         assert!((report.total_cost - 0.0525).abs() < 1e-10);
     }
 
@@ -643,9 +653,9 @@ mod tests {
         })]);
         let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call");
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
 
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert!(report.total_cost == 0.0);
     }
 
@@ -679,13 +689,13 @@ mod tests {
         ]);
         let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call 1");
-        metered.complete(&request).await.expect("call 2");
+        metered.complete(&request).await.expect("call 1"); // Safe: test assertion
+        metered.complete(&request).await.expect("call 2"); // Safe: test assertion
 
-        let report = metered.report();
-        // call1: 0.015 + 0.0375 = 0.0525
-        // call2: 0.030 + 0.075 = 0.105
-        // total: 0.1575
+        let report = metered.report().unwrap(); // Safe: test assertion
+                                                // call1: 0.015 + 0.0375 = 0.0525
+                                                // call2: 0.030 + 0.075 = 0.105
+                                                // total: 0.1575
         assert!((report.total_cost - 0.1575).abs() < 1e-10);
     }
 
@@ -705,9 +715,9 @@ mod tests {
         })]);
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call");
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
 
-        let report = metered.report();
+        let report = metered.report().unwrap(); // Safe: test assertion
         assert!(report.total_cost == 0.0);
     }
 
@@ -723,11 +733,11 @@ mod tests {
         })]);
         let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
         let request = ChatRequest::new(vec![ChatMessage::user("12345678")]); // 8 chars => 2 tokens
-        metered.complete(&request).await.expect("call");
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
 
-        let report = metered.report();
-        // 2 prompt tokens, 4 completion tokens via estimation
-        // 2 * 0.015/1000 + 4 * 0.075/1000 = 0.00003 + 0.0003 = 0.00033
+        let report = metered.report().unwrap(); // Safe: test assertion
+                                                // 2 prompt tokens, 4 completion tokens via estimation
+                                                // 2 * 0.015/1000 + 4 * 0.075/1000 = 0.00003 + 0.0003 = 0.00033
         assert!(report.total_cost > 0.0);
         assert!((report.total_cost - 0.00033).abs() < 1e-10);
     }
@@ -760,10 +770,10 @@ mod tests {
         })]);
         let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call");
-        assert!(metered.report().total_cost > 0.0);
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+        assert!(metered.report().unwrap().total_cost > 0.0); // Safe: test assertion
 
-        metered.reset();
-        assert!(metered.report().total_cost == 0.0);
+        metered.reset().unwrap(); // Safe: test assertion
+        assert!(metered.report().unwrap().total_cost == 0.0); // Safe: test assertion
     }
 }

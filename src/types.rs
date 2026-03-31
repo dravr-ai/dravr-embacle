@@ -695,8 +695,8 @@ mod tests {
             function_name: "get_weather".to_owned(),
             arguments: json!({"city": "Paris"}),
         };
-        let json = serde_json::to_string(&tc).unwrap();
-        let deserialized: ToolCallRequest = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&tc).unwrap(); // Safe: test assertion
+        let deserialized: ToolCallRequest = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert_eq!(deserialized.id, "call_1");
         assert_eq!(deserialized.function_name, "get_weather");
         assert_eq!(deserialized.arguments["city"], "Paris");
@@ -709,8 +709,8 @@ mod tests {
             description: "Search the web".to_owned(),
             parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
         };
-        let json = serde_json::to_string(&td).unwrap();
-        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&td).unwrap(); // Safe: test assertion
+        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert_eq!(deserialized.name, "search");
         assert!(deserialized.parameters.is_some());
     }
@@ -722,55 +722,55 @@ mod tests {
             description: "Check connectivity".to_owned(),
             parameters: None,
         };
-        let json = serde_json::to_string(&td).unwrap();
+        let json = serde_json::to_string(&td).unwrap(); // Safe: test assertion
         assert!(!json.contains("parameters"));
-        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
+        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(deserialized.parameters.is_none());
     }
 
     #[test]
     fn tool_choice_serde_variants() {
         let auto = ToolChoice::Auto;
-        let json = serde_json::to_string(&auto).unwrap();
-        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&auto).unwrap(); // Safe: test assertion
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ToolChoice::Auto));
 
         let none = ToolChoice::None;
-        let json = serde_json::to_string(&none).unwrap();
-        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&none).unwrap(); // Safe: test assertion
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ToolChoice::None));
 
         let required = ToolChoice::Required;
-        let json = serde_json::to_string(&required).unwrap();
-        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&required).unwrap(); // Safe: test assertion
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ToolChoice::Required));
 
         let specific = ToolChoice::Specific {
             name: "get_weather".to_owned(),
         };
-        let json = serde_json::to_string(&specific).unwrap();
-        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&specific).unwrap(); // Safe: test assertion
+        let deserialized: ToolChoice = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ToolChoice::Specific { name } if name == "get_weather"));
     }
 
     #[test]
     fn response_format_serde_variants() {
         let text = ResponseFormat::Text;
-        let json = serde_json::to_string(&text).unwrap();
-        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&text).unwrap(); // Safe: test assertion
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ResponseFormat::Text));
 
         let json_obj = ResponseFormat::JsonObject;
-        let json = serde_json::to_string(&json_obj).unwrap();
-        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&json_obj).unwrap(); // Safe: test assertion
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(matches!(deserialized, ResponseFormat::JsonObject));
 
         let json_schema = ResponseFormat::JsonSchema {
             name: "person".to_owned(),
             schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
         };
-        let json = serde_json::to_string(&json_schema).unwrap();
-        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&json_schema).unwrap(); // Safe: test assertion
+        let deserialized: ResponseFormat = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert!(
             matches!(deserialized, ResponseFormat::JsonSchema { name, .. } if name == "person")
         );
@@ -812,18 +812,18 @@ mod tests {
 
     #[test]
     fn user_with_images_constructor() {
-        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap(); // Safe: test assertion
         let msg = ChatMessage::user_with_images("describe this", vec![img]);
         assert_eq!(msg.role, MessageRole::User);
         assert_eq!(msg.content, "describe this");
-        let images = msg.images.as_ref().unwrap();
+        let images = msg.images.as_ref().unwrap(); // Safe: test assertion
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
     }
 
     #[test]
     fn chat_request_has_images() {
-        let img = ImagePart::new("data", "image/jpeg").unwrap();
+        let img = ImagePart::new("data", "image/jpeg").unwrap(); // Safe: test assertion
         let with = ChatRequest::new(vec![ChatMessage::user_with_images("x", vec![img])]);
         assert!(with.has_images());
 
@@ -840,26 +840,26 @@ mod tests {
 
     #[test]
     fn image_part_serde_round_trip() {
-        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap();
-        let json = serde_json::to_string(&img).unwrap();
-        let deserialized: ImagePart = serde_json::from_str(&json).unwrap();
+        let img = ImagePart::new("aGVsbG8=", "image/png").unwrap(); // Safe: test assertion
+        let json = serde_json::to_string(&img).unwrap(); // Safe: test assertion
+        let deserialized: ImagePart = serde_json::from_str(&json).unwrap(); // Safe: test assertion
         assert_eq!(deserialized, img);
     }
 
     #[test]
     fn chat_message_with_images_serde_round_trip() {
-        let img = ImagePart::new("data", "image/jpeg").unwrap();
+        let img = ImagePart::new("data", "image/jpeg").unwrap(); // Safe: test assertion
         let msg = ChatMessage::user_with_images("describe", vec![img]);
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: ChatMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.images.as_ref().unwrap().len(), 1);
-        assert_eq!(deserialized.images.unwrap()[0].mime_type, "image/jpeg");
+        let json = serde_json::to_string(&msg).unwrap(); // Safe: test assertion
+        let deserialized: ChatMessage = serde_json::from_str(&json).unwrap(); // Safe: test assertion
+        assert_eq!(deserialized.images.as_ref().unwrap().len(), 1); // Safe: test assertion
+        assert_eq!(deserialized.images.unwrap()[0].mime_type, "image/jpeg"); // Safe: test assertion
     }
 
     #[test]
     fn chat_message_without_images_backward_compat() {
         let json = r#"{"role":"user","content":"hello"}"#;
-        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        let msg: ChatMessage = serde_json::from_str(json).unwrap(); // Safe: test assertion
         assert!(msg.images.is_none());
         assert_eq!(msg.content, "hello");
     }
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn chat_message_images_not_serialized_when_none() {
         let msg = ChatMessage::user("hello");
-        let json = serde_json::to_string(&msg).unwrap();
+        let json = serde_json::to_string(&msg).unwrap(); // Safe: test assertion
         assert!(!json.contains("images"));
     }
 
@@ -887,7 +887,7 @@ mod tests {
         assert!(req.tools.is_some());
         assert!(matches!(req.tool_choice, Some(ToolChoice::Required)));
         assert_eq!(req.top_p, Some(0.9));
-        assert_eq!(req.stop.as_ref().unwrap()[0], "END");
+        assert_eq!(req.stop.as_ref().unwrap()[0], "END"); // Safe: test assertion
         assert!(matches!(
             req.response_format,
             Some(ResponseFormat::JsonObject)

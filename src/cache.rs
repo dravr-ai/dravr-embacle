@@ -109,14 +109,17 @@ impl CacheProvider {
 
     /// Return current cache statistics
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn cache_stats(&self) -> CacheStats {
-        let state = self.state.lock().expect("cache lock poisoned");
+    /// Returns [`RunnerError`] if the internal mutex is poisoned.
+    pub fn cache_stats(&self) -> Result<CacheStats, RunnerError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RunnerError::internal("cache lock poisoned"))?;
         let mut snapshot = state.stats.clone();
         snapshot.size = state.entries.len();
-        snapshot
+        Ok(snapshot)
     }
 
     /// Compute a deterministic cache key from request parameters
@@ -174,7 +177,10 @@ impl LlmProvider for CacheProvider {
 
         // Check cache
         {
-            let mut state = self.state.lock().expect("cache lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| RunnerError::internal("cache lock poisoned"))?;
             let cached = state.entries.get(&key).and_then(|entry| {
                 if entry.inserted_at.elapsed() < self.config.ttl {
                     Some(entry.response.clone())
@@ -200,7 +206,10 @@ impl LlmProvider for CacheProvider {
 
         // Store in cache
         {
-            let mut state = self.state.lock().expect("cache lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| RunnerError::internal("cache lock poisoned"))?;
 
             // Evict oldest if at capacity
             while state.entries.len() >= self.config.max_entries {
@@ -279,7 +288,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
                     content: "default".to_owned(),
@@ -318,13 +327,13 @@ mod tests {
         let cached = CacheProvider::new(Box::new(provider), CacheConfig::default());
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        let r1 = cached.complete(&request).await.expect("first call");
-        let r2 = cached.complete(&request).await.expect("second call");
+        let r1 = cached.complete(&request).await.expect("first call"); // Safe: test assertion
+        let r2 = cached.complete(&request).await.expect("second call"); // Safe: test assertion
 
         assert_eq!(r1.content, "cached");
         assert_eq!(r2.content, "cached");
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
     }
@@ -340,16 +349,16 @@ mod tests {
         let r1 = cached
             .complete(&ChatRequest::new(vec![ChatMessage::user("hello")]))
             .await
-            .expect("first");
+            .expect("first"); // Safe: test assertion
         let r2 = cached
             .complete(&ChatRequest::new(vec![ChatMessage::user("goodbye")]))
             .await
-            .expect("second");
+            .expect("second"); // Safe: test assertion
 
         assert_eq!(r1.content, "first");
         assert_eq!(r2.content, "second");
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.misses, 2);
         assert_eq!(stats.hits, 0);
     }
@@ -360,8 +369,8 @@ mod tests {
         let cached = CacheProvider::new(Box::new(provider), CacheConfig::default());
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]).with_temperature(0.7);
 
-        let r1 = cached.complete(&request).await.expect("first");
-        let r2 = cached.complete(&request).await.expect("second");
+        let r1 = cached.complete(&request).await.expect("first"); // Safe: test assertion
+        let r2 = cached.complete(&request).await.expect("second"); // Safe: test assertion
 
         // Both calls go through (cache bypassed)
         assert_eq!(r1.content, "r1");
@@ -378,13 +387,13 @@ mod tests {
         let cached = CacheProvider::new(Box::new(provider), config);
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]).with_temperature(0.7);
 
-        let r1 = cached.complete(&request).await.expect("first");
-        let r2 = cached.complete(&request).await.expect("second");
+        let r1 = cached.complete(&request).await.expect("first"); // Safe: test assertion
+        let r2 = cached.complete(&request).await.expect("second"); // Safe: test assertion
 
         assert_eq!(r1.content, "cached");
         assert_eq!(r2.content, "cached");
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.hits, 1);
     }
 
@@ -399,15 +408,15 @@ mod tests {
         let cached = CacheProvider::new(Box::new(provider), config);
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        let r1 = cached.complete(&request).await.expect("first");
+        let r1 = cached.complete(&request).await.expect("first"); // Safe: test assertion
         assert_eq!(r1.content, "old");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        let r2 = cached.complete(&request).await.expect("after expiry");
+        let r2 = cached.complete(&request).await.expect("after expiry"); // Safe: test assertion
         assert_eq!(r2.content, "fresh");
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.evictions, 1);
     }
 
@@ -427,17 +436,17 @@ mod tests {
         cached
             .complete(&ChatRequest::new(vec![ChatMessage::user("1")]))
             .await
-            .expect("a");
+            .expect("a"); // Safe: test assertion
         cached
             .complete(&ChatRequest::new(vec![ChatMessage::user("2")]))
             .await
-            .expect("b");
+            .expect("b"); // Safe: test assertion
         cached
             .complete(&ChatRequest::new(vec![ChatMessage::user("3")]))
             .await
-            .expect("c");
+            .expect("c"); // Safe: test assertion
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.size, 2);
         assert_eq!(stats.evictions, 1);
     }
@@ -450,11 +459,11 @@ mod tests {
         let req1 = ChatRequest::new(vec![ChatMessage::user("hello")]);
         let req2 = ChatRequest::new(vec![ChatMessage::user("world")]);
 
-        cached.complete(&req1).await.expect("miss");
-        cached.complete(&req1).await.expect("hit");
-        cached.complete(&req2).await.expect("miss");
+        cached.complete(&req1).await.expect("miss"); // Safe: test assertion
+        cached.complete(&req1).await.expect("hit"); // Safe: test assertion
+        cached.complete(&req2).await.expect("miss"); // Safe: test assertion
 
-        let stats = cached.cache_stats();
+        let stats = cached.cache_stats().unwrap(); // Safe: test assertion
         assert_eq!(stats.misses, 2);
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.size, 2);

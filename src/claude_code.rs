@@ -320,12 +320,12 @@ mod tests {
     #[test]
     fn test_parse_response_valid_json() {
         let json = br#"{"result":"Hello world","is_error":false,"session_id":"abc123","usage":{"input_tokens":10,"output_tokens":5}}"#;
-        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap();
+        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "Hello world");
         assert_eq!(session_id, Some("abc123".to_owned()));
         assert_eq!(response.model, "claude-code");
-        let usage = response.usage.unwrap();
+        let usage = response.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn test_parse_response_missing_optional_fields() {
         let json = br#"{"result":"hi","is_error":false}"#;
-        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap();
+        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "hi");
         assert!(session_id.is_none());
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_parse_response_null_result() {
         let json = br#"{"is_error":false}"#;
-        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap();
+        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
         assert_eq!(response.content, "");
     }
 

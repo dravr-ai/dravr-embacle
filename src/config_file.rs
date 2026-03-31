@@ -247,7 +247,7 @@ mod tests {
 [[providers]]
 type = "claude_code"
 "#;
-        let config: EmbacleConfig = toml::from_str(toml_str).unwrap();
+        let config: EmbacleConfig = toml::from_str(toml_str).unwrap(); // Safe: test assertion
         assert_eq!(config.providers.len(), 1);
         assert_eq!(config.providers[0].provider_type, "claude_code");
         assert!(config.defaults.timeout.is_none());
@@ -281,7 +281,7 @@ max_delay_ms = 5000
 fast = "gemini_cli"
 smart = "claude_code"
 "#;
-        let config: EmbacleConfig = toml::from_str(toml_str).unwrap();
+        let config: EmbacleConfig = toml::from_str(toml_str).unwrap(); // Safe: test assertion
         assert_eq!(config.providers.len(), 2);
         assert_eq!(config.defaults.timeout, Some(120));
         assert_eq!(config.defaults.model.as_deref(), Some("gpt-5.4"));
@@ -289,13 +289,13 @@ smart = "claude_code"
         assert_eq!(config.providers[0].timeout, Some(180));
         assert_eq!(config.providers[0].extra_args, vec!["--verbose"]);
         assert_eq!(config.providers[0].env_keys, vec!["ANTHROPIC_API_KEY"]);
-        let fb = config.fallback.as_ref().unwrap();
+        let fb = config.fallback.as_ref().unwrap(); // Safe: test assertion
         assert_eq!(fb.providers, vec!["claude_code", "copilot"]);
         assert_eq!(fb.retry_per_provider, Some(2));
         assert_eq!(fb.base_delay_ms, Some(500));
         assert_eq!(fb.max_delay_ms, Some(5000));
-        assert_eq!(config.aliases.get("fast").unwrap(), "gemini_cli");
-        assert_eq!(config.aliases.get("smart").unwrap(), "claude_code");
+        assert_eq!(config.aliases.get("fast").unwrap(), "gemini_cli"); // Safe: test assertion
+        assert_eq!(config.aliases.get("smart").unwrap(), "claude_code"); // Safe: test assertion
     }
 
     #[test]
@@ -312,7 +312,7 @@ smart = "claude_code"
             extra_args: vec![],
             env_keys: vec![],
         };
-        let config = build_runner_config(&provider, &defaults).unwrap();
+        let config = build_runner_config(&provider, &defaults).unwrap(); // Safe: test assertion
         assert_eq!(config.model.as_deref(), Some("override-model"));
         assert_eq!(config.timeout, Duration::from_secs(60));
     }
@@ -324,7 +324,7 @@ smart = "claude_code"
 fast = "gemini_cli"
 smart = "claude_code"
 "#;
-        let config: EmbacleConfig = toml::from_str(toml_str).unwrap();
+        let config: EmbacleConfig = toml::from_str(toml_str).unwrap(); // Safe: test assertion
         assert_eq!(resolve_alias(&config, "fast"), Some("gemini_cli"));
         assert_eq!(resolve_alias(&config, "smart"), Some("claude_code"));
         assert_eq!(resolve_alias(&config, "unknown"), None);
@@ -341,8 +341,8 @@ smart = "claude_code"
 
     #[test]
     fn invalid_toml_returns_config_error() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "not valid toml {{{{").unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap(); // Safe: test assertion
+        std::fs::write(tmp.path(), "not valid toml {{{{").unwrap(); // Safe: test assertion
         let result = load_config_from(tmp.path());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind, crate::types::ErrorKind::Config);
@@ -379,7 +379,7 @@ smart = "claude_code"
             extra_args: vec![],
             env_keys: vec![],
         };
-        let config = build_runner_config(&provider, &defaults).unwrap();
+        let config = build_runner_config(&provider, &defaults).unwrap(); // Safe: test assertion
         assert_eq!(config.timeout, Duration::from_secs(90));
         assert_eq!(config.binary_path, PathBuf::from("/custom/claude"));
     }

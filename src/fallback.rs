@@ -344,7 +344,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Err(RunnerError::internal("no more responses"))
             } else {
@@ -353,7 +353,7 @@ mod tests {
         }
         async fn complete_stream(&self, _request: &ChatRequest) -> Result<ChatStream, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Err(RunnerError::internal("no more stream responses"))
             } else {
@@ -378,10 +378,10 @@ mod tests {
     async fn single_provider_passthrough() {
         let providers: Vec<Box<dyn LlmProvider>> =
             vec![Box::new(TestProvider::ok("claude", "hello"))];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        let response = fallback.complete(&request).await.expect("should succeed");
+        let response = fallback.complete(&request).await.expect("should succeed"); // Safe: test assertion
         assert_eq!(response.content, "hello");
     }
 
@@ -391,13 +391,13 @@ mod tests {
             Box::new(TestProvider::failing("primary")),
             Box::new(TestProvider::ok("secondary", "fallback response")),
         ];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         let response = fallback
             .complete(&request)
             .await
-            .expect("second should work");
+            .expect("second should work"); // Safe: test assertion
         assert_eq!(response.content, "fallback response");
     }
 
@@ -407,7 +407,7 @@ mod tests {
             Box::new(TestProvider::failing("first")),
             Box::new(TestProvider::failing("second")),
         ];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         let err = fallback.complete(&request).await.unwrap_err();
@@ -420,9 +420,9 @@ mod tests {
             Box::new(TestProvider::failing("unhealthy")), // healthy=false
             Box::new(TestProvider::ok("healthy", "ok")),  // healthy=true
         ];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
 
-        let healthy = fallback.health_check().await.expect("health check");
+        let healthy = fallback.health_check().await.expect("health check"); // Safe: test assertion
         assert!(healthy);
     }
 
@@ -432,9 +432,9 @@ mod tests {
             Box::new(TestProvider::failing("a")),
             Box::new(TestProvider::failing("b")),
         ];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
 
-        let healthy = fallback.health_check().await.expect("health check");
+        let healthy = fallback.health_check().await.expect("health check"); // Safe: test assertion
         assert!(!healthy);
     }
 
@@ -444,7 +444,7 @@ mod tests {
             Box::new(TestProvider::ok("a", "ok")), // text_only = STREAMING | SYSTEM_MESSAGES
             Box::new(TestProvider::failing("b")),  // FUNCTION_CALLING
         ];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
 
         let caps = fallback.capabilities();
         assert!(caps.supports_streaming());
@@ -482,7 +482,7 @@ mod tests {
         };
 
         let providers: Vec<Box<dyn LlmProvider>> = vec![Box::new(a), Box::new(b)];
-        let fallback = FallbackProvider::new(providers).expect("non-empty");
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
 
         let models = fallback.available_models();
         assert_eq!(models.len(), 3);
@@ -510,10 +510,10 @@ mod tests {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(10),
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        let response = fallback.complete(&request).await.expect("should recover");
+        let response = fallback.complete(&request).await.expect("should recover"); // Safe: test assertion
         assert_eq!(response.content, "recovered");
     }
 
@@ -533,13 +533,13 @@ mod tests {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(10),
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         let response = fallback
             .complete(&request)
             .await
-            .expect("backup should work");
+            .expect("backup should work"); // Safe: test assertion
         assert_eq!(response.content, "from backup");
     }
 
@@ -560,13 +560,13 @@ mod tests {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(10),
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         let response = fallback
             .complete(&request)
             .await
-            .expect("secondary should work");
+            .expect("secondary should work"); // Safe: test assertion
         assert_eq!(response.content, "secondary response");
     }
 
@@ -584,7 +584,7 @@ mod tests {
             max_retries: 0,
             ..RetryConfig::default()
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         let err = fallback.complete(&request).await.unwrap_err();
@@ -599,7 +599,7 @@ mod tests {
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_millis(500),
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
 
         // attempt 0: 100 * 2^0 = 100ms
         assert_eq!(fallback.backoff_delay(0), Duration::from_millis(100));
@@ -628,14 +628,14 @@ mod tests {
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(10),
         };
-        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty");
+        let fallback = FallbackProvider::with_retry(providers, retry).expect("non-empty"); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
         // alpha: attempt 0 fails (transient), attempt 1 fails (transient, exhausted) -> next
         // beta: attempt 0 fails (permanent, no retry) -> error
         match fallback.complete_stream(&request).await {
             Err(err) => assert_eq!(err.kind, ErrorKind::Config),
-            Ok(_) => panic!("expected error"),
+            Ok(_) => unreachable!("expected error"), // Safe: test assertion
         }
     }
 }

@@ -225,7 +225,7 @@ mod tests {
                 {"role": "user", "content": "Hello!"}
             ]
         });
-        let msgs = parse_messages(&args).expect("should parse");
+        let msgs = parse_messages(&args).expect("should parse"); // Safe: test assertion
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert_eq!(msgs[1].content, "Hello!");
@@ -262,9 +262,9 @@ mod tests {
                 }]
             }]
         });
-        let msgs = parse_messages(&args).expect("should parse");
+        let msgs = parse_messages(&args).expect("should parse"); // Safe: test assertion
         assert_eq!(msgs.len(), 1);
-        let images = msgs[0].images.as_ref().expect("images present");
+        let images = msgs[0].images.as_ref().expect("images present"); // Safe: test assertion
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
         assert_eq!(images[0].data, "aGVsbG8=");
@@ -275,7 +275,7 @@ mod tests {
         let args = json!({
             "messages": [{"role": "user", "content": "Hello!"}]
         });
-        let msgs = parse_messages(&args).expect("should parse");
+        let msgs = parse_messages(&args).expect("should parse"); // Safe: test assertion
         assert!(msgs[0].images.is_none());
     }
 

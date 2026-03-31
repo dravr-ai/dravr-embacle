@@ -407,7 +407,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
                     content: "default".to_owned(),
@@ -670,7 +670,7 @@ mod tests {
         let guarded = GuardrailProvider::new(Box::new(provider), vec![]);
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
 
-        let response = guarded.complete(&request).await.expect("should pass");
+        let response = guarded.complete(&request).await.expect("should pass"); // Safe: test assertion
         assert_eq!(response.content, "hello");
     }
 
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(guarded.default_model(), "test-model");
         assert!(guarded.capabilities().supports_streaming());
 
-        let healthy = guarded.health_check().await.expect("health check");
+        let healthy = guarded.health_check().await.expect("health check"); // Safe: test assertion
         assert!(healthy);
     }
 }

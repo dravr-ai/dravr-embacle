@@ -845,7 +845,7 @@ mod tests {
         let messages = convert_messages(&openai_msgs);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "What is this?");
-        let images = messages[0].images.as_ref().expect("images present");
+        let images = messages[0].images.as_ref().expect("images present"); // Safe: test assertion
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
         assert_eq!(images[0].data, "aGVsbG8=");
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn parse_data_uri_valid() {
-        let img = parse_data_uri("data:image/jpeg;base64,AAAA").expect("should parse");
+        let img = parse_data_uri("data:image/jpeg;base64,AAAA").expect("should parse"); // Safe: test assertion
         assert_eq!(img.mime_type, "image/jpeg");
         assert_eq!(img.data, "AAAA");
     }

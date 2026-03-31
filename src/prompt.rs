@@ -90,7 +90,10 @@ fn materialize_images(
             continue;
         }
 
-        let images = images.expect("checked above");
+        let Some(images) = images else {
+            rewritten.push(msg.clone());
+            continue;
+        };
         let mut file_refs = Vec::with_capacity(images.len());
 
         for image in images {
@@ -313,7 +316,7 @@ mod tests {
     #[test]
     fn test_prepare_prompt_no_images() {
         let messages = vec![ChatMessage::user("Hello")];
-        let prepared = prepare_prompt(&messages).unwrap();
+        let prepared = prepare_prompt(&messages).unwrap(); // Safe: test assertion
         assert_eq!(prepared.prompt, "[user]\nHello");
         assert!(prepared.image_dir.is_none());
     }
@@ -322,33 +325,33 @@ mod tests {
     fn test_prepare_prompt_with_images() {
         // 1x1 red PNG pixel as base64
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-        let image = ImagePart::new(png_b64, "image/png").unwrap();
+        let image = ImagePart::new(png_b64, "image/png").unwrap(); // Safe: test assertion
         let messages = vec![ChatMessage::user_with_images("Describe this", vec![image])];
 
-        let prepared = prepare_prompt(&messages).unwrap();
+        let prepared = prepare_prompt(&messages).unwrap(); // Safe: test assertion
         assert!(prepared.prompt.contains("Describe this"));
         assert!(prepared.prompt.contains("[Attached images"));
         assert!(prepared.prompt.contains(".png"));
         assert!(prepared.image_dir.is_some());
 
         // Verify the temp file exists and has valid PNG data
-        let dir = prepared.image_dir.as_ref().unwrap();
+        let dir = prepared.image_dir.as_ref().unwrap(); // Safe: test assertion
         let image_file = dir.path().join("0.png");
         assert!(image_file.exists());
-        let data = std::fs::read(&image_file).unwrap();
+        let data = std::fs::read(&image_file).unwrap(); // Safe: test assertion
         assert_eq!(&data[..4], b"\x89PNG");
     }
 
     #[test]
     fn test_prepare_user_prompt_with_images_excludes_system() {
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-        let image = ImagePart::new(png_b64, "image/png").unwrap();
+        let image = ImagePart::new(png_b64, "image/png").unwrap(); // Safe: test assertion
         let messages = vec![
             ChatMessage::system("System prompt"),
             ChatMessage::user_with_images("Look at this", vec![image]),
         ];
 
-        let prepared = prepare_user_prompt(&messages).unwrap();
+        let prepared = prepare_user_prompt(&messages).unwrap(); // Safe: test assertion
         assert!(!prepared.prompt.contains("[system]"));
         assert!(prepared.prompt.contains("Look at this"));
         assert!(prepared.prompt.contains("[Attached images"));
@@ -357,14 +360,14 @@ mod tests {
     #[test]
     fn test_prepare_prompt_multiple_images() {
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-        let img1 = ImagePart::new(png_b64, "image/png").unwrap();
-        let img2 = ImagePart::new(png_b64, "image/jpeg").unwrap();
+        let img1 = ImagePart::new(png_b64, "image/png").unwrap(); // Safe: test assertion
+        let img2 = ImagePart::new(png_b64, "image/jpeg").unwrap(); // Safe: test assertion
         let messages = vec![ChatMessage::user_with_images(
             "Two images",
             vec![img1, img2],
         )];
 
-        let prepared = prepare_prompt(&messages).unwrap();
+        let prepared = prepare_prompt(&messages).unwrap(); // Safe: test assertion
         assert!(prepared.prompt.contains("0.png"));
         assert!(prepared.prompt.contains("1.jpg"));
     }
@@ -377,10 +380,10 @@ mod tests {
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
             "image/png",
         )
-        .unwrap()]);
+        .unwrap()]); // Safe: test assertion
         let messages = vec![msg];
 
-        let prepared = prepare_prompt(&messages).unwrap();
+        let prepared = prepare_prompt(&messages).unwrap(); // Safe: test assertion
         assert!(!prepared.prompt.contains("[Attached images"));
         // TempDir is still created because has_any_images checks all messages
         // but no files are written for non-user messages

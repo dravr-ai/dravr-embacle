@@ -265,7 +265,7 @@ mod tests {
 {"type":"say","say":"text","text":"working on it","ts":1234,"partial":false}
 {"type":"say","say":"completion_result","text":"hello from cline","ts":1235}"#;
 
-        let (resp, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from cline");
         assert_eq!(tid, Some("abc-123".to_owned()));
         assert!(resp.usage.is_none());
@@ -276,7 +276,7 @@ mod tests {
         let ndjson = br#"{"type":"task_started","taskId":"uuid-456"}
 {"type":"say","say":"completion_result","text":"done"}"#;
 
-        let (_, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (_, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(tid, Some("uuid-456".to_owned()));
     }
 
@@ -285,7 +285,7 @@ mod tests {
         let ndjson = br#"{"type":"task_started","taskId":"uuid-789"}
 {"type":"say","say":"text","text":"partial output"}"#;
 
-        let (resp, _) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
     }
 

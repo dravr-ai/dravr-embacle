@@ -397,7 +397,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Err(RunnerError::internal("no more test responses"))
             } else {
@@ -489,7 +489,7 @@ mod tests {
     fn extract_raw_json() {
         let content = r#"{"name": "Alice", "age": 30}"#;
         let extracted = extract_json_from_response(content);
-        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON");
+        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON"); // Safe: test assertion
         assert_eq!(parsed["name"], "Alice");
     }
 
@@ -497,7 +497,7 @@ mod tests {
     fn extract_json_from_markdown_fences() {
         let content = "Here is the result:\n```json\n{\"name\": \"Bob\", \"age\": 25}\n```\nDone.";
         let extracted = extract_json_from_response(content);
-        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON");
+        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON"); // Safe: test assertion
         assert_eq!(parsed["name"], "Bob");
     }
 
@@ -505,7 +505,7 @@ mod tests {
     fn extract_json_with_nested_braces() {
         let content = r#"{"outer": {"inner": "value"}, "list": [1, 2]}"#;
         let extracted = extract_json_from_response(content);
-        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON");
+        let parsed: Value = serde_json::from_str(&extracted).expect("valid JSON"); // Safe: test assertion
         assert_eq!(parsed["outer"]["inner"], "value");
     }
 
@@ -535,7 +535,7 @@ mod tests {
 
         let result = request_structured_output(&provider, &structured)
             .await
-            .expect("should succeed on retry");
+            .expect("should succeed on retry"); // Safe: test assertion
         assert_eq!(result["name"], "Alice");
         assert_eq!(result["age"], 30);
     }

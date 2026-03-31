@@ -266,9 +266,9 @@ mod tests {
 {"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"hello from codex"}}
 {"type":"turn.completed","usage":{"input_tokens":11764,"output_tokens":22}}"#;
 
-        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap();
+        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from codex");
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 11764);
         assert_eq!(usage.completion_tokens, 22);
         assert_eq!(usage.total_tokens, 11786);
@@ -280,7 +280,7 @@ mod tests {
 {"type":"turn.started"}
 {"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":0}}"#;
 
-        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap();
+        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
         assert!(resp.usage.is_some());
     }
@@ -292,7 +292,7 @@ mod tests {
 {"type":"item.completed","item":{"id":"2","type":"agent_message","text":"part2"}}
 {"type":"turn.completed","usage":{"input_tokens":50,"output_tokens":10}}"#;
 
-        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap();
+        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "part1part2");
     }
 
@@ -303,7 +303,7 @@ mod tests {
 {"type":"item.completed","item":{"id":"2","type":"agent_message","text":"kept"}}
 {"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
 
-        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap();
+        let resp = CodexCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "kept");
     }
 

@@ -46,10 +46,10 @@ async fn main() {
                 )
             );
             println!("  Min met:    {}", caps.meets_minimum_version);
-            println!("  JSON:       {}", caps.json_output);
-            println!("  Streaming:  {}", caps.streaming);
-            println!("  Sys prompt: {}", caps.system_prompt);
-            println!("  Resume:     {}", caps.session_resume);
+            println!("  JSON:       {}", caps.json_output());
+            println!("  Streaming:  {}", caps.streaming());
+            println!("  Sys prompt: {}", caps.system_prompt());
+            println!("  Resume:     {}", caps.session_resume());
             println!(
                 "  Compatible: {}",
                 if caps.is_compatible() { "✅" } else { "❌" }

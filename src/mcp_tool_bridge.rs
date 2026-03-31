@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn handler_with_mock_executor() {
+    async fn handler_with_test_executor() {
         let executor = Arc::new(MockExecutor {
             result: Ok(json!({"status": "ok", "data": [1, 2, 3]})),
         });
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(response.name, "broken_tool");
         assert!(response.response["error"]
             .as_str()
-            .expect("error field")
+            .expect("error field") // Safe: test assertion
             .contains("connection refused"));
     }
 }

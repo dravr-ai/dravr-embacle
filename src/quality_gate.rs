@@ -269,7 +269,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
                     content: "valid response".to_owned(),
@@ -362,7 +362,7 @@ mod tests {
         let guarded = QualityGateProvider::new(Box::new(provider), policy);
         let request = ChatRequest::new(vec![ChatMessage::user("help me")]);
 
-        let response = guarded.complete(&request).await.expect("should succeed");
+        let response = guarded.complete(&request).await.expect("should succeed"); // Safe: test assertion
         assert_eq!(response.content, "valid helpful response here!");
         assert_eq!(response.finish_reason, Some("stop".to_owned()));
     }
@@ -384,7 +384,7 @@ mod tests {
         let response = guarded
             .complete(&request)
             .await
-            .expect("should return last");
+            .expect("should return last"); // Safe: test assertion
         assert_eq!(
             response.finish_reason,
             Some("quality_gate_exhausted".to_owned())

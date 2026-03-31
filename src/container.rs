@@ -408,7 +408,7 @@ mod tests {
         assert!(args.contains(&"sh".to_owned()));
         assert!(args.contains(&"-c".to_owned()));
         // The last arg should be the shell command with stdin redirect
-        let last = args.last().unwrap();
+        let last = args.last().unwrap(); // Safe: test assertion
         assert!(last.contains("< /scratch/stdin.txt"));
         assert!(last.contains("claude"));
     }

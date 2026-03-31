@@ -252,34 +252,34 @@ mod tests {
     #[test]
     fn test_parse_text_response_with_prefix() {
         let raw = b"> Paris is the capital of France.";
-        let resp = KiroCliRunner::parse_text_response(raw).unwrap();
+        let resp = KiroCliRunner::parse_text_response(raw).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Paris is the capital of France.");
     }
 
     #[test]
     fn test_parse_text_response_multiline() {
         let raw = b"> Line one\n> Line two\n> Line three";
-        let resp = KiroCliRunner::parse_text_response(raw).unwrap();
+        let resp = KiroCliRunner::parse_text_response(raw).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Line one\nLine two\nLine three");
     }
 
     #[test]
     fn test_parse_text_response_with_ansi() {
         let raw = b"\x1b[32m> Hello world\x1b[0m";
-        let resp = KiroCliRunner::parse_text_response(raw).unwrap();
+        let resp = KiroCliRunner::parse_text_response(raw).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello world");
     }
 
     #[test]
     fn test_parse_text_response_empty_output() {
-        let resp = KiroCliRunner::parse_text_response(b"").unwrap();
+        let resp = KiroCliRunner::parse_text_response(b"").unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
     }
 
     #[test]
     fn test_parse_text_response_mixed_lines() {
         let raw = b"Some debug info\n> Actual response\n";
-        let resp = KiroCliRunner::parse_text_response(raw).unwrap();
+        let resp = KiroCliRunner::parse_text_response(raw).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Some debug info\nActual response");
     }
 

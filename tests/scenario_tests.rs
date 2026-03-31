@@ -176,7 +176,7 @@ async fn metrics_wrapping_quality_gate_refusal_then_success() {
         .expect("should succeed on retry");
     assert_eq!(response.content, "Here is a helpful answer");
 
-    let report = metered.report();
+    let report = metered.report().unwrap();
     assert_eq!(report.call_count, 1);
     assert_eq!(report.errors_count, 0);
 }

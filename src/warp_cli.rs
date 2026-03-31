@@ -192,7 +192,7 @@ mod tests {
 {"type":"agent_reasoning","text":"Let me respond to this."}
 {"type":"agent","text":"PONG"}"#;
 
-        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "PONG");
         assert_eq!(cid, Some("conv_abc123".to_owned()));
         assert_eq!(resp.finish_reason, Some("stop".to_owned()));
@@ -207,7 +207,7 @@ mod tests {
 {"type":"tool_result","tool":"run_command","status":"complete","exit_code":0,"output":"total 42\ndrwxr-xr-x  5 user  staff  160 Mar  9 10:00 ."}
 {"type":"agent","text":"The directory contains 5 items."}"#;
 
-        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "The directory contains 5 items.");
         assert_eq!(cid, Some("conv_xyz".to_owned()));
     }
@@ -219,14 +219,14 @@ mod tests {
 {"type":"agent","text":"Hello "}
 {"type":"agent","text":"World"}"#;
 
-        let (resp, _) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello World");
     }
 
     #[test]
     fn test_parse_ndjson_response_empty_output() {
         let ndjson = b"";
-        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
         assert!(cid.is_none());
         assert!(resp.usage.is_none());
@@ -236,7 +236,7 @@ mod tests {
     fn test_parse_ndjson_response_no_conversation_id() {
         let ndjson = br#"{"type":"agent","text":"OK"}"#;
 
-        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, cid) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
         assert!(cid.is_none());
     }
@@ -245,7 +245,7 @@ mod tests {
     fn test_parse_ndjson_response_skips_invalid_json() {
         let ndjson = b"not json\n{\"type\":\"agent\",\"text\":\"OK\"}\nalso not json";
 
-        let (resp, _) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap();
+        let (resp, _) = WarpCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
     }
 

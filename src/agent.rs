@@ -296,7 +296,7 @@ mod tests {
         }
         async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().expect("test lock");
+            let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Err(RunnerError::internal("no more test responses"))
             } else {
@@ -348,7 +348,7 @@ mod tests {
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
         let messages = vec![ChatMessage::user("Hello")];
-        let result = executor.run(messages).await.expect("should succeed");
+        let result = executor.run(messages).await.expect("should succeed"); // Safe: test assertion
 
         assert_eq!(
             result.content,
@@ -383,7 +383,7 @@ mod tests {
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
         let messages = vec![ChatMessage::user("What is Rust?")];
-        let result = executor.run(messages).await.expect("should succeed");
+        let result = executor.run(messages).await.expect("should succeed"); // Safe: test assertion
 
         assert!(result.content.contains("systems programming"));
         assert_eq!(result.tool_calls.len(), 1);
@@ -413,15 +413,15 @@ mod tests {
         let turn_log_clone = Arc::clone(&turn_log);
 
         let callback: OnTurnCallback = Arc::new(move |info: &TurnInfo| {
-            turn_log_clone.lock().expect("lock").push(info.turn);
+            turn_log_clone.lock().expect("lock").push(info.turn); // Safe: test assertion
         });
 
         let executor =
             AgentExecutor::new(&provider, declarations, noop_handler()).with_on_turn(callback);
         let messages = vec![ChatMessage::user("ping")];
-        executor.run(messages).await.expect("should succeed");
+        executor.run(messages).await.expect("should succeed"); // Safe: test assertion
 
-        let logged = turn_log.lock().expect("lock").clone();
+        let logged = turn_log.lock().expect("lock").clone(); // Safe: test assertion
         assert_eq!(logged, vec![1, 2]);
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let executor =
             AgentExecutor::new(&provider, declarations, noop_handler()).with_max_turns(3);
         let messages = vec![ChatMessage::user("go")];
-        let result = executor.run(messages).await.expect("should not error");
+        let result = executor.run(messages).await.expect("should not error"); // Safe: test assertion
 
         assert_eq!(result.finish_reason, Some("max_turns".to_owned()));
         assert_eq!(result.total_turns, 3);
@@ -482,7 +482,7 @@ mod tests {
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
         let messages = vec![ChatMessage::user("go")];
-        let result = executor.run(messages).await.expect("should succeed");
+        let result = executor.run(messages).await.expect("should succeed"); // Safe: test assertion
 
         assert_eq!(result.total_usage.prompt_tokens, 30);
         assert_eq!(result.total_usage.completion_tokens, 8);

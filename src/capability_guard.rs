@@ -183,7 +183,7 @@ mod tests {
     fn strict_allows_supported_capabilities() {
         let caps =
             LlmCapabilities::STREAMING | LlmCapabilities::TEMPERATURE | LlmCapabilities::MAX_TOKENS;
-        let warnings = validate_capabilities("test", caps, &request_with_all(), true).unwrap();
+        let warnings = validate_capabilities("test", caps, &request_with_all(), true).unwrap(); // Safe: test assertion
         assert!(warnings.is_empty());
     }
 
@@ -191,7 +191,7 @@ mod tests {
     fn permissive_returns_warnings_for_temperature() {
         let caps = LlmCapabilities::STREAMING;
         let warnings =
-            validate_capabilities("copilot", caps, &request_with_temperature(), false).unwrap();
+            validate_capabilities("copilot", caps, &request_with_temperature(), false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("copilot"));
         assert!(warnings[0].contains("temperature"));
@@ -201,7 +201,7 @@ mod tests {
     fn permissive_returns_warnings_for_max_tokens() {
         let caps = LlmCapabilities::STREAMING;
         let warnings =
-            validate_capabilities("copilot", caps, &request_with_max_tokens(), false).unwrap();
+            validate_capabilities("copilot", caps, &request_with_max_tokens(), false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("max_tokens"));
     }
@@ -210,14 +210,14 @@ mod tests {
     fn permissive_returns_empty_when_all_supported() {
         let caps =
             LlmCapabilities::STREAMING | LlmCapabilities::TEMPERATURE | LlmCapabilities::MAX_TOKENS;
-        let warnings = validate_capabilities("test", caps, &request_with_all(), false).unwrap();
+        let warnings = validate_capabilities("test", caps, &request_with_all(), false).unwrap(); // Safe: test assertion
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn permissive_returns_multiple_warnings() {
         let caps = LlmCapabilities::empty();
-        let warnings = validate_capabilities("test", caps, &request_with_all(), false).unwrap();
+        let warnings = validate_capabilities("test", caps, &request_with_all(), false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 3);
         assert!(warnings[0].contains("temperature"));
         assert!(warnings[1].contains("max_tokens"));
@@ -278,7 +278,7 @@ mod tests {
                 parameters: None,
             },
         ]);
-        let warnings = validate_capabilities("test", caps, &request, false).unwrap();
+        let warnings = validate_capabilities("test", caps, &request, false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("function calling"));
     }
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn strict_rejects_images_without_vision() {
         let caps = LlmCapabilities::STREAMING;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
         let err = validate_capabilities("test", caps, &request, true).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
@@ -296,9 +296,9 @@ mod tests {
     #[test]
     fn permissive_warns_for_images_without_vision() {
         let caps = LlmCapabilities::STREAMING;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
-        let warnings = validate_capabilities("test", caps, &request, false).unwrap();
+        let warnings = validate_capabilities("test", caps, &request, false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("vision"));
     }
@@ -306,9 +306,9 @@ mod tests {
     #[test]
     fn allows_images_with_vision_capability() {
         let caps = LlmCapabilities::STREAMING | LlmCapabilities::VISION;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap();
+        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
-        let warnings = validate_capabilities("test", caps, &request, true).unwrap();
+        let warnings = validate_capabilities("test", caps, &request, true).unwrap(); // Safe: test assertion
         assert!(warnings.is_empty());
     }
 }

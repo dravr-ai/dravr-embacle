@@ -109,24 +109,24 @@ mod tests {
     #[test]
     fn test_build_policy_fallback_to_cwd() {
         let keys = vec!["HOME".to_owned()];
-        let policy = build_policy(None, &keys).unwrap();
-        // With None, should fall back to current directory
-        assert_eq!(policy.working_directory, env::current_dir().unwrap());
+        let policy = build_policy(None, &keys).unwrap(); // Safe: test assertion
+                                                         // With None, should fall back to current directory
+        assert_eq!(policy.working_directory, env::current_dir().unwrap()); // Safe: test assertion
     }
 
     #[test]
     fn test_build_policy_nonexistent_dir_falls_back() {
         let keys = vec!["HOME".to_owned()];
-        let policy = build_policy(Some(Path::new("/nonexistent/path/xyz123")), &keys).unwrap();
-        // Nonexistent path should fall back to cwd
-        assert_eq!(policy.working_directory, env::current_dir().unwrap());
+        let policy = build_policy(Some(Path::new("/nonexistent/path/xyz123")), &keys).unwrap(); // Safe: test assertion
+                                                                                                // Nonexistent path should fall back to cwd
+        assert_eq!(policy.working_directory, env::current_dir().unwrap()); // Safe: test assertion
     }
 
     #[test]
     fn test_build_policy_existing_dir() {
         let keys = vec!["HOME".to_owned()];
         let dir = env::temp_dir();
-        let policy = build_policy(Some(&dir), &keys).unwrap();
+        let policy = build_policy(Some(&dir), &keys).unwrap(); // Safe: test assertion
         assert_eq!(policy.working_directory, dir);
         assert_eq!(policy.allowed_env_keys, vec!["HOME"]);
     }

@@ -38,14 +38,13 @@ struct GeminiResponse {
 
 /// Aggregated stats from Gemini CLI output (field names match external JSON schema)
 #[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)]
 struct GeminiStats {
-    #[serde(default)]
-    total_tokens: Option<u32>,
-    #[serde(default)]
-    input_tokens: Option<u32>,
-    #[serde(default)]
-    output_tokens: Option<u32>,
+    #[serde(default, rename = "total_tokens")]
+    total: Option<u32>,
+    #[serde(default, rename = "input_tokens")]
+    input: Option<u32>,
+    #[serde(default, rename = "output_tokens")]
+    output: Option<u32>,
 }
 
 /// Default model for Gemini CLI
@@ -119,9 +118,9 @@ impl GeminiCliRunner {
         if let Ok(parsed) = serde_json::from_str::<GeminiResponse>(text) {
             let content = parsed.response.unwrap_or_default();
             let usage = parsed.stats.map(|s| {
-                let input = s.input_tokens.unwrap_or(0);
-                let output = s.output_tokens.unwrap_or(0);
-                let total = s.total_tokens.unwrap_or(input + output);
+                let input = s.input.unwrap_or(0);
+                let output = s.output.unwrap_or(0);
+                let total = s.total.unwrap_or(input + output);
                 TokenUsage {
                     prompt_tokens: input,
                     completion_tokens: output,
@@ -342,10 +341,10 @@ mod tests {
     #[test]
     fn test_parse_single_json_response() {
         let json = br#"{"session_id":"abc123","response":"hello from gemini","stats":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}"#;
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap();
+        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from gemini");
         assert_eq!(sid, Some("abc123".to_owned()));
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
@@ -354,7 +353,7 @@ mod tests {
     #[test]
     fn test_parse_single_json_response_no_stats() {
         let json = br#"{"response":"hello"}"#;
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap();
+        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello");
         assert!(sid.is_none());
         assert!(resp.usage.is_none());
@@ -368,10 +367,10 @@ mod tests {
 {\"type\":\"message\",\"role\":\"assistant\",\"content\":\"hello from gemini\",\"delta\":true}
 {\"type\":\"result\",\"status\":\"success\",\"stats\":{\"total_tokens\":8628,\"input_tokens\":100,\"output_tokens\":50}}
 ";
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(jsonl).unwrap();
+        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from gemini");
         assert_eq!(sid, Some("sess-42".to_owned()));
-        let usage = resp.usage.unwrap();
+        let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 8628);
