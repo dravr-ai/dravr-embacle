@@ -619,8 +619,8 @@ mod tests {
     fn deserialize_plain_string_content_backward_compat() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}]}"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
-        match req.messages[0].content.as_ref().expect("content present") {
-            // Safe: test assertion
+        let content = req.messages[0].content.as_ref().expect("content present"); // Safe: test assertion
+        match content {
             MessageContent::Text(s) => assert_eq!(s, "hi"),
             MessageContent::Parts(_) => unreachable!("expected Text variant"), // Safe: test assertion
         }
@@ -652,8 +652,8 @@ mod tests {
     fn deserialize_tool_choice_auto() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
-        match req.tool_choice.expect("tool_choice present") {
-            // Safe: test assertion
+        let tool_choice = req.tool_choice.expect("tool_choice present"); // Safe: test assertion
+        match tool_choice {
             ToolChoice::Mode(m) => assert_eq!(m, "auto"),
             ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
@@ -663,8 +663,8 @@ mod tests {
     fn deserialize_tool_choice_specific() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"function","function":{"name":"get_weather"}}}"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
-        match req.tool_choice.expect("tool_choice present") {
-            // Safe: test assertion
+        let tool_choice = req.tool_choice.expect("tool_choice present"); // Safe: test assertion
+        match tool_choice {
             ToolChoice::Specific(s) => assert_eq!(s.function.name, "get_weather"),
             ToolChoice::Mode(_) => unreachable!("expected specific"), // Safe: test assertion
         }
@@ -764,8 +764,8 @@ mod tests {
     fn deserialize_tool_choice_none() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
-        match req.tool_choice.expect("tool_choice present") {
-            // Safe: test assertion
+        let tool_choice = req.tool_choice.expect("tool_choice present"); // Safe: test assertion
+        match tool_choice {
             ToolChoice::Mode(m) => assert_eq!(m, "none"),
             ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
@@ -775,8 +775,8 @@ mod tests {
     fn deserialize_tool_choice_required() {
         let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
-        match req.tool_choice.expect("tool_choice present") {
-            // Safe: test assertion
+        let tool_choice = req.tool_choice.expect("tool_choice present"); // Safe: test assertion
+        match tool_choice {
             ToolChoice::Mode(m) => assert_eq!(m, "required"),
             ToolChoice::Specific(_) => unreachable!("expected mode"), // Safe: test assertion
         }
