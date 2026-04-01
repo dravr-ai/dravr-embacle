@@ -7,7 +7,7 @@
 //! Benchmarks proving that `VecDeque::pop_front()` is faster than
 //! `Vec::remove(0)` for FIFO eviction order tracking.
 //!
-//! The cache stores insertion_order as a FIFO queue of hash keys. When the
+//! The cache stores `insertion_order` as a FIFO queue of hash keys. When the
 //! cache is full, the oldest entry is evicted from the front. `Vec::remove(0)`
 //! shifts all remaining elements left (O(n)), while `VecDeque::pop_front()`
 //! adjusts a head pointer (O(1)).
@@ -18,16 +18,13 @@
     missing_docs
 )]
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::VecDeque;
 
 /// Simulate the cache eviction pattern: fill to capacity, then evict + insert
 /// for `eviction_count` cycles.
 ///
 /// This mirrors the exact code path in `src/cache.rs`.
-
 fn bench_eviction_vec(c: &mut Criterion) {
     let mut group = c.benchmark_group("fifo_eviction");
     let eviction_count: u64 = 100;
@@ -79,7 +76,7 @@ fn bench_eviction_vec(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark retain() — both Vec and VecDeque have O(n) retain, so this
+/// Benchmark `retain()` — both `Vec` and `VecDeque` have O(n) retain, so this
 /// confirms no regression.
 fn bench_retain(c: &mut Criterion) {
     let mut group = c.benchmark_group("fifo_retain");
