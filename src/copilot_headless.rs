@@ -748,9 +748,9 @@ impl CopilotHeadlessRunner {
     }
 
     /// Resolve the model to use for a request.
-    /// Provider-alias names ("copilot_headless", "copilot") are mapped to the
+    /// Provider-alias names (`copilot_headless`, `copilot`) are mapped to the
     /// configured default model because they are not valid Copilot model identifiers.
-    /// Any other model name (e.g. "gpt-4.1", "claude-opus-4.6-fast") is passed through.
+    /// Any other model name (e.g. `gpt-4.1`, `claude-opus-4.6-fast`) is passed through.
     fn resolve_model(&self, requested: Option<&str>) -> String {
         match requested {
             Some(m) if m != "copilot_headless" && m != "copilot" => m.to_owned(),
