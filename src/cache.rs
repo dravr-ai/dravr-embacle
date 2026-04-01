@@ -18,7 +18,7 @@
 //! - Entries expire after `ttl` and are evicted on access.
 //! - When at capacity, the oldest entry is evicted to make room.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ struct CacheEntry {
 #[derive(Debug, Default)]
 struct CacheState {
     entries: HashMap<u64, CacheEntry>,
-    insertion_order: Vec<u64>,
+    insertion_order: VecDeque<u64>,
     stats: CacheStats,
 }
 
@@ -211,11 +211,10 @@ impl LlmProvider for CacheProvider {
                 .lock()
                 .map_err(|_| RunnerError::internal("cache lock poisoned"))?;
 
-            // Evict oldest if at capacity
+            // Evict oldest if at capacity — O(1) with VecDeque::pop_front
             while state.entries.len() >= self.config.max_entries {
-                if let Some(oldest_key) = state.insertion_order.first().copied() {
+                if let Some(oldest_key) = state.insertion_order.pop_front() {
                     state.entries.remove(&oldest_key);
-                    state.insertion_order.remove(0);
                     state.stats.evictions += 1;
                 } else {
                     break;
@@ -229,7 +228,7 @@ impl LlmProvider for CacheProvider {
                     inserted_at: Instant::now(),
                 },
             );
-            state.insertion_order.push(key);
+            state.insertion_order.push_back(key);
         }
 
         Ok(response)
