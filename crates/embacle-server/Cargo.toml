@@ -6,7 +6,7 @@
 
 [package]
 name = "embacle-server"
-version = "0.14.9"
+version = "0.14.10"
 edition = "2021"
 license = "Apache-2.0"
 description = "Unified OpenAI-compatible REST API + MCP server for embacle LLM runners"
@@ -24,8 +24,8 @@ name = "embacle-server"
 path = "src/main.rs"
 
 [dependencies]
-embacle = { path = "../..", version = "0.14.9", features = ["config-file", "copilot-headless", "otel"] }
-embacle-mcp = { path = "../embacle-mcp", version = "0.14.9" }
+embacle = { path = "../..", version = "0.14.10", features = ["config-file", "copilot-headless", "otel"] }
+embacle-mcp = { path = "../embacle-mcp", version = "0.14.10" }
 dravr-tronc = { version = "0.2", features = ["notifications"] }
 async-trait = "0.1"
 axum = "0.8"

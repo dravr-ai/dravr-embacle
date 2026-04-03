@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.10] — 2026-04-03
+
+### Fixed
+
+- fix: use backticks for code identifiers in doc comment
+
+
+
 ## [0.14.9] — 2026-03-31
 
 
