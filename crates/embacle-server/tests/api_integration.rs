@@ -4,12 +4,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::HashSet;
+use std::env;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use embacle::config::CliRunnerType;
+use embacle::discovery;
 use embacle_mcp::ServerState;
+use embacle_server::completions;
 use http_body_util::BodyExt;
 use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
@@ -60,7 +64,7 @@ async fn send_and_parse(
 #[tokio::test]
 async fn health_returns_json_with_status_field() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -91,7 +95,7 @@ async fn health_returns_json_with_status_field() {
 #[tokio::test]
 async fn health_providers_contains_all_twelve() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -129,7 +133,7 @@ async fn health_providers_contains_all_twelve() {
 #[tokio::test]
 async fn models_returns_list_object() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -178,12 +182,12 @@ async fn auth_middleware_scenarios() {
     };
 
     // Scenario 1: No key set → pass through
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
     let (status, _) = send_and_parse(test_app(), health(None)).await;
     assert_ne!(status, StatusCode::UNAUTHORIZED, "should allow without key");
 
     // Scenario 2: Key set, no header → 401 "Missing"
-    std::env::set_var("EMBACLE_API_KEY", "test-auth-key");
+    env::set_var("EMBACLE_API_KEY", "test-auth-key");
     let (status, json) = send_and_parse(test_app(), health(None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(json["error"]["type"], "authentication_error");
@@ -212,7 +216,7 @@ async fn auth_middleware_scenarios() {
         .expect("msg")
         .contains("Bearer"));
 
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 }
 
 // ============================================================================
@@ -222,7 +226,7 @@ async fn auth_middleware_scenarios() {
 #[tokio::test]
 async fn completions_rejects_empty_model_array() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -262,7 +266,7 @@ async fn completions_rejects_empty_model_array() {
 #[tokio::test]
 async fn completions_rejects_multiplex_with_stream() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -303,7 +307,7 @@ async fn completions_rejects_multiplex_with_stream() {
 #[tokio::test]
 async fn completions_returns_error_for_invalid_json() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -334,7 +338,7 @@ async fn completions_returns_error_for_invalid_json() {
 #[tokio::test]
 async fn completions_rejects_temperature_above_max() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -352,7 +356,7 @@ async fn completions_rejects_temperature_above_max() {
 #[tokio::test]
 async fn completions_rejects_negative_temperature() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -370,7 +374,7 @@ async fn completions_rejects_negative_temperature() {
 #[tokio::test]
 async fn completions_rejects_zero_max_tokens() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -388,7 +392,7 @@ async fn completions_rejects_zero_max_tokens() {
 #[tokio::test]
 async fn completions_accepts_temperature_at_boundaries() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     // temperature=0.0 should pass validation (fail at provider, not 400)
     let body = serde_json::json!({
@@ -420,7 +424,7 @@ async fn completions_accepts_temperature_at_boundaries() {
 #[tokio::test]
 async fn completions_accepts_valid_max_tokens() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -438,7 +442,7 @@ async fn completions_accepts_valid_max_tokens() {
 #[tokio::test]
 async fn multiplex_forwards_temperature_past_validation() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     // Multiplex with valid temperature should pass validation and reach
     // the provider layer (5xx for missing binary, not 400 for validation)
@@ -463,7 +467,7 @@ async fn multiplex_forwards_temperature_past_validation() {
 #[tokio::test]
 async fn completions_accepts_tools_with_tool_choice_none() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     // tool_choice=none should skip tool injection even when tools are provided
     let body = serde_json::json!({
@@ -491,7 +495,7 @@ async fn completions_accepts_tools_with_tool_choice_none() {
 #[tokio::test]
 async fn completions_accepts_tool_choice_specific() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -517,7 +521,7 @@ async fn completions_accepts_tool_choice_specific() {
 #[tokio::test]
 async fn completions_accepts_response_format() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -540,7 +544,7 @@ async fn completions_accepts_response_format() {
 #[tokio::test]
 async fn unknown_route_returns_404() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -560,7 +564,7 @@ async fn unknown_route_returns_404() {
 #[tokio::test]
 async fn completions_rejects_get_method() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -581,7 +585,7 @@ async fn completions_rejects_get_method() {
 #[tokio::test]
 async fn models_rejects_post_method() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -605,7 +609,7 @@ async fn models_rejects_post_method() {
 
 #[tokio::test]
 async fn streaming_generate_id_format() {
-    let id = embacle_server::completions::generate_id();
+    let id = completions::generate_id();
     assert!(
         id.starts_with("chatcmpl-"),
         "ID should start with chatcmpl-, got: {id}"
@@ -618,10 +622,8 @@ async fn streaming_generate_id_format() {
 
 #[tokio::test]
 async fn generate_id_produces_unique_ids() {
-    let ids: Vec<String> = (0..100)
-        .map(|_| embacle_server::completions::generate_id())
-        .collect();
-    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    let ids: Vec<String> = (0..100).map(|_| completions::generate_id()).collect();
+    let unique: HashSet<&String> = ids.iter().collect();
     assert_eq!(
         ids.len(),
         unique.len(),
@@ -633,9 +635,7 @@ async fn generate_id_produces_unique_ids() {
 async fn generate_id_unique_across_concurrent_tasks() {
     let mut handles = Vec::with_capacity(50);
     for _ in 0..50 {
-        handles.push(tokio::spawn(async {
-            embacle_server::completions::generate_id()
-        }));
+        handles.push(tokio::spawn(async { completions::generate_id() }));
     }
 
     let mut ids = Vec::with_capacity(50);
@@ -643,7 +643,7 @@ async fn generate_id_unique_across_concurrent_tasks() {
         ids.push(handle.await.expect("task join"));
     }
 
-    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    let unique: HashSet<&String> = ids.iter().collect();
     assert_eq!(
         ids.len(),
         unique.len(),
@@ -658,7 +658,7 @@ async fn generate_id_unique_across_concurrent_tasks() {
 #[tokio::test]
 async fn provider_resolver_round_trip_via_completions() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let app = test_app();
 
@@ -723,7 +723,7 @@ async fn state_runner_creation_reflects_binary_availability() {
 
 #[test]
 fn resolve_binary_fails_for_missing_binary() {
-    let result = embacle::discovery::resolve_binary("embacle_nonexistent_test_binary_xyz", None);
+    let result = discovery::resolve_binary("embacle_nonexistent_test_binary_xyz", None);
     assert!(result.is_err(), "expected error for missing binary");
 }
 
@@ -744,7 +744,7 @@ fn post_mcp(body: &serde_json::Value) -> Request<Body> {
 #[tokio::test]
 async fn mcp_initialize_returns_protocol_version() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -769,7 +769,7 @@ async fn mcp_initialize_returns_protocol_version() {
 #[tokio::test]
 async fn mcp_tools_list_returns_registered_tools() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -802,7 +802,7 @@ async fn mcp_tools_list_returns_registered_tools() {
 #[tokio::test]
 async fn mcp_ping_returns_empty_object() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -818,7 +818,7 @@ async fn mcp_ping_returns_empty_object() {
 #[tokio::test]
 async fn mcp_unknown_method_returns_error() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -834,7 +834,7 @@ async fn mcp_unknown_method_returns_error() {
 #[tokio::test]
 async fn mcp_notification_returns_no_content() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -850,7 +850,7 @@ async fn mcp_notification_returns_no_content() {
 #[tokio::test]
 async fn mcp_invalid_json_returns_parse_error() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let request = Request::builder()
         .method("POST")
@@ -867,7 +867,7 @@ async fn mcp_invalid_json_returns_parse_error() {
 #[tokio::test]
 async fn mcp_auth_enforced_when_key_set() {
     let _guard = ENV_MUTEX.lock().await;
-    std::env::set_var("EMBACLE_API_KEY", "mcp-test-key");
+    env::set_var("EMBACLE_API_KEY", "mcp-test-key");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -892,5 +892,5 @@ async fn mcp_auth_enforced_when_key_set() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["result"], serde_json::json!({}));
 
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 }

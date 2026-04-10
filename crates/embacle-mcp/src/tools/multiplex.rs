@@ -11,13 +11,13 @@ use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 
 use crate::runner::{parse_runner_type, valid_provider_names, ALL_PROVIDERS};
-use crate::state::SharedState;
+use crate::state::{ServerState, SharedState};
 
 /// Returns the list of providers configured for multiplex dispatch
 pub struct GetMultiplexProvider;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for GetMultiplexProvider {
+impl McpTool<ServerState> for GetMultiplexProvider {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_multiplex_provider".to_owned(),
@@ -54,7 +54,7 @@ impl McpTool<crate::state::ServerState> for GetMultiplexProvider {
 pub struct SetMultiplexProvider;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for SetMultiplexProvider {
+impl McpTool<ServerState> for SetMultiplexProvider {
     fn definition(&self) -> ToolDefinition {
         let provider_names: Vec<String> = ALL_PROVIDERS.iter().map(ToString::to_string).collect();
 

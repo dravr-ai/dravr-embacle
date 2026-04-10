@@ -10,6 +10,7 @@
 //! These types mirror the LLM provider contract without requiring
 //! any external platform dependency.
 
+use std::error::Error;
 use std::fmt;
 use std::pin::Pin;
 
@@ -126,7 +127,7 @@ impl fmt::Display for RunnerError {
     }
 }
 
-impl std::error::Error for RunnerError {}
+impl Error for RunnerError {}
 
 // ============================================================================
 // Capability Flags

@@ -14,13 +14,13 @@ use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 
 use crate::runner::multiplex::MultiplexEngine;
-use crate::state::SharedState;
+use crate::state::{ServerState, SharedState};
 
 /// Dispatches a chat prompt to the active provider or fans out via multiplex
 pub struct Prompt;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for Prompt {
+impl McpTool<ServerState> for Prompt {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "prompt".to_owned(),

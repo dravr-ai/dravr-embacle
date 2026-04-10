@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
@@ -133,7 +134,7 @@ pub async fn check_readiness(
 pub fn check_env_var_auth<'a>(var_names: &'a [&'a str]) -> Option<&'a str> {
     var_names
         .iter()
-        .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
+        .find(|name| env::var(name).is_ok_and(|v| !v.is_empty()))
         .copied()
 }
 
@@ -376,10 +377,10 @@ mod tests {
 
     #[test]
     fn test_check_env_var_auth_found() {
-        std::env::set_var("TEST_EMBACLE_AUTH_KEY", "secret123");
+        env::set_var("TEST_EMBACLE_AUTH_KEY", "secret123");
         let result = check_env_var_auth(&["NONEXISTENT_VAR", "TEST_EMBACLE_AUTH_KEY"]);
         assert_eq!(result, Some("TEST_EMBACLE_AUTH_KEY"));
-        std::env::remove_var("TEST_EMBACLE_AUTH_KEY");
+        env::remove_var("TEST_EMBACLE_AUTH_KEY");
     }
 
     #[test]
@@ -390,9 +391,9 @@ mod tests {
 
     #[test]
     fn test_check_env_var_auth_empty_value_skipped() {
-        std::env::set_var("TEST_EMBACLE_EMPTY_KEY", "");
+        env::set_var("TEST_EMBACLE_EMPTY_KEY", "");
         let result = check_env_var_auth(&["TEST_EMBACLE_EMPTY_KEY"]);
         assert!(result.is_none());
-        std::env::remove_var("TEST_EMBACLE_EMPTY_KEY");
+        env::remove_var("TEST_EMBACLE_EMPTY_KEY");
     }
 }

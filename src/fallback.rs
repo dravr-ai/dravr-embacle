@@ -20,6 +20,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::time;
 use tracing::warn;
 
 use crate::types::{
@@ -170,7 +171,7 @@ impl LlmProvider for FallbackProvider {
                                 delay_ms,
                                 "fallback: transient error, retrying after backoff"
                             );
-                            tokio::time::sleep(delay).await;
+                            time::sleep(delay).await;
                         } else {
                             warn!(
                                 provider = provider.name(),
@@ -209,7 +210,7 @@ impl LlmProvider for FallbackProvider {
                                 delay_ms,
                                 "fallback: transient stream error, retrying after backoff"
                             );
-                            tokio::time::sleep(delay).await;
+                            time::sleep(delay).await;
                         } else {
                             warn!(
                                 provider = provider.name(),

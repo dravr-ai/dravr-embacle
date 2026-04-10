@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -27,7 +29,7 @@ pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
     for &provider in ALL_PROVIDERS {
         let binary_name = provider.binary_name();
         let env_key = provider.env_override_key();
-        let env_override = std::env::var(env_key).ok();
+        let env_override = env::var(env_key).ok();
 
         if resolve_binary(binary_name, env_override.as_deref()).is_err() {
             debug!(provider = %provider, "Binary not found, skipping");

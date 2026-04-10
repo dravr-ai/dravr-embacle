@@ -9,6 +9,8 @@ use std::sync::Arc;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
+use dravr_tronc::mcp::transport::http::mcp_router as build_mcp_router;
+use dravr_tronc::McpServer;
 
 use crate::auth;
 use crate::completions;
@@ -27,14 +29,14 @@ use crate::state::SharedState;
 /// The auth middleware is applied to all routes. It only enforces
 /// authentication when `EMBACLE_API_KEY` is set.
 pub fn build(state: SharedState) -> Router {
-    let mcp_server = Arc::new(dravr_tronc::McpServer::new(
+    let mcp_server = Arc::new(McpServer::new(
         "embacle-mcp",
         env!("CARGO_PKG_VERSION"),
         embacle_mcp::build_tool_registry(),
         Arc::clone(&state),
     ));
 
-    let mcp_router = dravr_tronc::mcp::transport::http::mcp_router(mcp_server);
+    let mcp_router = build_mcp_router(mcp_server);
 
     Router::new()
         .route("/v1/chat/completions", post(completions::handle))

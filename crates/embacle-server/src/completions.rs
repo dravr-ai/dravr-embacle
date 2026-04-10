@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,8 +12,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use embacle::config::CliRunnerType;
 use embacle::types::{
-    ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, ResponseFormat, RunnerError,
+    ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, LlmProvider, MessageRole, ResponseFormat,
+    RunnerError,
 };
 use embacle::FunctionDeclaration;
 use tracing::{debug, error, warn};
@@ -21,7 +24,7 @@ use crate::openai_types::{
     ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, Choice, ContentPart,
     ErrorResponse, MessageContent, ModelField, MultiplexProviderResult, MultiplexResponse,
     ResponseFormatRequest, ResponseMessage, StopField, ToolCall, ToolCallFunction, ToolChoice,
-    Usage,
+    ToolDefinition as OpenAiToolDefinition, Usage,
 };
 use crate::provider_resolver::resolve_model;
 use crate::runner::multiplex::{MultiplexEngine, MultiplexParams};
@@ -108,7 +111,7 @@ async fn handle_single(
     drop(state_guard);
 
     let strict = request.strict_capabilities.unwrap_or_else(|| {
-        std::env::var("EMBACLE_STRICT_CAPS")
+        env::var("EMBACLE_STRICT_CAPS")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false)
     });
@@ -201,8 +204,8 @@ fn strip_json_fences(content: String, json_mode: bool) -> String {
 /// 3. Pure streaming: use `complete_stream()`
 /// 4. Non-streaming: use `complete()`, return JSON
 async fn dispatch_completion(
-    runner: &dyn embacle::types::LlmProvider,
-    runner_type: embacle::config::CliRunnerType,
+    runner: &dyn LlmProvider,
+    runner_type: CliRunnerType,
     mut chat_request: ChatRequest,
     stream: bool,
     has_tools: bool,
@@ -302,7 +305,7 @@ async fn handle_multiplex(
     }
 
     let strict = request.strict_capabilities.unwrap_or_else(|| {
-        std::env::var("EMBACLE_STRICT_CAPS")
+        env::var("EMBACLE_STRICT_CAPS")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false)
     });
@@ -597,7 +600,7 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
 }
 
 /// Convert a server `ToolDefinition` to core `ToolDefinition`
-fn server_tool_to_core(tool: &crate::openai_types::ToolDefinition) -> embacle::ToolDefinition {
+fn server_tool_to_core(tool: &OpenAiToolDefinition) -> embacle::ToolDefinition {
     embacle::ToolDefinition {
         name: tool.function.name.clone(),
         description: tool.function.description.clone().unwrap_or_default(),
@@ -632,9 +635,7 @@ fn server_format_to_core(format: &ResponseFormatRequest) -> embacle::ResponseFor
 }
 
 /// Convert `OpenAI` tool definitions to embacle `FunctionDeclaration` format
-fn tools_to_declarations(
-    tools: &[crate::openai_types::ToolDefinition],
-) -> Vec<FunctionDeclaration> {
+fn tools_to_declarations(tools: &[OpenAiToolDefinition]) -> Vec<FunctionDeclaration> {
     tools
         .iter()
         .map(|t| FunctionDeclaration {
@@ -654,7 +655,7 @@ fn inject_tool_catalog_as_user_message(messages: &mut [ChatMessage], catalog: &s
     if let Some(last_user) = messages
         .iter_mut()
         .rev()
-        .find(|m| m.role == embacle::types::MessageRole::User)
+        .find(|m| m.role == MessageRole::User)
     {
         let augmented = format!("{catalog}\n\n{}", last_user.content);
         *last_user = ChatMessage::user(augmented);
@@ -725,7 +726,7 @@ mod tests {
     use crate::openai_types::{
         ContentPart, FunctionObject, ImageUrlDetail, ToolCall, ToolCallFunction, ToolDefinition,
     };
-    use embacle::types::MessageRole;
+    use MessageRole;
 
     /// Helper to create a `ChatCompletionMessage` with plain text content
     fn text_msg(role: &str, content: Option<&str>) -> ChatCompletionMessage {

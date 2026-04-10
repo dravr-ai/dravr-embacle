@@ -5,9 +5,11 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::fmt::Write as FmtWrite;
+use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use tracing::{debug, warn};
 
@@ -38,19 +40,15 @@ fn mime_to_extension(mime_type: &str) -> &str {
 }
 
 /// Decode a base64-encoded image and write it to a file in the given directory
-fn write_image_file(
-    dir: &std::path::Path,
-    image: &ImagePart,
-    index: usize,
-) -> Result<PathBuf, RunnerError> {
+fn write_image_file(dir: &Path, image: &ImagePart, index: usize) -> Result<PathBuf, RunnerError> {
     let ext = mime_to_extension(&image.mime_type);
     let path = dir.join(format!("{index}.{ext}"));
 
-    let decoded = base64::engine::general_purpose::STANDARD
+    let decoded = BASE64_STANDARD
         .decode(&image.data)
         .map_err(|e| RunnerError::internal(format!("failed to decode base64 image data: {e}")))?;
 
-    let mut file = std::fs::File::create(&path)
+    let mut file = File::create(&path)
         .map_err(|e| RunnerError::internal(format!("failed to create temp image file: {e}")))?;
     file.write_all(&decoded)
         .map_err(|e| RunnerError::internal(format!("failed to write temp image file: {e}")))?;
@@ -247,6 +245,7 @@ pub fn warn_images_via_tempfile(runner_name: &str, image_count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_build_prompt_single_user_message() {
@@ -338,7 +337,7 @@ mod tests {
         let dir = prepared.image_dir.as_ref().unwrap(); // Safe: test assertion
         let image_file = dir.path().join("0.png");
         assert!(image_file.exists());
-        let data = std::fs::read(&image_file).unwrap(); // Safe: test assertion
+        let data = fs::read(&image_file).unwrap(); // Safe: test assertion
         assert_eq!(&data[..4], b"\x89PNG");
     }
 

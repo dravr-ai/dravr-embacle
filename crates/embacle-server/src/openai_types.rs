@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -465,7 +467,7 @@ pub struct HealthResponse {
     /// Overall status
     pub status: &'static str,
     /// Per-provider readiness
-    pub providers: std::collections::HashMap<String, String>,
+    pub providers: HashMap<String, String>,
 }
 
 // ============================================================================

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -19,7 +20,7 @@ use embacle_server::router;
 /// Check whether live tests should run.
 /// Returns `true` when `EMBACLE_LIVE_TESTS=1` and the copilot binary is on PATH.
 fn skip_unless_live() -> bool {
-    let env_set = std::env::var("EMBACLE_LIVE_TESTS")
+    let env_set = env::var("EMBACLE_LIVE_TESTS")
         .map(|v| v == "1")
         .unwrap_or(false);
     let binary_available = which::which("copilot").is_ok();
@@ -100,7 +101,7 @@ async fn live_copilot_non_streaming_completion() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -143,7 +144,7 @@ async fn live_copilot_streaming_completion() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -202,7 +203,7 @@ async fn live_copilot_streaming_with_tools_returns_sse() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -263,7 +264,7 @@ async fn live_copilot_non_streaming_with_tools() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",
@@ -307,7 +308,7 @@ async fn live_copilot_model_override() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot:claude-opus-4.6",
@@ -349,7 +350,7 @@ async fn live_copilot_streaming_chunk_structure() {
         eprintln!("SKIP: EMBACLE_LIVE_TESTS not set or copilot not on PATH");
         return;
     }
-    std::env::remove_var("EMBACLE_API_KEY");
+    env::remove_var("EMBACLE_API_KEY");
 
     let body = serde_json::json!({
         "model": "copilot",

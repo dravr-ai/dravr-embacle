@@ -36,6 +36,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -43,7 +45,7 @@ use serde::Deserialize;
 
 use crate::config::RunnerConfig;
 use crate::discovery::resolve_binary;
-use crate::factory::parse_runner_type;
+use crate::factory::{create_runner_with_config, parse_runner_type};
 use crate::fallback::{FallbackProvider, RetryConfig};
 use crate::types::{LlmProvider, RunnerError};
 
@@ -127,7 +129,7 @@ pub fn load_config() -> Result<Option<EmbacleConfig>, RunnerError> {
 
 /// Load configuration from a specific file path.
 pub fn load_config_from(path: &Path) -> Result<EmbacleConfig, RunnerError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let content = fs::read_to_string(path).map_err(|e| {
         RunnerError::config(format!(
             "failed to read config file {}: {e}",
             path.display()
@@ -155,7 +157,7 @@ pub fn build_runner_config(
     let binary_path = if let Some(ref path) = provider.binary_path {
         path.clone()
     } else {
-        let env_override = std::env::var(runner_type.env_override_key()).ok();
+        let env_override = env::var(runner_type.env_override_key()).ok();
         resolve_binary(runner_type.binary_name(), env_override.as_deref())?
     };
 
@@ -214,12 +216,12 @@ pub async fn build_fallback_from_config(
         let runner_config = if let Some(pc) = provider_config {
             build_runner_config(pc, &config.defaults)?
         } else {
-            let env_override = std::env::var(runner_type.env_override_key()).ok();
+            let env_override = env::var(runner_type.env_override_key()).ok();
             let binary_path = resolve_binary(runner_type.binary_name(), env_override.as_deref())?;
             RunnerConfig::new(binary_path)
         };
 
-        let runner = crate::factory::create_runner_with_config(runner_type, runner_config).await;
+        let runner = create_runner_with_config(runner_type, runner_config).await;
         providers.push(runner);
     }
 
@@ -240,6 +242,7 @@ pub fn resolve_alias<'a>(config: &'a EmbacleConfig, name: &str) -> Option<&'a st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ErrorKind;
 
     #[test]
     fn parse_minimal_config() {
@@ -336,16 +339,16 @@ smart = "claude_code"
         // unless one exists — this test validates the None path
         let result = load_config_from(Path::new("/nonexistent/embacle.toml"));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind, crate::types::ErrorKind::Config);
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Config);
     }
 
     #[test]
     fn invalid_toml_returns_config_error() {
         let tmp = tempfile::NamedTempFile::new().unwrap(); // Safe: test assertion
-        std::fs::write(tmp.path(), "not valid toml {{{{").unwrap(); // Safe: test assertion
+        fs::write(tmp.path(), "not valid toml {{{{").unwrap(); // Safe: test assertion
         let result = load_config_from(tmp.path());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind, crate::types::ErrorKind::Config);
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Config);
     }
 
     #[test]
@@ -361,7 +364,7 @@ smart = "claude_code"
         };
         let result = build_runner_config(&provider, &defaults);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind, crate::types::ErrorKind::Config);
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Config);
     }
 
     #[test]

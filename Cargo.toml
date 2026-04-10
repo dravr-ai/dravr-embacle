@@ -60,6 +60,10 @@ significant_drop_tightening = "allow"
 # Module naming - allow repetition for clarity
 module_name_repetitions = "allow"
 
+# Enforce `use` imports over inline qualified paths (crate::foo::bar)
+# Idiomatic Rust prefers imports at top of file for readability
+absolute_paths = "deny"
+
 # Multiple dependency versions - unavoidable in some transitive deps
 multiple_crate_versions = "allow"
 

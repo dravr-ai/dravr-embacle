@@ -25,8 +25,15 @@
 //! tokens are estimated at ~4 characters per token.
 
 use std::collections::HashMap;
+#[cfg(feature = "otel")]
+use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+#[cfg(feature = "otel")]
+use opentelemetry::global;
+#[cfg(feature = "otel")]
+use opentelemetry::metrics::{Counter, Histogram};
 
 use async_trait::async_trait;
 use tracing::info;
@@ -146,18 +153,18 @@ pub struct MetricsReport {
 /// OpenTelemetry instruments for metrics export
 #[cfg(feature = "otel")]
 struct OtelInstruments {
-    requests_total: opentelemetry::metrics::Counter<u64>,
-    requests_duration_ms: opentelemetry::metrics::Histogram<f64>,
-    tokens_prompt: opentelemetry::metrics::Counter<u64>,
-    tokens_completion: opentelemetry::metrics::Counter<u64>,
-    errors_total: opentelemetry::metrics::Counter<u64>,
-    cost_total: opentelemetry::metrics::Counter<f64>,
+    requests_total: Counter<u64>,
+    requests_duration_ms: Histogram<f64>,
+    tokens_prompt: Counter<u64>,
+    tokens_completion: Counter<u64>,
+    errors_total: Counter<u64>,
+    cost_total: Counter<f64>,
 }
 
 #[cfg(feature = "otel")]
 impl OtelInstruments {
     fn new() -> Self {
-        let meter = opentelemetry::global::meter("embacle");
+        let meter = global::meter("embacle");
         Self {
             requests_total: meter
                 .u64_counter("embacle.requests.total")
@@ -362,7 +369,7 @@ impl LlmProvider for MetricsProvider {
 
             #[cfg(feature = "otel")]
             {
-                let attrs = std::slice::from_ref(&provider_attr);
+                let attrs = slice::from_ref(&provider_attr);
                 self.otel.requests_total.add(1, attrs);
                 #[allow(clippy::cast_precision_loss)]
                 self.otel
@@ -385,7 +392,7 @@ impl LlmProvider for MetricsProvider {
             {
                 self.otel
                     .errors_total
-                    .add(1, std::slice::from_ref(&provider_attr));
+                    .add(1, slice::from_ref(&provider_attr));
             }
         }
 

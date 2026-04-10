@@ -4,11 +4,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::error::Error;
 use std::sync::Arc;
 
 use clap::Parser;
+use dravr_tronc::mcp::transport::stdio;
+use dravr_tronc::server::tracing_init;
+use dravr_tronc::McpServer;
 use embacle::types::RunnerError;
 use embacle_mcp::ServerState;
+use opentelemetry::global;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use embacle_server::router;
@@ -38,13 +45,13 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
-    dravr_tronc::server::tracing_init::init_with_notifications(&cli.transport);
+    tracing_init::init_with_notifications(&cli.transport);
 
     // Initialize OpenTelemetry metrics (export pipeline configured via OTEL_EXPORTER_* env vars)
-    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
-    opentelemetry::global::set_meter_provider(meter_provider);
+    let meter_provider = SdkMeterProvider::builder().build();
+    global::set_meter_provider(meter_provider);
 
     // Determine effective provider: CLI arg takes precedence, then config file, then default
     let Some(effective_provider) = parse_runner_type(&cli.provider) else {
@@ -89,18 +96,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match cli.transport.as_str() {
         "stdio" => {
-            let server = Arc::new(dravr_tronc::McpServer::new(
+            let server = Arc::new(McpServer::new(
                 "embacle-mcp",
                 env!("CARGO_PKG_VERSION"),
                 embacle_mcp::build_tool_registry(),
                 Arc::clone(&state),
             ));
-            dravr_tronc::mcp::transport::stdio::run(server).await?;
+            stdio::run(server).await?;
         }
         "http" => {
             let app = router::build(state);
             let addr = format!("{}:{}", cli.host, cli.port);
-            let listener = tokio::net::TcpListener::bind(&addr)
+            let listener = TcpListener::bind(&addr)
                 .await
                 .map_err(|e| RunnerError::internal(format!("Failed to bind {addr}: {e}")))?;
 

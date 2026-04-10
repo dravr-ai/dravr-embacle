@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
+
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -23,7 +25,7 @@ const API_KEY_ENV: &str = "EMBACLE_API_KEY";
 /// are allowed through (localhost development mode). If set, requests must
 /// include a matching `Authorization: Bearer <key>` header.
 pub async fn require_auth(request: Request, next: Next) -> Response {
-    let expected_key = match std::env::var(API_KEY_ENV) {
+    let expected_key = match env::var(API_KEY_ENV) {
         Ok(key) if !key.is_empty() => key,
         _ => return next.run(request).await,
     };

@@ -18,10 +18,12 @@
 //! `additionalProperties: false`. It does not cover the full JSON Schema
 //! specification (e.g., `oneOf`, `anyOf`, `$ref`, `pattern`).
 
+use std::fmt;
+
 use serde_json::Value;
 use tracing::{info, warn};
 
-use crate::types::{ChatMessage, ChatRequest, LlmProvider, RunnerError};
+use crate::types::{ChatMessage, ChatRequest, LlmProvider, MessageRole, RunnerError};
 
 /// Request configuration for structured JSON output
 #[derive(Debug, Clone)]
@@ -43,8 +45,8 @@ pub struct SchemaValidationError {
     pub path: String,
 }
 
-impl std::fmt::Display for SchemaValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SchemaValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.path, self.message)
     }
 }
@@ -152,7 +154,7 @@ pub async fn request_structured_output(
 /// Inject schema instruction into the system message, or create one
 fn inject_schema_instruction(messages: &mut Vec<ChatMessage>, instruction: &str) {
     if let Some(first) = messages.first_mut() {
-        if first.role == crate::types::MessageRole::System {
+        if first.role == MessageRole::System {
             let augmented = format!("{}{instruction}", first.content);
             *first = ChatMessage::system(augmented);
             return;

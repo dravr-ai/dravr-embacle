@@ -10,13 +10,13 @@ use serde_json::{json, Value};
 use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 
-use crate::state::SharedState;
+use crate::state::{ServerState, SharedState};
 
 /// Returns the current model, default model, and available models for the active provider
 pub struct GetModel;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for GetModel {
+impl McpTool<ServerState> for GetModel {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_model".to_owned(),
@@ -69,7 +69,7 @@ impl McpTool<crate::state::ServerState> for GetModel {
 pub struct SetModel;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for SetModel {
+impl McpTool<ServerState> for SetModel {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "set_model".to_owned(),

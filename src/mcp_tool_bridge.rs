@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::runtime::Handle;
+use tokio::task;
 use tracing::warn;
 
 use crate::tool_simulation::{FunctionDeclaration, FunctionResponse, TextToolHandler};
@@ -75,8 +77,8 @@ pub fn create_mcp_tool_handler(executor: Arc<dyn McpToolExecutor>) -> TextToolHa
         let tool_name_owned = tool_name.to_owned();
         let arguments_owned = arguments.clone();
 
-        let result = tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
+        let result = task::block_in_place(|| {
+            let handle = Handle::current();
             handle.block_on(executor.execute(&tool_name_owned, &arguments_owned))
         });
 

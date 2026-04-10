@@ -254,6 +254,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::time;
 
     struct TestProvider {
         responses: Mutex<Vec<Result<ChatResponse, RunnerError>>>,
@@ -411,7 +412,7 @@ mod tests {
         let r1 = cached.complete(&request).await.expect("first"); // Safe: test assertion
         assert_eq!(r1.content, "old");
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
 
         let r2 = cached.complete(&request).await.expect("after expiry"); // Safe: test assertion
         assert_eq!(r2.content, "fresh");

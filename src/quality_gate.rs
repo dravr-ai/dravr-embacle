@@ -17,6 +17,8 @@
 //! - Streaming responses (`complete_stream`) are passed through without quality
 //!   checking, since the full content is not available upfront.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use tracing::{info, warn};
 
@@ -73,8 +75,8 @@ pub enum QualityFailure {
     },
 }
 
-impl std::fmt::Display for QualityFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for QualityFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => write!(f, "response was empty"),
             Self::TooShort { length, minimum } => {

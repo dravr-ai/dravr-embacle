@@ -11,13 +11,13 @@ use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 
 use crate::runner::{parse_runner_type, valid_provider_names, ALL_PROVIDERS};
-use crate::state::SharedState;
+use crate::state::{ServerState, SharedState};
 
 /// Returns the currently active LLM provider and available providers
 pub struct GetProvider;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for GetProvider {
+impl McpTool<ServerState> for GetProvider {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_provider".to_owned(),
@@ -47,7 +47,7 @@ impl McpTool<crate::state::ServerState> for GetProvider {
 pub struct SetProvider;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for SetProvider {
+impl McpTool<ServerState> for SetProvider {
     fn definition(&self) -> ToolDefinition {
         let provider_names: Vec<String> = ALL_PROVIDERS.iter().map(ToString::to_string).collect();
 

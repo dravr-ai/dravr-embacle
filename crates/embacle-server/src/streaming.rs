@@ -6,9 +6,10 @@
 
 use std::convert::Infallible;
 
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use embacle::types::ChatStream;
+use futures::stream;
 use futures::StreamExt;
 
 use crate::completions::{generate_id, unix_timestamp};
@@ -100,13 +101,12 @@ pub fn sse_response(stream: ChatStream, model: &str) -> Response {
     };
 
     // Append the [DONE] sentinel after the stream completes
-    let done_stream =
-        futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
+    let done_stream = stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
 
     let combined = sse_stream.chain(done_stream);
 
     Sse::new(combined)
-        .keep_alive(axum::response::sse::KeepAlive::default())
+        .keep_alive(KeepAlive::default())
         .into_response()
 }
 
@@ -205,18 +205,17 @@ pub fn sse_single_response(message: ResponseMessage, finish_reason: &str, model:
         serde_json::to_string(&final_chunk).unwrap_or_default(),
     ];
 
-    let event_stream = futures::stream::iter(
+    let event_stream = stream::iter(
         events
             .into_iter()
             .map(|json| Ok::<_, Infallible>(Event::default().data(json))),
     );
-    let done_stream =
-        futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
+    let done_stream = stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
 
     let combined = event_stream.chain(done_stream);
 
     Sse::new(combined)
-        .keep_alive(axum::response::sse::KeepAlive::default())
+        .keep_alive(KeepAlive::default())
         .into_response()
 }
 
@@ -264,8 +263,8 @@ mod tests {
             }),
         ];
 
-        let stream: ChatStream = Box::pin(futures::stream::iter(chunks));
-        let filtered = strip_fence_chunks(stream);
+        let input: ChatStream = Box::pin(stream::iter(chunks));
+        let filtered = strip_fence_chunks(input);
 
         let results: Vec<_> = filtered.collect().await;
         assert_eq!(results.len(), 2);

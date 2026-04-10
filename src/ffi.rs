@@ -6,12 +6,16 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::panic::{self, AssertUnwindSafe};
+use std::ptr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tokio::runtime::{Builder, Runtime};
+use tokio::time;
 
-use crate::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
+use crate::types::{ChatMessage, ChatRequest, ChatResponse, ImagePart, LlmProvider, RunnerError};
 use crate::CopilotHeadlessRunner;
 
 // ---------------------------------------------------------------------------
@@ -20,7 +24,7 @@ use crate::CopilotHeadlessRunner;
 
 /// Holds the tokio runtime and copilot runner, created by `embacle_init`
 struct FfiState {
-    runtime: tokio::runtime::Runtime,
+    runtime: Runtime,
     runner: Box<dyn LlmProvider>,
 }
 
@@ -202,15 +206,15 @@ fn convert_ffi_messages(messages: &[FfiMessage]) -> Result<Vec<ChatMessage>, Str
 }
 
 /// Build an OpenAI-compatible response JSON from a `ChatResponse`
-fn build_response_json(response: &crate::types::ChatResponse) -> String {
+fn build_response_json(response: &ChatResponse) -> String {
     let usage = response.usage.as_ref().map(|u| FfiTokenUsage {
         prompt: u.prompt_tokens,
         completion: u.completion_tokens,
         total: u.total_tokens,
     });
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
 
@@ -242,7 +246,7 @@ fn to_c_string(s: &str) -> *mut c_char {
     CString::new(s).map_or_else(
         |_| {
             eprintln!("embacle: response contains null bytes");
-            std::ptr::null_mut()
+            ptr::null_mut()
         },
         CString::into_raw,
     )
@@ -261,7 +265,7 @@ fn to_c_string(s: &str) -> *mut c_char {
 /// failure, -3 on runner creation failure.
 #[no_mangle]
 pub extern "C" fn embacle_init() -> i32 {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut guard = match STATE.write() {
             Ok(g) => g,
             Err(e) => {
@@ -275,10 +279,7 @@ pub extern "C" fn embacle_init() -> i32 {
             return -1;
         }
 
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-        {
+        let runtime = match Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("embacle_init: failed to create tokio runtime: {e}");
@@ -318,10 +319,10 @@ pub extern "C" fn embacle_chat_completion(
     request_json: *const c_char,
     timeout_seconds: i32,
 ) -> *mut c_char {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
         if request_json.is_null() {
             eprintln!("embacle_chat_completion: request_json is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         }
 
         // SAFETY: caller guarantees valid null-terminated UTF-8
@@ -330,7 +331,7 @@ pub extern "C" fn embacle_chat_completion(
             Ok(s) => s,
             Err(e) => {
                 eprintln!("embacle_chat_completion: invalid UTF-8: {e}");
-                return std::ptr::null_mut();
+                return ptr::null_mut();
             }
         };
 
@@ -338,7 +339,7 @@ pub extern "C" fn embacle_chat_completion(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("embacle_chat_completion: invalid request JSON: {e}");
-                return std::ptr::null_mut();
+                return ptr::null_mut();
             }
         };
 
@@ -346,7 +347,7 @@ pub extern "C" fn embacle_chat_completion(
             Ok(m) => m,
             Err(e) => {
                 eprintln!("embacle_chat_completion: {e}");
-                return std::ptr::null_mut();
+                return ptr::null_mut();
             }
         };
 
@@ -373,16 +374,16 @@ pub extern "C" fn embacle_chat_completion(
 
         let Some(state) = state else {
             eprintln!("embacle_chat_completion: not initialized (call embacle_init first)");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
 
         let result = state.runtime.block_on(async {
             let completion = state.runner.complete(&chat_request);
             match timeout {
-                Some(duration) => tokio::time::timeout(duration, completion)
+                Some(duration) => time::timeout(duration, completion)
                     .await
                     .unwrap_or_else(|_| {
-                        Err(crate::types::RunnerError::timeout(format!(
+                        Err(RunnerError::timeout(format!(
                             "completion timed out after {timeout_seconds}s"
                         )))
                     }),
@@ -397,14 +398,14 @@ pub extern "C" fn embacle_chat_completion(
             }
             Err(e) => {
                 eprintln!("embacle_chat_completion: {:?}: {}", e.kind, e.message);
-                std::ptr::null_mut()
+                ptr::null_mut()
             }
         }
     }));
 
     result.unwrap_or_else(|_| {
         eprintln!("embacle_chat_completion: panic during completion");
-        std::ptr::null_mut()
+        ptr::null_mut()
     })
 }
 
@@ -421,7 +422,7 @@ pub extern "C" fn embacle_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: ptr was allocated by CString::into_raw in to_c_string
         unsafe {
             drop(CString::from_raw(ptr));
@@ -435,7 +436,7 @@ pub extern "C" fn embacle_free_string(ptr: *mut c_char) {
 /// [`embacle_init`] is called again.
 #[no_mangle]
 pub extern "C" fn embacle_shutdown() {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut guard = match STATE.write() {
             Ok(g) => g,
             Err(e) => {
@@ -468,6 +469,7 @@ pub extern "C" fn embacle_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TokenUsage;
 
     #[test]
     fn parse_data_uri_valid_png() {
@@ -570,10 +572,10 @@ mod tests {
 
     #[test]
     fn build_response_json_basic() {
-        let response = crate::types::ChatResponse {
+        let response = ChatResponse {
             content: "Hello world".to_owned(),
             model: "test-model".to_owned(),
-            usage: Some(crate::types::TokenUsage {
+            usage: Some(TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
@@ -595,7 +597,7 @@ mod tests {
 
     #[test]
     fn build_response_json_no_usage() {
-        let response = crate::types::ChatResponse {
+        let response = ChatResponse {
             content: "Hi".to_owned(),
             model: "m".to_owned(),
             usage: None,
@@ -666,6 +668,6 @@ mod tests {
 
     #[test]
     fn free_null_is_noop() {
-        embacle_free_string(std::ptr::null_mut());
+        embacle_free_string(ptr::null_mut());
     }
 }

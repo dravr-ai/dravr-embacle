@@ -4,14 +4,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
 
 use agent_client_protocol_schema as schema;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
+use tokio::time;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::copilot::{copilot_fallback_models, discover_copilot_models};
@@ -25,12 +30,12 @@ use crate::types::{
 const DEFAULT_ACP_PROMPT_TIMEOUT_SECS: u64 = 300;
 
 /// Read prompt timeout from env, falling back to [`DEFAULT_ACP_PROMPT_TIMEOUT_SECS`].
-fn acp_prompt_timeout() -> std::time::Duration {
-    let secs = std::env::var("EMBACLE_ACP_PROMPT_TIMEOUT_SECS")
+fn acp_prompt_timeout() -> Duration {
+    let secs = env::var("EMBACLE_ACP_PROMPT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_ACP_PROMPT_TIMEOUT_SECS);
-    std::time::Duration::from_secs(secs)
+    Duration::from_secs(secs)
 }
 
 /// Build the JSON params for an ACP `session/prompt` request.
@@ -123,12 +128,12 @@ impl AcpTransport {
     /// duration, the read is considered failed. This catches hung processes
     /// that don't produce output but haven't exited.
     /// Override with `EMBACLE_ACP_MESSAGE_TIMEOUT_SECS`.
-    fn message_timeout() -> std::time::Duration {
-        let secs = std::env::var("EMBACLE_ACP_MESSAGE_TIMEOUT_SECS")
+    fn message_timeout() -> Duration {
+        let secs = env::var("EMBACLE_ACP_MESSAGE_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(90);
-        std::time::Duration::from_secs(secs)
+        Duration::from_secs(secs)
     }
 
     /// Read the next NDJSON message, skipping blank lines.
@@ -140,8 +145,7 @@ impl AcpTransport {
         loop {
             line.clear();
             let read_result =
-                tokio::time::timeout(Self::message_timeout(), self.reader.read_line(&mut line))
-                    .await;
+                time::timeout(Self::message_timeout(), self.reader.read_line(&mut line)).await;
 
             let n = match read_result {
                 Ok(Ok(n)) => n,
@@ -193,11 +197,11 @@ impl AcpTransport {
 
 /// Spawn the copilot --acp subprocess with piped stdio.
 fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child, RunnerError> {
-    let mut cmd = tokio::process::Command::new(cli_path);
+    let mut cmd = Command::new(cli_path);
     cmd.arg("--acp")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     if let Some(token) = github_token {
         cmd.env("COPILOT_GITHUB_TOKEN", token);
@@ -224,12 +228,12 @@ const DEFAULT_ACP_SESSION_TIMEOUT_SECS: u64 = 60;
 
 /// Read session setup timeout from `EMBACLE_ACP_SESSION_TIMEOUT_SECS` env var,
 /// falling back to [`DEFAULT_ACP_SESSION_TIMEOUT_SECS`].
-fn acp_session_timeout() -> std::time::Duration {
-    let secs = std::env::var("EMBACLE_ACP_SESSION_TIMEOUT_SECS")
+fn acp_session_timeout() -> Duration {
+    let secs = env::var("EMBACLE_ACP_SESSION_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_ACP_SESSION_TIMEOUT_SECS);
-    std::time::Duration::from_secs(secs)
+    Duration::from_secs(secs)
 }
 
 /// Initialize ACP connection and create a session.
@@ -256,7 +260,7 @@ async fn setup_session(
     let mut transport = AcpTransport::new(stdin, stdout);
 
     // Wrap handshake + session creation in a timeout to detect hung processes early
-    let session_result = tokio::time::timeout(acp_session_timeout(), async {
+    let session_result = time::timeout(acp_session_timeout(), async {
         // Initialize handshake
         info!("ACP: sending initialize handshake");
         let init_id = transport
@@ -279,7 +283,7 @@ async fn setup_session(
         // Create session with model and optional system prompt
         let mut session_params = json!({
             "model": model,
-            "cwd": std::env::current_dir()
+            "cwd": env::current_dir()
                 .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
             "mcpServers": [],
         });
@@ -343,7 +347,7 @@ async fn collect_stderr(child: &mut Child) -> String {
     let mut reader = BufReader::new(stderr);
     let mut output = String::new();
     // Read up to 4KB of stderr, with a short timeout
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let result = time::timeout(Duration::from_secs(1), async {
         let mut buf = String::new();
         loop {
             buf.clear();
@@ -895,7 +899,7 @@ impl CopilotHeadlessRunner {
             )
             .await?;
 
-        let result = tokio::time::timeout(
+        let result = time::timeout(
             acp_prompt_timeout(),
             collect_complete(
                 &mut transport,
@@ -996,7 +1000,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             )
             .await?;
 
-        let result = tokio::time::timeout(
+        let result = time::timeout(
             acp_prompt_timeout(),
             collect_complete(
                 &mut transport,
@@ -1049,7 +1053,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let policy = self.config.permission_policy;
 
         tokio::spawn(async move {
-            let result = tokio::time::timeout(
+            let result = time::timeout(
                 acp_prompt_timeout(),
                 collect_streaming(&mut transport, prompt_id, &chunk_tx, policy),
             )
@@ -1069,7 +1073,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             let _ = child.kill().await;
         });
 
-        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(chunk_rx);
+        let stream = UnboundedReceiverStream::new(chunk_rx);
         Ok(Box::pin(stream))
     }
 

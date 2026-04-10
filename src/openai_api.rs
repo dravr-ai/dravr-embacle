@@ -28,6 +28,7 @@
 //! # }
 //! ```
 
+use std::env;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -124,10 +125,10 @@ impl OpenAiApiConfig {
     /// Falls back to defaults for any unset variable.
     #[must_use]
     pub fn from_env() -> Self {
-        let base_url = std::env::var(ENV_BASE_URL).unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
-        let api_key = std::env::var(ENV_API_KEY).ok();
-        let model = std::env::var(ENV_MODEL).unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
-        let timeout_secs: u64 = std::env::var(ENV_TIMEOUT_SECS)
+        let base_url = env::var(ENV_BASE_URL).unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+        let api_key = env::var(ENV_API_KEY).ok();
+        let model = env::var(ENV_MODEL).unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        let timeout_secs: u64 = env::var(ENV_TIMEOUT_SECS)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
@@ -848,6 +849,7 @@ async fn discover_models(client: &reqwest::Client, config: &OpenAiApiConfig) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ErrorKind;
 
     #[test]
     fn config_new_sets_defaults() {
@@ -1033,14 +1035,14 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             r#"{"error":{"message":"bad key"}}"#,
         );
-        assert_eq!(err.kind, crate::types::ErrorKind::AuthFailure);
+        assert_eq!(err.kind, ErrorKind::AuthFailure);
         assert!(err.message.contains("bad key"));
     }
 
     #[test]
     fn map_http_error_timeout() {
         let err = map_http_error(StatusCode::GATEWAY_TIMEOUT, "timeout");
-        assert_eq!(err.kind, crate::types::ErrorKind::Timeout);
+        assert_eq!(err.kind, ErrorKind::Timeout);
     }
 
     #[test]
@@ -1049,14 +1051,14 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":{"message":"overloaded"}}"#,
         );
-        assert_eq!(err.kind, crate::types::ErrorKind::ExternalService);
+        assert_eq!(err.kind, ErrorKind::ExternalService);
         assert!(err.message.contains("overloaded"));
     }
 
     #[test]
     fn map_http_error_unparseable_body() {
         let err = map_http_error(StatusCode::BAD_REQUEST, "not json");
-        assert_eq!(err.kind, crate::types::ErrorKind::ExternalService);
+        assert_eq!(err.kind, ErrorKind::ExternalService);
         assert!(err.message.contains("not json"));
     }
 
@@ -1142,7 +1144,7 @@ mod tests {
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15); // Safe: test assertion
+        assert_eq!(resp.usage.as_ref().unwrap().total, 15); // Safe: test assertion
     }
 
     #[test]

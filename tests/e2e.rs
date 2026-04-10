@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -17,11 +18,11 @@ use tokio_stream::StreamExt;
 ///
 /// Returns `true` if `EMBACLE_E2E_ALL=1` or `EMBACLE_E2E_<TAG>=1`.
 fn runner_enabled(tag: &str) -> bool {
-    if std::env::var("EMBACLE_E2E_ALL").as_deref() == Ok("1") {
+    if env::var("EMBACLE_E2E_ALL").as_deref() == Ok("1") {
         return true;
     }
     let key = format!("EMBACLE_E2E_{}", tag.to_uppercase());
-    std::env::var(&key).as_deref() == Ok("1")
+    env::var(&key).as_deref() == Ok("1")
 }
 
 /// Build a simple ping request that any LLM should handle.
@@ -46,7 +47,7 @@ const E2E_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Resolve a binary or skip.
 fn resolve_or_skip(runner_type: CliRunnerType) -> PathBuf {
-    let env_override = std::env::var(runner_type.env_override_key()).ok();
+    let env_override = env::var(runner_type.env_override_key()).ok();
     match resolve_binary(runner_type.binary_name(), env_override.as_deref()) {
         Ok(p) => p,
         Err(e) => {

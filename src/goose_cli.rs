@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-use std::io;
+use std::io::{self, Write as IoWrite};
 use std::process::Stdio;
 use std::str;
 
@@ -142,7 +142,7 @@ impl LlmProvider for GooseCliRunner {
         let mut prompt_file = NamedTempFile::new().map_err(|e| {
             RunnerError::internal(format!("Failed to create temp file for Goose prompt: {e}"))
         })?;
-        std::io::Write::write_all(&mut prompt_file, prompt.as_bytes()).map_err(|e| {
+        IoWrite::write_all(&mut prompt_file, prompt.as_bytes()).map_err(|e| {
             RunnerError::internal(format!("Failed to write Goose prompt to temp file: {e}"))
         })?;
 

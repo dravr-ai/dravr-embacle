@@ -316,6 +316,7 @@ impl LlmProvider for ClaudeCodeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ErrorKind;
 
     #[test]
     fn test_parse_response_valid_json() {
@@ -336,7 +337,7 @@ mod tests {
         let json = br#"{"result":"rate limited","is_error":true}"#;
         let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
 
-        assert_eq!(err.kind, crate::types::ErrorKind::ExternalService);
+        assert_eq!(err.kind, ErrorKind::ExternalService);
         assert!(err.message.contains("rate limited"));
     }
 
@@ -361,6 +362,6 @@ mod tests {
     fn test_parse_response_invalid_json() {
         let json = b"not json at all";
         let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
-        assert_eq!(err.kind, crate::types::ErrorKind::Internal);
+        assert_eq!(err.kind, ErrorKind::Internal);
     }
 }

@@ -22,6 +22,8 @@
 //! - `complete_stream()` runs pre-request checks but skips post-response checks,
 //!   since the full content is not available upfront.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use tracing::warn;
 
@@ -38,8 +40,8 @@ pub struct GuardrailViolation {
     pub reason: String,
 }
 
-impl std::fmt::Display for GuardrailViolation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for GuardrailViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.guardrail_name, self.reason)
     }
 }

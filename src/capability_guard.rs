@@ -14,7 +14,7 @@
 //! the function returns warning strings that callers can surface in
 //! [`ChatResponse::warnings`](crate::types::ChatResponse::warnings).
 
-use crate::types::{ChatRequest, LlmCapabilities, RunnerError};
+use crate::types::{ChatRequest, LlmCapabilities, RunnerError, ToolChoice};
 
 /// Validate that a request's parameters are supported by the provider.
 ///
@@ -73,10 +73,8 @@ pub fn validate_capabilities(
         warnings.push(msg);
     }
 
-    if matches!(
-        request.tool_choice,
-        Some(crate::types::ToolChoice::Required)
-    ) && !capabilities.supports_function_calling()
+    if matches!(request.tool_choice, Some(ToolChoice::Required))
+        && !capabilities.supports_function_calling()
     {
         let msg = format!(
             "{provider_name} does not support function calling; tool_choice=required is not available"
@@ -132,7 +130,7 @@ pub fn validate_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ChatMessage, ErrorKind};
+    use crate::types::{ChatMessage, ErrorKind, ImagePart, ResponseFormat, ToolDefinition};
 
     fn request_with_temperature() -> ChatRequest {
         ChatRequest::new(vec![ChatMessage::user("hello")]).with_temperature(0.7)
@@ -227,13 +225,12 @@ mod tests {
     #[test]
     fn strict_rejects_tools_without_function_calling() {
         let caps = LlmCapabilities::STREAMING;
-        let request = ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![
-            crate::types::ToolDefinition {
+        let request =
+            ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![ToolDefinition {
                 name: "test".to_owned(),
                 description: "test".to_owned(),
                 parameters: None,
-            },
-        ]);
+            }]);
         let err = validate_capabilities("test", caps, &request, true).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
         assert!(err.message.contains("function calling"));
@@ -262,7 +259,7 @@ mod tests {
     fn strict_rejects_unsupported_response_format() {
         let caps = LlmCapabilities::STREAMING;
         let request = ChatRequest::new(vec![ChatMessage::user("hello")])
-            .with_response_format(crate::types::ResponseFormat::JsonObject);
+            .with_response_format(ResponseFormat::JsonObject);
         let err = validate_capabilities("test", caps, &request, true).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
         assert!(err.message.contains("response_format"));
@@ -271,13 +268,12 @@ mod tests {
     #[test]
     fn permissive_warns_for_tools_without_function_calling() {
         let caps = LlmCapabilities::STREAMING;
-        let request = ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![
-            crate::types::ToolDefinition {
+        let request =
+            ChatRequest::new(vec![ChatMessage::user("hello")]).with_tools(vec![ToolDefinition {
                 name: "test".to_owned(),
                 description: "test".to_owned(),
                 parameters: None,
-            },
-        ]);
+            }]);
         let warnings = validate_capabilities("test", caps, &request, false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("function calling"));
@@ -286,7 +282,7 @@ mod tests {
     #[test]
     fn strict_rejects_images_without_vision() {
         let caps = LlmCapabilities::STREAMING;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
+        let img = ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
         let err = validate_capabilities("test", caps, &request, true).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
@@ -296,7 +292,7 @@ mod tests {
     #[test]
     fn permissive_warns_for_images_without_vision() {
         let caps = LlmCapabilities::STREAMING;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
+        let img = ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
         let warnings = validate_capabilities("test", caps, &request, false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);
@@ -306,7 +302,7 @@ mod tests {
     #[test]
     fn allows_images_with_vision_capability() {
         let caps = LlmCapabilities::STREAMING | LlmCapabilities::VISION;
-        let img = crate::types::ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
+        let img = ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
         let warnings = validate_capabilities("test", caps, &request, true).unwrap(); // Safe: test assertion
         assert!(warnings.is_empty());
