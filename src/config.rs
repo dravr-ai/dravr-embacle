@@ -230,7 +230,7 @@ mod tests {
         let config = RunnerConfig::new(PathBuf::from("/usr/bin/claude"));
         assert_eq!(config.binary_path, PathBuf::from("/usr/bin/claude"));
         assert!(config.model.is_none());
-        assert_eq!(config.timeout, Duration::from_secs(120));
+        assert_eq!(config.timeout, Duration::from_mins(2));
         assert!(config.extra_args.is_empty());
         assert!(config.working_directory.is_none());
     }
@@ -239,12 +239,12 @@ mod tests {
     fn test_runner_config_builder() {
         let config = RunnerConfig::new(PathBuf::from("claude"))
             .with_model("opus")
-            .with_timeout(Duration::from_secs(60))
+            .with_timeout(Duration::from_mins(1))
             .with_extra_args(vec!["--verbose".to_owned()])
             .with_working_directory(PathBuf::from("/tmp"));
 
         assert_eq!(config.model.as_deref(), Some("opus"));
-        assert_eq!(config.timeout, Duration::from_secs(60));
+        assert_eq!(config.timeout, Duration::from_mins(1));
         assert_eq!(config.extra_args, vec!["--verbose"]);
         assert_eq!(config.working_directory, Some(PathBuf::from("/tmp")));
     }
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_parse_timeout_valid() {
-        assert_eq!(parse_timeout("60"), Ok(Duration::from_secs(60)));
-        assert_eq!(parse_timeout("  120  "), Ok(Duration::from_secs(120)));
+        assert_eq!(parse_timeout("60"), Ok(Duration::from_mins(1)));
+        assert_eq!(parse_timeout("  120  "), Ok(Duration::from_mins(2)));
     }
 
     #[test]

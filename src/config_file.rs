@@ -317,7 +317,7 @@ smart = "claude_code"
         };
         let config = build_runner_config(&provider, &defaults).unwrap(); // Safe: test assertion
         assert_eq!(config.model.as_deref(), Some("override-model"));
-        assert_eq!(config.timeout, Duration::from_secs(60));
+        assert_eq!(config.timeout, Duration::from_mins(1));
     }
 
     #[test]
@@ -402,6 +402,6 @@ smart = "claude_code"
         };
         assert_eq!(retry.max_retries, 3);
         assert_eq!(retry.base_delay, Duration::from_millis(200));
-        assert_eq!(retry.max_delay, Duration::from_millis(2000));
+        assert_eq!(retry.max_delay, Duration::from_secs(2));
     }
 }

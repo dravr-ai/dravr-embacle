@@ -20,9 +20,7 @@ use embacle_server::router;
 /// Check whether live tests should run.
 /// Returns `true` when `EMBACLE_LIVE_TESTS=1` and the copilot binary is on PATH.
 fn skip_unless_live() -> bool {
-    let env_set = env::var("EMBACLE_LIVE_TESTS")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let env_set = env::var("EMBACLE_LIVE_TESTS").is_ok_and(|v| v == "1");
     let binary_available = which::which("copilot").is_ok();
     !(env_set && binary_available)
 }

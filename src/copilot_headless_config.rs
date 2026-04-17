@@ -84,8 +84,9 @@ impl CopilotHeadlessConfig {
             .unwrap_or(DEFAULT_MAX_HISTORY_TURNS);
 
         let inject_system_in_prompt = env::var("COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT")
-            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
-            .unwrap_or(true);
+            .map_or(true, |v| {
+                !matches!(v.to_lowercase().as_str(), "0" | "false" | "no")
+            });
 
         Self {
             cli_path,

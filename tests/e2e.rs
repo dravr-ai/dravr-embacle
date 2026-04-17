@@ -43,7 +43,7 @@ fn stream_request() -> ChatRequest {
 }
 
 /// Standard timeout for E2E tests (CLI tools can be slow on first invocation).
-const E2E_TIMEOUT: Duration = Duration::from_secs(300);
+const E2E_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Resolve a binary or skip.
 fn resolve_or_skip(runner_type: CliRunnerType) -> PathBuf {
