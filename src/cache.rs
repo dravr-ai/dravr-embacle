@@ -45,7 +45,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 256,
-            ttl: Duration::from_secs(300),
+            ttl: Duration::from_mins(5),
             cache_nonzero_temperature: false,
         }
     }

@@ -78,7 +78,7 @@ async fn main() {
 
     // ── 4. Build runner ──
     println!("\n━━━ 4. Build Runner ━━━");
-    let config = RunnerConfig::new(binary_path).with_timeout(Duration::from_secs(60));
+    let config = RunnerConfig::new(binary_path).with_timeout(Duration::from_mins(1));
     let runner = ClaudeCodeRunner::new(config);
     println!("  Name:          {}", runner.name());
     println!("  Display name:  {}", runner.display_name());

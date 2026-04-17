@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::copilot_models::ReasoningEffort;
+
 /// Default timeout for CLI command execution (120 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
@@ -125,6 +127,9 @@ pub struct RunnerConfig {
     pub allowed_env_keys: Vec<String>,
     /// Working directory for the subprocess
     pub working_directory: Option<PathBuf>,
+    /// Reasoning effort forwarded to runners that support it (Copilot CLI / ACP).
+    /// Runners that do not recognize the flag silently ignore this field.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl RunnerConfig {
@@ -138,6 +143,7 @@ impl RunnerConfig {
             extra_args: Vec::new(),
             allowed_env_keys: default_allowed_env_keys(),
             working_directory: None,
+            reasoning_effort: None,
         }
     }
 
@@ -173,6 +179,13 @@ impl RunnerConfig {
     #[must_use]
     pub fn with_working_directory(mut self, dir: PathBuf) -> Self {
         self.working_directory = Some(dir);
+        self
+    }
+
+    /// Set the reasoning effort for runners that support it.
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
         self
     }
 }
@@ -217,7 +230,7 @@ mod tests {
         let config = RunnerConfig::new(PathBuf::from("/usr/bin/claude"));
         assert_eq!(config.binary_path, PathBuf::from("/usr/bin/claude"));
         assert!(config.model.is_none());
-        assert_eq!(config.timeout, Duration::from_secs(120));
+        assert_eq!(config.timeout, Duration::from_mins(2));
         assert!(config.extra_args.is_empty());
         assert!(config.working_directory.is_none());
     }
@@ -226,12 +239,12 @@ mod tests {
     fn test_runner_config_builder() {
         let config = RunnerConfig::new(PathBuf::from("claude"))
             .with_model("opus")
-            .with_timeout(Duration::from_secs(60))
+            .with_timeout(Duration::from_mins(1))
             .with_extra_args(vec!["--verbose".to_owned()])
             .with_working_directory(PathBuf::from("/tmp"));
 
         assert_eq!(config.model.as_deref(), Some("opus"));
-        assert_eq!(config.timeout, Duration::from_secs(60));
+        assert_eq!(config.timeout, Duration::from_mins(1));
         assert_eq!(config.extra_args, vec!["--verbose"]);
         assert_eq!(config.working_directory, Some(PathBuf::from("/tmp")));
     }
@@ -273,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_parse_timeout_valid() {
-        assert_eq!(parse_timeout("60"), Ok(Duration::from_secs(60)));
-        assert_eq!(parse_timeout("  120  "), Ok(Duration::from_secs(120)));
+        assert_eq!(parse_timeout("60"), Ok(Duration::from_mins(1)));
+        assert_eq!(parse_timeout("  120  "), Ok(Duration::from_mins(2)));
     }
 
     #[test]

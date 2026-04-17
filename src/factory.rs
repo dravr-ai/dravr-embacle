@@ -29,7 +29,7 @@ pub async fn create_runner(
     // CopilotHeadless uses its own config (env-based), not RunnerConfig
     #[cfg(feature = "copilot-headless")]
     if runner_type == CliRunnerType::CopilotHeadless {
-        return Ok(Box::new(crate::CopilotHeadlessRunner::from_env().await));
+        return Ok(Box::new(crate::CopilotHeadlessRunner::from_env()));
     }
 
     let binary_name = runner_type.binary_name();
@@ -41,7 +41,7 @@ pub async fn create_runner(
 
     let runner: Box<dyn LlmProvider> = match runner_type {
         CliRunnerType::ClaudeCode => Box::new(ClaudeCodeRunner::new(config)),
-        CliRunnerType::Copilot => Box::new(CopilotRunner::new(config).await),
+        CliRunnerType::Copilot => Box::new(CopilotRunner::new(config)),
         CliRunnerType::CursorAgent => Box::new(CursorAgentRunner::new(config)),
         CliRunnerType::OpenCode => Box::new(OpenCodeRunner::new(config)),
         CliRunnerType::GeminiCli => Box::new(GeminiCliRunner::new(config)),
@@ -69,7 +69,7 @@ pub async fn create_runner_with_config(
 ) -> Box<dyn LlmProvider> {
     match runner_type {
         CliRunnerType::ClaudeCode => Box::new(ClaudeCodeRunner::new(config)),
-        CliRunnerType::Copilot => Box::new(CopilotRunner::new(config).await),
+        CliRunnerType::Copilot => Box::new(CopilotRunner::new(config)),
         CliRunnerType::CursorAgent => Box::new(CursorAgentRunner::new(config)),
         CliRunnerType::OpenCode => Box::new(OpenCodeRunner::new(config)),
         CliRunnerType::GeminiCli => Box::new(GeminiCliRunner::new(config)),
@@ -82,7 +82,7 @@ pub async fn create_runner_with_config(
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
         // CopilotHeadless ignores RunnerConfig — uses env-based config
         #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env().await),
+        CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env()),
     }
 }
 

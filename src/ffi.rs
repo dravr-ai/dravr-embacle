@@ -287,9 +287,8 @@ pub extern "C" fn embacle_init() -> i32 {
             }
         };
 
-        let runner: Box<dyn LlmProvider> = runtime.block_on(async {
-            Box::new(CopilotHeadlessRunner::from_env().await) as Box<dyn LlmProvider>
-        });
+        let runner: Box<dyn LlmProvider> =
+            Box::new(CopilotHeadlessRunner::from_env()) as Box<dyn LlmProvider>;
 
         *guard = Some(Arc::new(FfiState { runtime, runner }));
         0

@@ -110,11 +110,9 @@ async fn handle_single(
     };
     drop(state_guard);
 
-    let strict = request.strict_capabilities.unwrap_or_else(|| {
-        env::var("EMBACLE_STRICT_CAPS")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-    });
+    let strict = request
+        .strict_capabilities
+        .unwrap_or_else(|| env::var("EMBACLE_STRICT_CAPS").is_ok_and(|v| v == "true" || v == "1"));
 
     let mut messages = convert_messages(&request.messages);
 
@@ -304,11 +302,9 @@ async fn handle_multiplex(
         );
     }
 
-    let strict = request.strict_capabilities.unwrap_or_else(|| {
-        env::var("EMBACLE_STRICT_CAPS")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-    });
+    let strict = request
+        .strict_capabilities
+        .unwrap_or_else(|| env::var("EMBACLE_STRICT_CAPS").is_ok_and(|v| v == "true" || v == "1"));
 
     let state_guard = state.read().await;
     let default_provider = state_guard.active_provider();
@@ -685,6 +681,7 @@ fn runner_error_to_response(err: &RunnerError) -> Response {
         ErrorKind::ExternalService => (StatusCode::BAD_GATEWAY, "external_service_error"),
         ErrorKind::Config => (StatusCode::BAD_REQUEST, "invalid_request_error"),
         ErrorKind::Guardrail => (StatusCode::BAD_REQUEST, "guardrail_error"),
+        ErrorKind::ModelUnavailable => (StatusCode::NOT_FOUND, "model_not_found"),
         ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
 
@@ -716,8 +713,7 @@ pub fn generate_id() -> String {
 pub fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

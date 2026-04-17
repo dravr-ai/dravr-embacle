@@ -7,6 +7,8 @@
 use std::env;
 use std::path::PathBuf;
 
+use crate::copilot_models::preferred_default;
+
 /// Policy for handling ACP permission requests from the copilot subprocess.
 ///
 /// Controls whether tool-execution permission prompts are auto-approved or denied.
@@ -50,7 +52,8 @@ impl CopilotHeadlessConfig {
     ///
     /// Environment variables:
     /// - `COPILOT_CLI_PATH` — Override path to copilot binary
-    /// - `COPILOT_HEADLESS_MODEL` — Default model (default: `claude-opus-4.6-fast`)
+    /// - `COPILOT_HEADLESS_MODEL` — Default model (defaults to the top-ranked
+    ///   candidate in [`crate::copilot_models::CATALOG`])
     /// - `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` — GitHub auth token
     /// - `COPILOT_HEADLESS_MAX_HISTORY_TURNS` — Max conversation history turns (default: 20)
     /// - `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` — Re-inject system prompt in prompt text (default: false)
@@ -58,8 +61,8 @@ impl CopilotHeadlessConfig {
     pub fn from_env() -> Self {
         let cli_path = env::var("COPILOT_CLI_PATH").ok().map(PathBuf::from);
 
-        let model = env::var("COPILOT_HEADLESS_MODEL")
-            .unwrap_or_else(|_| "claude-opus-4.6-fast".to_owned());
+        let model =
+            env::var("COPILOT_HEADLESS_MODEL").unwrap_or_else(|_| preferred_default().to_owned());
 
         let github_token = env::var("COPILOT_GITHUB_TOKEN")
             .or_else(|_| env::var("GH_TOKEN"))
@@ -81,8 +84,9 @@ impl CopilotHeadlessConfig {
             .unwrap_or(DEFAULT_MAX_HISTORY_TURNS);
 
         let inject_system_in_prompt = env::var("COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT")
-            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
-            .unwrap_or(true);
+            .map_or(true, |v| {
+                !matches!(v.to_lowercase().as_str(), "0" | "false" | "no")
+            });
 
         Self {
             cli_path,
@@ -99,7 +103,7 @@ impl Default for CopilotHeadlessConfig {
     fn default() -> Self {
         Self {
             cli_path: None,
-            model: "claude-opus-4.6-fast".to_owned(),
+            model: preferred_default().to_owned(),
             github_token: None,
             permission_policy: PermissionPolicy::default(),
             max_history_turns: DEFAULT_MAX_HISTORY_TURNS,

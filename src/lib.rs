@@ -48,7 +48,7 @@
 //!
 //! # async fn example() -> Result<(), embacle::types::RunnerError> {
 //! let claude = ClaudeCodeRunner::new(RunnerConfig::new(PathBuf::from("claude")));
-//! let copilot = CopilotRunner::new(RunnerConfig::new(PathBuf::from("copilot"))).await;
+//! let copilot = CopilotRunner::new(RunnerConfig::new(PathBuf::from("copilot")));
 //!
 //! let provider = FallbackProvider::new(vec![
 //!     Box::new(claude),
@@ -176,6 +176,8 @@ pub mod container;
 pub mod continue_cli;
 /// GitHub Copilot CLI runner
 pub mod copilot;
+/// Ranked catalog of Copilot-served models for intelligent default selection and self-heal
+pub mod copilot_models;
 /// Cursor Agent CLI runner
 pub mod cursor_agent;
 /// Binary auto-detection and discovery
@@ -253,7 +255,7 @@ pub use compat::{CliCapabilities, CliFeatureFlags};
 pub use config::{CliRunnerType, RunnerConfig};
 pub use container::{ContainerConfig, ContainerExecutor, NetworkMode};
 pub use continue_cli::ContinueCliRunner;
-pub use copilot::{copilot_fallback_models, discover_copilot_models, CopilotRunner};
+pub use copilot::{copilot_fallback_models, CopilotRunner};
 pub use cursor_agent::CursorAgentRunner;
 pub use discovery::{discover_runner, resolve_binary};
 pub use factory::{

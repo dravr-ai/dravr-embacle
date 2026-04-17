@@ -49,6 +49,12 @@ pub enum ErrorKind {
     Config,
     /// Guardrail policy violation (request or response rejected)
     Guardrail,
+    /// Requested model is not available on the underlying provider
+    ///
+    /// Typically means the model has been rotated out or the account is not
+    /// entitled to it. Transient in the sense that a retry with a different
+    /// model may succeed.
+    ModelUnavailable,
 }
 
 impl ErrorKind {
@@ -117,6 +123,15 @@ impl RunnerError {
         Self {
             kind: ErrorKind::Guardrail,
             message: message.into(),
+        }
+    }
+
+    /// Create a model-unavailable error
+    pub fn model_unavailable(model: impl Into<String>) -> Self {
+        let model = model.into();
+        Self {
+            kind: ErrorKind::ModelUnavailable,
+            message: format!("Model {model:?} is not available"),
         }
     }
 }
@@ -687,6 +702,14 @@ mod tests {
         assert!(!ErrorKind::AuthFailure.is_transient());
         assert!(!ErrorKind::Config.is_transient());
         assert!(!ErrorKind::Guardrail.is_transient());
+        assert!(!ErrorKind::ModelUnavailable.is_transient());
+    }
+
+    #[test]
+    fn model_unavailable_constructor() {
+        let err = RunnerError::model_unavailable("claude-opus-4.6-fast");
+        assert_eq!(err.kind, ErrorKind::ModelUnavailable);
+        assert!(err.message.contains("claude-opus-4.6-fast"));
     }
 
     #[test]
