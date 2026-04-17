@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0] — 2026-04-17
+
+### Added
+
+- feat: ranked Copilot model catalog with self-heal + reasoning effort Replaces hardcoded default; adds ModelUnavailable kind and 1.95 clippy fixes.
+
+
+
 ## [0.14.11] — 2026-04-10
 
 ### Other
