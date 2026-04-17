@@ -662,9 +662,11 @@ async fn provider_resolver_round_trip_via_completions() {
 
     let app = test_app();
 
-    // A single-model request with a provider prefix
+    // A single-model request with a provider prefix using a model id that
+    // exists in the Copilot catalog so resolution does not trip on the
+    // ModelUnavailable → 404 shortcut.
     let body = serde_json::json!({
-        "model": "copilot:gpt-4o",
+        "model": "copilot:claude-opus-4.7",
         "messages": [{"role": "user", "content": "test"}]
     });
 

@@ -685,6 +685,7 @@ fn runner_error_to_response(err: &RunnerError) -> Response {
         ErrorKind::ExternalService => (StatusCode::BAD_GATEWAY, "external_service_error"),
         ErrorKind::Config => (StatusCode::BAD_REQUEST, "invalid_request_error"),
         ErrorKind::Guardrail => (StatusCode::BAD_REQUEST, "guardrail_error"),
+        ErrorKind::ModelUnavailable => (StatusCode::NOT_FOUND, "model_not_found"),
         ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
 

@@ -322,7 +322,7 @@ use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
 #[tokio::main]
 async fn main() -> Result<(), embacle::types::RunnerError> {
     // Reads COPILOT_HEADLESS_MODEL, COPILOT_GITHUB_TOKEN, etc. from env
-    let runner = CopilotHeadlessRunner::from_env().await;
+    let runner = CopilotHeadlessRunner::from_env();
 
     let request = ChatRequest::new(vec![
         ChatMessage::user("Explain Rust ownership"),
@@ -341,7 +341,7 @@ Configuration via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COPILOT_CLI_PATH` | auto-detect | Override path to copilot binary |
-| `COPILOT_HEADLESS_MODEL` | `claude-opus-4.6-fast` | Default model for completions |
+| `COPILOT_HEADLESS_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
 | `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
 | `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` | `true` | Prepend system prompt as plain text in prompt (set `false` to rely on ACP `systemPrompt` only) |

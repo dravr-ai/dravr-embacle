@@ -173,7 +173,7 @@ async fn e2e_copilot() {
         return;
     }
     let config = RunnerConfig::new(path).with_timeout(E2E_TIMEOUT);
-    let runner = embacle::CopilotRunner::new(config).await;
+    let runner = embacle::CopilotRunner::new(config);
     test_provider_complete(&runner).await;
     test_provider_stream(&runner).await;
 }
@@ -355,7 +355,7 @@ mod headless {
             eprintln!("SKIP e2e_copilot_headless_complete (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
             return;
         }
-        let runner = CopilotHeadlessRunner::from_env().await;
+        let runner = CopilotHeadlessRunner::from_env();
         test_provider_complete(&runner).await;
     }
 
@@ -365,7 +365,7 @@ mod headless {
             eprintln!("SKIP e2e_copilot_headless_stream (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
             return;
         }
-        let runner = CopilotHeadlessRunner::from_env().await;
+        let runner = CopilotHeadlessRunner::from_env();
         test_provider_stream(&runner).await;
     }
 
@@ -375,7 +375,7 @@ mod headless {
             eprintln!("SKIP e2e_copilot_headless_converse (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
             return;
         }
-        let runner = CopilotHeadlessRunner::from_env().await;
+        let runner = CopilotHeadlessRunner::from_env();
 
         let request = ChatRequest::new(vec![
             ChatMessage::system("You are a test bot. Follow instructions exactly."),
@@ -410,7 +410,7 @@ mod headless {
             );
             return;
         }
-        let runner = CopilotHeadlessRunner::from_env().await;
+        let runner = CopilotHeadlessRunner::from_env();
 
         // Ask something that should trigger tool use (file read)
         let request = ChatRequest::new(vec![ChatMessage::user(

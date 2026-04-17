@@ -19,8 +19,8 @@ use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, info, warn};
 
-use crate::copilot::{copilot_fallback_models, discover_copilot_models};
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
+use crate::copilot_models::catalog_ids;
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, MessageRole,
     RunnerError, StreamChunk, TokenUsage,
@@ -720,26 +720,23 @@ pub struct CopilotHeadlessRunner {
 impl CopilotHeadlessRunner {
     /// Create a new provider from environment configuration.
     ///
-    /// Attempts to discover available models via `gh copilot models`.
-    /// Falls back to a static list if discovery fails.
-    pub async fn from_env() -> Self {
-        let available_models = discover_copilot_models()
-            .await
-            .unwrap_or_else(copilot_fallback_models);
+    /// The set of available models is taken from the ranked catalog in
+    /// [`crate::copilot_models`]. Availability per account is resolved lazily
+    /// by the Copilot CLI runner's self-heal loop, not at construction time.
+    #[must_use]
+    pub fn from_env() -> Self {
         Self {
             config: CopilotHeadlessConfig::from_env(),
-            available_models,
+            available_models: catalog_ids(),
         }
     }
 
     /// Create a new provider with explicit configuration.
-    pub async fn with_config(config: CopilotHeadlessConfig) -> Self {
-        let available_models = discover_copilot_models()
-            .await
-            .unwrap_or_else(copilot_fallback_models);
+    #[must_use]
+    pub fn with_config(config: CopilotHeadlessConfig) -> Self {
         Self {
             config,
-            available_models,
+            available_models: catalog_ids(),
         }
     }
 
@@ -754,7 +751,7 @@ impl CopilotHeadlessRunner {
     /// Resolve the model to use for a request.
     /// Provider-alias names (`copilot_headless`, `copilot`) are mapped to the
     /// configured default model because they are not valid Copilot model identifiers.
-    /// Any other model name (e.g. `gpt-4.1`, `claude-opus-4.6-fast`) is passed through.
+    /// Any other model name (e.g. `gpt-4.1`, `claude-opus-4.7`) is passed through.
     fn resolve_model(&self, requested: Option<&str>) -> String {
         match requested {
             Some(m) if m != "copilot_headless" && m != "copilot" => m.to_owned(),
