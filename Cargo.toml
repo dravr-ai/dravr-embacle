@@ -91,6 +91,9 @@ crate-type = ["lib", "staticlib"]
 
 [features]
 default = []
+# Enable AG-UI (Agent-User Interaction) protocol event schema and emitter trait.
+# See https://github.com/ag-ui-protocol/ag-ui. Pulls in no extra dependencies.
+agui = []
 # Enable Copilot Headless provider (ACP protocol via copilot --acp)
 copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # Enable OpenAI-compatible HTTP API client runner (reqwest-based)

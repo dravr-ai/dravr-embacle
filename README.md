@@ -306,6 +306,37 @@ Works with any OpenAI-compatible endpoint — OpenAI, Groq, Google Gemini, Ollam
 | `OPENAI_API_MODEL` | `gpt-5.4` | Default model for completions |
 | `OPENAI_API_TIMEOUT_SECS` | `300` | HTTP request timeout |
 
+## AG-UI Progress Events (feature flag)
+
+Enable the `agui` feature to expose the
+[AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) event vocabulary —
+the canonical types agents use to broadcast run / step / tool-call / text
+progress to user-facing clients.
+
+```toml
+[dependencies]
+embacle = { version = "0.15", features = ["agui"] }
+```
+
+The module is deliberately transport-agnostic: it ships the event enum
+(`AgUiEvent`), the filter (`AgUiEventFilter`), and the emitter trait
+(`AgUiEmitter`) plus a `NoopEmitter` default. HTTP routing, SSE framing,
+and pipeline wiring live in downstream crates that know their runtime
+(e.g. [`dravr-platform`](https://github.com/dravr-ai/dravr-platform)'s
+`/api/agui/runs/{run_id}/stream` and [`dravr-canot`](https://github.com/dravr-ai/dravr-canot)'s
+messaging adapters).
+
+```rust
+use embacle::agui::{AgUiEvent, AgUiEventFilter, AgUiEventKind, AgUiEmitter, NoopEmitter};
+
+// Opt out of high-volume per-token text deltas on a Telegram channel.
+let filter = AgUiEventFilter::allow_all().without(AgUiEventKind::TextMessageContent);
+let sink = NoopEmitter::new(filter);
+
+let event = AgUiEvent::run_started("run_abc", Some("thread_xyz"));
+let _ = sink.emit(&event);
+```
+
 ## Copilot Headless (feature flag)
 
 Enable the `copilot-headless` feature for ACP-based communication with SDK-managed tool calling:

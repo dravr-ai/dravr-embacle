@@ -19,139 +19,25 @@
 //! - **`embacle-server`** — OpenAI-compatible REST API + MCP Streamable HTTP on a single port
 //! - **`embacle-mcp`** — standalone MCP server over stdio or HTTP
 //!
-//! ## Quick Start
+//! ## Progress feedback (AG-UI)
 //!
-//! ```rust,no_run
-//! use std::path::PathBuf;
-//! use embacle::{ClaudeCodeRunner, RunnerConfig};
-//! use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
-//!
-//! # async fn example() -> Result<(), embacle::types::RunnerError> {
-//! let config = RunnerConfig::new(PathBuf::from("claude"));
-//! let runner = ClaudeCodeRunner::new(config);
-//! let request = ChatRequest::new(vec![ChatMessage::user("Hello!")]);
-//! let response = runner.complete(&request).await?;
-//! println!("{}", response.content);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Fallback Chains
-//!
-//! Try multiple providers in order — first success wins:
-//!
-//! ```rust,no_run
-//! use std::path::PathBuf;
-//! use embacle::{ClaudeCodeRunner, CopilotRunner, RunnerConfig};
-//! use embacle::fallback::FallbackProvider;
-//! use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
-//!
-//! # async fn example() -> Result<(), embacle::types::RunnerError> {
-//! let claude = ClaudeCodeRunner::new(RunnerConfig::new(PathBuf::from("claude")));
-//! let copilot = CopilotRunner::new(RunnerConfig::new(PathBuf::from("copilot")));
-//!
-//! let provider = FallbackProvider::new(vec![
-//!     Box::new(claude),
-//!     Box::new(copilot),
-//! ])?;
-//!
-//! // If claude fails, copilot handles it — same interface
-//! let request = ChatRequest::new(vec![ChatMessage::user("Hello!")]);
-//! let response = provider.complete(&request).await?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Structured Output
-//!
-//! Schema-validated JSON from any provider, with retry on validation failure:
-//!
-//! ```rust,no_run
-//! use embacle::structured_output::{request_structured_output, StructuredOutputRequest};
-//! use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
-//! use serde_json::json;
-//!
-//! # async fn example(runner: &dyn LlmProvider) -> Result<(), embacle::types::RunnerError> {
-//! let schema = json!({
-//!     "type": "object",
-//!     "properties": {
-//!         "city": {"type": "string"},
-//!         "temperature": {"type": "number"}
-//!     },
-//!     "required": ["city", "temperature"]
-//! });
-//!
-//! let request = ChatRequest::new(vec![
-//!     ChatMessage::user("What's the weather in Paris?"),
-//! ]);
-//!
-//! let data = request_structured_output(
-//!     runner,
-//!     &StructuredOutputRequest { request, schema, max_retries: 2 },
-//! ).await?;
-//!
-//! assert!(data["city"].is_string());
-//! assert!(data["temperature"].is_number());
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Modules
-//!
-//! ### Core
-//!
-//! - [`types`] — `LlmProvider` trait, messages, requests, responses, errors
-//! - [`config`] — `RunnerConfig`, `CliRunnerType` enum
-//! - [`factory`] — Runner factory, provider parsing, `ALL_PROVIDERS` constant
-//!
-//! ### Higher-Level Features
-//!
-//! - [`agent`] — Multi-turn agent loop with configurable tool calling
-//! - [`fallback`] — Ordered provider failover chains
-//! - [`metrics`] — Latency, token, and error tracking decorator
-//! - [`quality_gate`] — Response validation with retry on refusal
-//! - [`structured_output`] — Schema-enforced JSON extraction from any provider
-//! - [`tool_simulation`] — XML-based text tool calling for CLI runners without native function calling
-//! - [`mcp_tool_bridge`] — MCP tool definitions to text-tool-simulation bridge
-//! - [`capability_guard`] — Request/provider capability validation
-//! - [`guardrail`] — Pluggable pre/post request validation middleware
-//! - [`cache`] — Response caching with TTL and capacity limits
-//!
-//! ### Runner Infrastructure
-//!
-//! - [`auth`] — Readiness and authentication checking
-//! - [`discovery`] — Automatic binary detection on the host
-//! - [`process`] — Subprocess spawning with timeout and output limits
-//! - [`sandbox`] — Environment variable whitelisting and working directory control
-//! - [`prompt`] — Prompt building from `ChatMessage` slices
-//! - [`compat`] — Version compatibility and capability detection
-//! - [`container`] — Container-based execution backend
-//!
-//! ### CLI Runners
-//!
-//! - [`claude_code`] — Claude Code CLI runner
-//! - [`copilot`] — GitHub Copilot CLI runner
-//! - [`cursor_agent`] — Cursor Agent CLI runner
-//! - [`opencode`] — `OpenCode` CLI runner
-//! - [`gemini_cli`] — Gemini CLI runner
-//! - [`codex_cli`] — Codex CLI runner
-//! - [`goose_cli`] — Goose CLI runner
-//! - [`cline_cli`] — Cline CLI runner
-//! - [`continue_cli`] — Continue CLI runner
-//! - [`warp_cli`] — Warp terminal `oz` CLI runner
-//! - [`kiro_cli`] — Kiro CLI runner
-//! - [`kilo_cli`] — Kilo Code CLI runner
-//!
-//! ### Feature-Flagged Runners
-//!
-//! - `openai_api` — OpenAI-compatible HTTP API client (requires `openai-api` feature)
-//! - `copilot_headless` — GitHub Copilot Headless ACP runner (requires `copilot-headless` feature)
+//! With the `agui` feature enabled, the [`agui`] module exposes the
+//! [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) event vocabulary
+//! plus an emitter trait so downstream runners, agent loops, and pipelines
+//! can report run/step/tool/text progress to user-facing clients without
+//! coupling to a specific transport.
 
 /// Core types: traits, messages, requests, responses, and errors
 pub mod types;
 
 /// Configurable agent loop with multi-turn tool calling
 pub mod agent;
+/// AG-UI protocol event schema (feature-gated).
+///
+/// Canonical event types, filter configuration, and emitter trait for
+/// streaming agent progress to user-facing clients. See module docs.
+#[cfg(feature = "agui")]
+pub mod agui;
 /// Auth readiness checking for CLI runners
 pub mod auth;
 /// Response caching decorator
@@ -291,6 +177,10 @@ pub use tool_simulation::{
     inject_tool_catalog, parse_tool_call_blocks, strip_tool_call_blocks, FunctionCall,
     FunctionDeclaration, FunctionResponse, TextToolHandler, TextToolResponse,
 };
+
+// AG-UI re-exports (behind feature flag)
+#[cfg(feature = "agui")]
+pub use agui::{AgUiEmitter, AgUiEvent, AgUiEventFilter, AgUiEventKind, NoopEmitter};
 
 // Config file re-exports (behind feature flag)
 #[cfg(feature = "config-file")]
