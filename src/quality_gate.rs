@@ -197,6 +197,7 @@ impl LlmProvider for QualityGateProvider {
                         top_p: request.top_p,
                         stop: request.stop.clone(),
                         response_format: request.response_format.clone(),
+                        turn_id: request.turn_id,
                     };
 
                     last_response = self.inner.complete(&retry_request).await?;

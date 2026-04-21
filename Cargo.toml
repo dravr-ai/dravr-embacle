@@ -115,6 +115,7 @@ tempfile = "3"
 tokio = { version = "1.45", features = ["process", "io-util", "time", "rt", "rt-multi-thread", "macros", "fs"] }
 tokio-stream = { version = "0.1", features = ["io-util"] }
 tracing = "0.1"
+uuid = { version = "1.22", features = ["v4", "serde"] }
 which = "7"
 
 # Optional: ACP schema types for Copilot Headless (copilot --acp)

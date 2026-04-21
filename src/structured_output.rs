@@ -95,6 +95,7 @@ pub async fn request_structured_output(
             top_p: structured_request.request.top_p,
             stop: structured_request.request.stop.clone(),
             response_format: structured_request.request.response_format.clone(),
+            turn_id: structured_request.request.turn_id,
         };
 
         let response = provider.complete(&request).await?;

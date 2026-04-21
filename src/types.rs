@@ -18,6 +18,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_stream::Stream;
 
+use crate::turn::ConversationTurnId;
+
 // ============================================================================
 // Error Type
 // ============================================================================
@@ -513,6 +515,14 @@ pub struct ChatRequest {
     /// Control over the response format (text, JSON, or schema-validated JSON)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
+    /// Conversation-turn correlation identifier.
+    ///
+    /// When present, decorators such as [`MetricsProvider`](crate::metrics::MetricsProvider)
+    /// can emit per-turn records in addition to their usual aggregation. The
+    /// identifier must be propagated from the inbound boundary; LLM providers
+    /// never generate it themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<ConversationTurnId>,
 }
 
 impl ChatRequest {
@@ -530,6 +540,7 @@ impl ChatRequest {
             top_p: None,
             stop: None,
             response_format: None,
+            turn_id: None,
         }
     }
 
@@ -593,6 +604,17 @@ impl ChatRequest {
     #[must_use]
     pub fn with_response_format(mut self, response_format: ResponseFormat) -> Self {
         self.response_format = Some(response_format);
+        self
+    }
+
+    /// Attach a conversation-turn correlation identifier.
+    ///
+    /// The identifier is expected to have been generated at the inbound
+    /// boundary. Calling this method on a downstream request propagates the
+    /// same identifier — it must not be freshly generated here.
+    #[must_use]
+    pub const fn with_turn_id(mut self, turn_id: ConversationTurnId) -> Self {
+        self.turn_id = Some(turn_id);
         self
     }
 

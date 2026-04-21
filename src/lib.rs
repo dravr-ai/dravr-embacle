@@ -102,6 +102,8 @@ pub mod stream;
 pub mod structured_output;
 /// Text-based tool simulation for CLI runners without native function calling
 pub mod tool_simulation;
+/// Conversation-turn correlation identifier threaded through a user utterance
+pub mod turn;
 /// Warp terminal `oz` CLI runner
 pub mod warp_cli;
 
@@ -159,7 +161,8 @@ pub use kilo_cli::KiloCliRunner;
 pub use kiro_cli::KiroCliRunner;
 pub use mcp_tool_bridge::{McpToolDefinition, McpToolExecutor};
 pub use metrics::{
-    default_pricing_table, MetricsProvider, MetricsReport, PricingTable, TokenPricing,
+    default_pricing_table, MetricsProvider, MetricsReport, PerCallMetric, PerCallMetricsSink,
+    PricingTable, TokenPricing,
 };
 pub use opencode::OpenCodeRunner;
 pub use quality_gate::{QualityGateProvider, QualityPolicy};
@@ -170,6 +173,9 @@ pub use warp_cli::WarpCliRunner;
 
 // Core tool calling type re-exports
 pub use types::{ImagePart, ResponseFormat, ToolCallRequest, ToolChoice, ToolDefinition};
+
+// Conversation-turn correlation re-export
+pub use turn::ConversationTurnId;
 
 // Tool simulation re-exports
 pub use tool_simulation::{

@@ -102,6 +102,7 @@ async fn main() {
         top_p: None,
         stop: None,
         response_format: None,
+        turn_id: None,
     };
 
     match runner.complete(&request).await {
@@ -135,6 +136,7 @@ async fn main() {
         top_p: None,
         stop: None,
         response_format: None,
+        turn_id: None,
     };
 
     match runner.complete_stream(&stream_request).await {

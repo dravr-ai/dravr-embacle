@@ -25,10 +25,8 @@
 //! tokens are estimated at ~4 characters per token.
 
 use std::collections::HashMap;
-#[cfg(feature = "otel")]
-use std::slice;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "otel")]
 use opentelemetry::global;
@@ -38,6 +36,7 @@ use opentelemetry::metrics::{Counter, Histogram};
 use async_trait::async_trait;
 use tracing::info;
 
+use crate::turn::ConversationTurnId;
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
 };
@@ -127,6 +126,53 @@ struct MetricsState {
     total_cost: f64,
 }
 
+/// Record describing one `complete()` call attributed to a conversation turn.
+///
+/// Emitted by [`MetricsProvider`] via a user-supplied [`PerCallMetricsSink`]
+/// whenever the incoming [`ChatRequest`](crate::types::ChatRequest) carries a
+/// [`ConversationTurnId`]. The aggregate [`MetricsReport`] path is unaffected.
+#[derive(Debug, Clone)]
+pub struct PerCallMetric {
+    /// Conversation turn the call belongs to
+    pub turn_id: ConversationTurnId,
+    /// Name of the underlying provider (e.g. `claude_code`, `openai_api`)
+    pub provider: String,
+    /// Model identifier reported by the provider response
+    pub model: String,
+    /// Measured wall-clock latency for this call
+    pub latency_ms: u64,
+    /// Cost in USD computed from the configured pricing table (0.0 if none)
+    pub cost_usd: f64,
+    /// Prompt tokens reported by the provider, or estimated when absent
+    pub prompt_tokens: u64,
+    /// Completion tokens reported by the provider, or estimated when absent
+    pub completion_tokens: u64,
+    /// Whether the call succeeded (false means the provider returned an error)
+    pub success: bool,
+    /// Wall-clock time the call completed, as milliseconds since UNIX epoch
+    pub timestamp_ms: u64,
+}
+
+/// Sink that receives per-call metrics emitted by [`MetricsProvider`].
+///
+/// Implementations are expected to enqueue or persist the metric without
+/// blocking. The sink is invoked synchronously from within `complete()`, so
+/// expensive work (for example, a database write) should be dispatched to a
+/// background task.
+pub trait PerCallMetricsSink: Send + Sync {
+    /// Record a single per-call metric.
+    fn record(&self, metric: PerCallMetric);
+}
+
+impl<F> PerCallMetricsSink for F
+where
+    F: Fn(PerCallMetric) + Send + Sync,
+{
+    fn record(&self, metric: PerCallMetric) {
+        self(metric);
+    }
+}
+
 /// Snapshot of accumulated metrics for a provider
 #[derive(Debug, Clone)]
 pub struct MetricsReport {
@@ -212,6 +258,7 @@ pub struct MetricsProvider {
     inner: Box<dyn LlmProvider>,
     state: Arc<Mutex<MetricsState>>,
     pricing: Option<PricingTable>,
+    per_call_sink: Option<Arc<dyn PerCallMetricsSink>>,
     #[cfg(feature = "otel")]
     otel: OtelInstruments,
 }
@@ -223,6 +270,7 @@ impl MetricsProvider {
             inner,
             state: Arc::new(Mutex::new(MetricsState::default())),
             pricing: None,
+            per_call_sink: None,
             #[cfg(feature = "otel")]
             otel: OtelInstruments::new(),
         }
@@ -237,6 +285,17 @@ impl MetricsProvider {
     /// Attach the built-in pricing table for known models
     pub fn with_default_pricing(self) -> Self {
         self.with_pricing(default_pricing_table())
+    }
+
+    /// Attach a per-call metrics sink.
+    ///
+    /// When set, every `complete()` invocation whose request carries a
+    /// [`ConversationTurnId`] produces a [`PerCallMetric`] record that is
+    /// handed to `sink`. Requests without a turn identifier are recorded
+    /// only in the aggregate state.
+    pub fn with_per_call_sink(mut self, sink: Arc<dyn PerCallMetricsSink>) -> Self {
+        self.per_call_sink = Some(sink);
+        self
     }
 
     /// Return a snapshot of the current metrics
@@ -306,6 +365,15 @@ fn estimate_tokens(text: &str) -> u32 {
     len / CHARS_PER_TOKEN_ESTIMATE.max(1)
 }
 
+/// Wall-clock time as milliseconds since the UNIX epoch (saturates at zero on clock skew).
+fn unix_epoch_millis() -> u64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis()) as u64;
+    millis
+}
+
 #[async_trait]
 impl LlmProvider for MetricsProvider {
     fn name(&self) -> &'static str {
@@ -342,9 +410,15 @@ impl LlmProvider for MetricsProvider {
         state.total_latency_ms += elapsed_ms;
 
         #[cfg(feature = "otel")]
-        let provider_attr = opentelemetry::KeyValue::new("provider", self.inner.name());
+        let otel_attrs: Vec<opentelemetry::KeyValue> = {
+            let mut attrs = vec![opentelemetry::KeyValue::new("provider", self.inner.name())];
+            if let Some(turn_id) = request.turn_id {
+                attrs.push(opentelemetry::KeyValue::new("turn_id", turn_id.to_string()));
+            }
+            attrs
+        };
 
-        if let Ok(response) = &result {
+        let per_call = if let Ok(response) = &result {
             let usage = response.usage.as_ref();
             let prompt_tokens = u64::from(
                 usage.map_or_else(|| estimate_prompt_tokens(request), |u| u.prompt_tokens),
@@ -369,7 +443,7 @@ impl LlmProvider for MetricsProvider {
 
             #[cfg(feature = "otel")]
             {
-                let attrs = slice::from_ref(&provider_attr);
+                let attrs = otel_attrs.as_slice();
                 self.otel.requests_total.add(1, attrs);
                 #[allow(clippy::cast_precision_loss)]
                 self.otel
@@ -381,6 +455,18 @@ impl LlmProvider for MetricsProvider {
                     self.otel.cost_total.add(cost, attrs);
                 }
             }
+
+            request.turn_id.map(|turn_id| PerCallMetric {
+                turn_id,
+                provider: self.inner.name().to_owned(),
+                model: response.model.clone(),
+                latency_ms: elapsed_ms,
+                cost_usd: cost,
+                prompt_tokens,
+                completion_tokens,
+                success: true,
+                timestamp_ms: unix_epoch_millis(),
+            })
         } else {
             state.errors_count += 1;
             info!(
@@ -390,13 +476,28 @@ impl LlmProvider for MetricsProvider {
 
             #[cfg(feature = "otel")]
             {
-                self.otel
-                    .errors_total
-                    .add(1, slice::from_ref(&provider_attr));
+                self.otel.errors_total.add(1, otel_attrs.as_slice());
             }
-        }
+
+            request.turn_id.map(|turn_id| PerCallMetric {
+                turn_id,
+                provider: self.inner.name().to_owned(),
+                model: request.model.clone().unwrap_or_default(),
+                latency_ms: elapsed_ms,
+                cost_usd: 0.0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                success: false,
+                timestamp_ms: unix_epoch_millis(),
+            })
+        };
 
         drop(state);
+
+        if let (Some(metric), Some(sink)) = (per_call, self.per_call_sink.as_ref()) {
+            sink.record(metric);
+        }
+
         result
     }
 
@@ -782,5 +883,94 @@ mod tests {
 
         metered.reset().unwrap(); // Safe: test assertion
         assert!(metered.report().unwrap().total_cost == 0.0); // Safe: test assertion
+    }
+
+    // ========================================================================
+    // Per-call sink tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn per_call_sink_emits_when_turn_id_present() {
+        use crate::turn::ConversationTurnId;
+        let provider = TestProvider::new(vec![Ok(ChatResponse {
+            content: "hello".to_owned(),
+            model: "opus".to_owned(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        })]);
+        let captured: Arc<Mutex<Vec<PerCallMetric>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let metered = MetricsProvider::new(Box::new(provider))
+            .with_default_pricing()
+            .with_per_call_sink(Arc::new(move |m: PerCallMetric| {
+                sink.lock().expect("test lock").push(m); // Safe: test assertion
+            }));
+        let turn_id = ConversationTurnId::new();
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]).with_turn_id(turn_id);
+
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        let captured = captured.lock().expect("test lock"); // Safe: test assertion
+        assert_eq!(captured.len(), 1);
+        let metric = &captured[0];
+        assert_eq!(metric.turn_id, turn_id);
+        assert_eq!(metric.provider, "test");
+        assert_eq!(metric.model, "opus");
+        assert_eq!(metric.prompt_tokens, 10);
+        assert_eq!(metric.completion_tokens, 5);
+        assert!(metric.success);
+        assert!(metric.cost_usd > 0.0);
+    }
+
+    #[tokio::test]
+    async fn per_call_sink_silent_without_turn_id() {
+        let provider = TestProvider::new(vec![Ok(ChatResponse {
+            content: "hello".to_owned(),
+            model: "opus".to_owned(),
+            usage: None,
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        })]);
+        let captured: Arc<Mutex<Vec<PerCallMetric>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let metered = MetricsProvider::new(Box::new(provider)).with_per_call_sink(Arc::new(
+            move |m: PerCallMetric| {
+                sink.lock().expect("test lock").push(m); // Safe: test assertion
+            },
+        ));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        assert!(captured.lock().expect("test lock").is_empty()); // Safe: test assertion
+    }
+
+    #[tokio::test]
+    async fn per_call_sink_emits_on_error_with_turn_id() {
+        use crate::turn::ConversationTurnId;
+        let provider = TestProvider::new(vec![Err(RunnerError::external_service("test", "boom"))]);
+        let captured: Arc<Mutex<Vec<PerCallMetric>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let metered = MetricsProvider::new(Box::new(provider)).with_per_call_sink(Arc::new(
+            move |m: PerCallMetric| {
+                sink.lock().expect("test lock").push(m); // Safe: test assertion
+            },
+        ));
+        let turn_id = ConversationTurnId::new();
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]).with_turn_id(turn_id);
+
+        assert!(metered.complete(&request).await.is_err());
+
+        let captured = captured.lock().expect("test lock"); // Safe: test assertion
+        assert_eq!(captured.len(), 1);
+        assert!(!captured[0].success);
+        assert_eq!(captured[0].turn_id, turn_id);
     }
 }
