@@ -377,7 +377,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embacle"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1437,9 +1437,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
