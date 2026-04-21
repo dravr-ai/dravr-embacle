@@ -161,8 +161,7 @@ pub use kilo_cli::KiloCliRunner;
 pub use kiro_cli::KiroCliRunner;
 pub use mcp_tool_bridge::{McpToolDefinition, McpToolExecutor};
 pub use metrics::{
-    default_pricing_table, MetricsProvider, MetricsReport, PerCallMetric, PerCallMetricsSink,
-    PricingTable, TokenPricing,
+    default_pricing_table, MetricsProvider, MetricsReport, PricingTable, TokenPricing,
 };
 pub use opencode::OpenCodeRunner;
 pub use quality_gate::{QualityGateProvider, QualityPolicy};
