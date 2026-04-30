@@ -11,7 +11,7 @@ use crate::types::RunnerError;
 use tokio::io::AsyncReadExt;
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::time::timeout as tokio_timeout;
-use tracing::{debug, warn};
+use tracing::{info, trace, warn};
 
 /// Default maximum output size (10 MiB)
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -100,6 +100,22 @@ pub async fn run_cli_command(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
+    // Trace-level dump of the resolved program + argv so an operator with
+    // `RUST_LOG=embacle::process=trace` can see exactly which CLI runner
+    // got invoked and with which arguments. Stdin (the prompt body) does
+    // not pass through `Command` — runners that pipe prompt to stdin log
+    // it themselves; runners that pass it as an argv argument get it for
+    // free here.
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let program = cmd.as_std().get_program().to_string_lossy().to_string();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        trace!(program = %program, args = ?args, "Spawning CLI process");
+    }
+
     let start = Instant::now();
 
     let mut child = cmd
@@ -122,7 +138,32 @@ pub async fn run_cli_command(
             let stdout = stdout_task.await.unwrap_or_default();
             let stderr = stderr_task.await.unwrap_or_default();
 
-            debug!(exit_code, ?duration, "CLI command completed");
+            // Operator-facing summary: byte counts, exit code, duration. Sized
+            // metadata only — content goes to the trace event below so an
+            // info-level RUST_LOG never dumps user prompts or LLM responses.
+            info!(
+                exit_code,
+                stdout_len = stdout.len(),
+                stderr_len = stderr.len(),
+                latency_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                "CLI command completed"
+            );
+
+            // Full stdout/stderr at trace level so an operator running
+            // `RUST_LOG=embacle::process=trace` can follow what each CLI
+            // runner emitted without per-runner instrumentation.
+            if tracing::enabled!(tracing::Level::TRACE) {
+                trace!(
+                    stdout = %String::from_utf8_lossy(&stdout),
+                    "CLI command stdout"
+                );
+                if !stderr.is_empty() {
+                    trace!(
+                        stderr = %String::from_utf8_lossy(&stderr),
+                        "CLI command stderr"
+                    );
+                }
+            }
 
             Ok(CliOutput {
                 stdout,

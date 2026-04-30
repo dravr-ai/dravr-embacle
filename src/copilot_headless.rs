@@ -17,7 +17,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
 use crate::copilot_models::catalog_ids;
@@ -975,9 +975,11 @@ impl LlmProvider for CopilotHeadlessRunner {
         &self.available_models
     }
 
+    #[instrument(skip_all, fields(runner = "copilot_headless", model = tracing::field::Empty))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
+        tracing::Span::current().record("model", tracing::field::display(&model));
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
@@ -989,7 +991,18 @@ impl LlmProvider for CopilotHeadlessRunner {
         )
         .await?;
 
-        info!(session_id = %session_id, "ACP complete: sending prompt");
+        info!(
+            session_id = %session_id,
+            message_count = request.messages.len(),
+            prompt_blocks = prompt_blocks.len(),
+            "ACP complete: sending prompt"
+        );
+        if tracing::enabled!(tracing::Level::TRACE) {
+            match serde_json::to_string(&prompt_blocks) {
+                Ok(blocks_json) => trace!(prompt_blocks = %blocks_json, "ACP prompt blocks"),
+                Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
+            }
+        }
         let prompt_id = transport
             .send_request(
                 "session/prompt",
@@ -997,6 +1010,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             )
             .await?;
 
+        let started = std::time::Instant::now();
         let result = time::timeout(
             acp_prompt_timeout(),
             collect_complete(
@@ -1015,14 +1029,27 @@ impl LlmProvider for CopilotHeadlessRunner {
 
         let _ = child.kill().await;
 
-        result
+        let response = result
             .map_err(|_| {
                 RunnerError::timeout(format!(
                     "copilot-acp: prompt timed out after {}s",
                     acp_prompt_timeout().as_secs()
                 ))
             })?
-            .map(|(response, _tool_calls)| response)
+            .map(|(response, _tool_calls)| response)?;
+
+        info!(
+            latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            content_len = response.content.len(),
+            tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
+            finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+            "ACP complete: response received"
+        );
+        if tracing::enabled!(tracing::Level::TRACE) {
+            trace!(content = %response.content, "ACP response body");
+        }
+
+        Ok(response)
     }
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
