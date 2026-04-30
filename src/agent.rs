@@ -176,6 +176,12 @@ impl<'a> AgentExecutor<'a> {
             }
 
             let request = ChatRequest::new(messages.clone());
+            tracing::info!(
+                turn,
+                provider = self.provider.name(),
+                message_count = request.messages.len(),
+                "agent: dispatching turn to provider"
+            );
             let response = self.provider.complete(&request).await?;
 
             // Accumulate token usage
@@ -184,6 +190,14 @@ impl<'a> AgentExecutor<'a> {
                 total_usage.completion_tokens += usage.completion_tokens;
                 total_usage.total_tokens += usage.total_tokens;
             }
+
+            tracing::info!(
+                turn,
+                content_len = response.content.len(),
+                tool_calls_inline = response.tool_calls.as_ref().map_or(0, Vec::len),
+                finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                "agent: provider response received"
+            );
 
             // Parse tool calls from the response
             let parsed_calls = parse_tool_call_blocks(&response.content);
