@@ -7,7 +7,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema as schema;
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, field, info, instrument, trace, warn, Span};
 
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
 use crate::copilot_models::catalog_ids;
@@ -975,11 +975,11 @@ impl LlmProvider for CopilotHeadlessRunner {
         &self.available_models
     }
 
-    #[instrument(skip_all, fields(runner = "copilot_headless", model = tracing::field::Empty))]
+    #[instrument(skip_all, fields(runner = "copilot_headless", model = field::Empty))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
-        tracing::Span::current().record("model", tracing::field::display(&model));
+        Span::current().record("model", field::display(&model));
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
@@ -1010,7 +1010,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             )
             .await?;
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let result = time::timeout(
             acp_prompt_timeout(),
             collect_complete(
