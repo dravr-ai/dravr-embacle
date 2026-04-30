@@ -29,7 +29,7 @@
 //! ```
 
 use std::env;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider,
@@ -435,11 +435,25 @@ impl OpenAiApiRunner {
     ) -> Result<reqwest::Response, RunnerError> {
         let url = format!("{}{CHAT_COMPLETIONS_PATH}", self.config.base_url);
 
+        // Pre-flight diagnostics keyed by model and message count so an operator
+        // grepping a turn id (recorded by the caller's span) can see the
+        // outbound HTTP shape without dumping the prompt body. Full body lives
+        // behind `RUST_LOG=embacle::openai_api=trace` in `complete`.
+        debug!(
+            url = %url,
+            model = %api_request.model,
+            message_count = api_request.messages.len(),
+            stream = api_request.stream,
+            tools = api_request.tools.as_ref().map_or(0, Vec::len),
+            "openai_api request prepared"
+        );
+
         let mut req = self.client.post(&url).json(api_request);
         if let Some(ref key) = self.config.api_key {
             req = req.bearer_auth(key);
         }
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|e| {
             if e.is_timeout() {
                 RunnerError::timeout(format!("Request timed out: {e}"))
@@ -451,12 +465,27 @@ impl OpenAiApiRunner {
         })?;
 
         let status = response.status();
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
         if status.is_success() {
+            info!(
+                model = %api_request.model,
+                status = status.as_u16(),
+                latency_ms,
+                "openai_api response received"
+            );
             return Ok(response);
         }
 
         // Attempt to parse the error body for a better message
         let body = response.text().await.unwrap_or_default();
+        warn!(
+            model = %api_request.model,
+            status = status.as_u16(),
+            latency_ms,
+            body_len = body.len(),
+            "openai_api non-success response"
+        );
         Err(map_http_error(status, &body))
     }
 }
@@ -495,18 +524,41 @@ impl LlmProvider for OpenAiApiRunner {
         &self.models
     }
 
-    #[instrument(skip(self, request), fields(model))]
+    #[instrument(skip(self, request), fields(model = %request.model.as_deref().unwrap_or(self.config.model.as_str())))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let api_request = self.build_api_request(request, false);
+
+        // Trace-level dump of the exact request body. Gated by tracing level
+        // so prod stays silent; bump to `RUST_LOG=embacle::openai_api=trace`
+        // to see the full prompt going to the provider.
+        if tracing::enabled!(tracing::Level::TRACE) {
+            match serde_json::to_string(&api_request) {
+                Ok(body) => trace!(body_len = body.len(), body = %body, "openai_api request body"),
+                Err(e) => trace!(error = %e, "openai_api request body serialization failed"),
+            }
+        }
+
         let response = self.send_request(&api_request).await?;
 
         let body = response.text().await.map_err(|e| {
             RunnerError::external_service("openai_api", format!("Failed to read response: {e}"))
         })?;
 
+        trace!(body_len = body.len(), body = %body, "openai_api response body");
+
         let api_response: ApiResponse = serde_json::from_str(&body).map_err(|e| {
             RunnerError::external_service("openai_api", format!("Invalid response JSON: {e}"))
         })?;
+
+        if let Some(ref usage) = api_response.usage {
+            info!(
+                model = %api_response.model,
+                prompt_tokens = usage.prompt,
+                completion_tokens = usage.completion,
+                total_tokens = usage.total,
+                "openai_api usage"
+            );
+        }
 
         let choice =
             api_response.choices.into_iter().next().ok_or_else(|| {
@@ -540,7 +592,7 @@ impl LlmProvider for OpenAiApiRunner {
         })
     }
 
-    #[instrument(skip(self, request), fields(model))]
+    #[instrument(skip(self, request), fields(model = %request.model.as_deref().unwrap_or(self.config.model.as_str())))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let api_request = self.build_api_request(request, true);
         let response = self.send_request(&api_request).await?;
