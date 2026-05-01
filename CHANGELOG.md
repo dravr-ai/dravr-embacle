@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.5] — 2026-05-01
+
+### Other
+
+- obs: payload logging across CLI runners, ACP path, and openai_api Process::run_cli_command emits info (lengths, latency) + trace (argv, full output) covering all 12 runners; copilot_headless::complete and openai_api gain matching pre/post call info+trace; agent::run logs each multi-turn iteration.
+
+
+
 ## [0.15.4] — 2026-04-23
 
 
