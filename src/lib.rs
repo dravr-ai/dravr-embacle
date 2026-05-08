@@ -200,7 +200,10 @@ pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
 
 // Copilot Headless re-exports (behind feature flag)
 #[cfg(feature = "copilot-headless")]
-pub use copilot_headless::{CopilotHeadlessRunner, HeadlessToolResponse, ObservedToolCall};
+pub use copilot_headless::{
+    CopilotHeadlessRunner, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
+    ObservedToolCall,
+};
 #[cfg(feature = "copilot-headless")]
 pub use copilot_headless_config::{
     CopilotHeadlessConfig, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS,

@@ -6,8 +6,11 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+
+use tokio_stream::Stream;
 
 use agent_client_protocol_schema as schema;
 use async_trait::async_trait;
@@ -393,6 +396,27 @@ impl TurnAccumulator {
 
 /// Process a session/update notification, accumulating content and tool calls.
 fn process_notification(params: &Value, acc: &mut TurnAccumulator) {
+    process_notification_inner(params, acc, None);
+}
+
+/// Process a session/update notification with optional streaming sink.
+///
+/// When `event_tx` is `Some`, every observed text delta and tool-call
+/// observation is also forwarded to the channel as a [`HeadlessStreamEvent`].
+/// When `None`, behaves identically to [`process_notification`].
+fn process_notification_streaming(
+    params: &Value,
+    acc: &mut TurnAccumulator,
+    event_tx: &mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>,
+) {
+    process_notification_inner(params, acc, Some(event_tx));
+}
+
+fn process_notification_inner(
+    params: &Value,
+    acc: &mut TurnAccumulator,
+    event_tx: Option<&mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>>,
+) {
     let Some(params) = params.get("params").or(Some(params)) else {
         return;
     };
@@ -405,14 +429,21 @@ fn process_notification(params: &Value, acc: &mut TurnAccumulator) {
         schema::SessionUpdate::AgentMessageChunk(chunk) => {
             if let schema::ContentBlock::Text(text) = &chunk.content {
                 acc.content.push_str(&text.text);
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(Ok(HeadlessStreamEvent::TextDelta(text.text.clone())));
+                }
             }
         }
         schema::SessionUpdate::ToolCall(tc) => {
-            acc.tool_calls.push(ObservedToolCall {
+            let observed = ObservedToolCall {
                 id: tc.tool_call_id.0.to_string(),
                 title: tc.title.clone(),
                 status: format!("{:?}", tc.status),
-            });
+            };
+            acc.tool_calls.push(observed.clone());
+            if let Some(tx) = event_tx {
+                let _ = tx.send(Ok(HeadlessStreamEvent::ToolCall(observed)));
+            }
         }
         schema::SessionUpdate::ToolCallUpdate(update) => {
             let update_id = update.tool_call_id.0.to_string();
@@ -422,6 +453,9 @@ fn process_notification(params: &Value, acc: &mut TurnAccumulator) {
                 }
                 if let Some(ref status) = update.fields.status {
                     existing.status = format!("{status:?}");
+                }
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(Ok(HeadlessStreamEvent::ToolCall(existing.clone())));
                 }
             }
         }
@@ -668,6 +702,83 @@ async fn handle_server_message(
     Ok(())
 }
 
+/// Streaming variant of [`handle_server_message`].
+///
+/// Identical to the non-streaming form except that every observed
+/// content/tool-call notification is also forwarded to `event_tx` as a
+/// [`HeadlessStreamEvent`]. Permission-request handling is unchanged.
+async fn handle_server_message_streaming(
+    msg: &Value,
+    transport: &mut AcpTransport,
+    acc: &mut TurnAccumulator,
+    policy: PermissionPolicy,
+    event_tx: &mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>,
+) -> Result<(), RunnerError> {
+    if let Some(method) = msg.get("method").and_then(Value::as_str) {
+        match method {
+            "session/update" => {
+                if let Some(params) = msg.get("params") {
+                    process_notification_streaming(params, acc, event_tx);
+                }
+            }
+            "session/request_permission" => {
+                if let (Some(id), Some(params)) = (msg.get("id"), msg.get("params")) {
+                    let response = build_permission_response(params, policy);
+                    transport.send_response(id, response).await?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read messages until prompt completes, emitting [`HeadlessStreamEvent`]s
+/// as ACP notifications arrive while accumulating the same final state
+/// that [`collect_complete`] produces.
+///
+/// On success returns the aggregated [`HeadlessToolResponse`] so the
+/// caller can emit a final [`HeadlessStreamEvent::Done`] event.
+async fn collect_streaming_with_tools(
+    transport: &mut AcpTransport,
+    prompt_id: i64,
+    model: String,
+    policy: PermissionPolicy,
+    event_tx: &mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>,
+) -> Result<HeadlessToolResponse, RunnerError> {
+    let mut acc = TurnAccumulator::new();
+
+    loop {
+        let msg = transport.read_message().await?;
+
+        // Prompt response — the turn is complete
+        if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
+            if let Some(error) = msg.get("error") {
+                return Err(RunnerError::external_service(
+                    "copilot-acp",
+                    format!("Prompt failed: {error}"),
+                ));
+            }
+
+            let stop_reason = msg
+                .pointer("/result/stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("end_turn");
+            let usage = extract_usage(&msg);
+
+            return Ok(HeadlessToolResponse {
+                content: acc.content,
+                model,
+                tool_calls: acc.tool_calls,
+                usage,
+                finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
+            });
+        }
+
+        handle_server_message_streaming(&msg, transport, &mut acc, policy, event_tx).await?;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -697,6 +808,34 @@ pub struct HeadlessToolResponse {
     /// Finish reason.
     pub finish_reason: Option<String>,
 }
+
+/// Event emitted by [`CopilotHeadlessRunner::converse_stream`] as the ACP
+/// turn progresses.
+///
+/// Unlike [`StreamChunk`] (which only carries text deltas), this enum
+/// surfaces tool-call observations alongside text — keeping the rich
+/// metadata that [`CopilotHeadlessRunner::converse`] returns at the end
+/// of the turn while delivering it incrementally.
+#[derive(Debug, Clone)]
+pub enum HeadlessStreamEvent {
+    /// Partial assistant text — the next chunk to append to the
+    /// in-flight assistant message.
+    TextDelta(String),
+    /// A tool call was observed (start or status update). Each event
+    /// is a snapshot of the tool call's latest known state, so a
+    /// consumer can either accumulate updates or replace by id.
+    ToolCall(ObservedToolCall),
+    /// The turn has finished. Carries the aggregated
+    /// [`HeadlessToolResponse`] — same shape that
+    /// [`CopilotHeadlessRunner::converse`] would have returned.
+    /// Always emitted as the last event before the stream closes
+    /// successfully.
+    Done(HeadlessToolResponse),
+}
+
+/// Stream of [`HeadlessStreamEvent`]s for a single converse turn.
+pub type HeadlessEventStream =
+    Pin<Box<dyn Stream<Item = Result<HeadlessStreamEvent, RunnerError>> + Send>>;
 
 // ---------------------------------------------------------------------------
 // Public runner
@@ -946,6 +1085,119 @@ impl CopilotHeadlessRunner {
             usage: response.usage,
             finish_reason: response.finish_reason,
         })
+    }
+
+    /// Streaming variant of [`converse()`](Self::converse).
+    ///
+    /// Returns a [`HeadlessEventStream`] that yields [`HeadlessStreamEvent`]s
+    /// as the ACP turn progresses:
+    ///
+    /// - [`HeadlessStreamEvent::TextDelta`] — partial assistant text as
+    ///   `AgentMessageChunk` notifications arrive.
+    /// - [`HeadlessStreamEvent::ToolCall`] — every observed tool call (and
+    ///   subsequent status updates), letting the consumer surface "calling
+    ///   tool X..." progress to end users while the turn is still running.
+    /// - [`HeadlessStreamEvent::Done`] — the final aggregated response,
+    ///   identical in shape to what [`converse()`](Self::converse) would
+    ///   return. Always emitted last on success.
+    ///
+    /// The underlying ACP session runs in a background tokio task that
+    /// owns the spawned `copilot --acp` child process; it is killed when
+    /// the turn completes (success, error, or timeout). Dropping the
+    /// returned stream early does **not** abort the in-flight turn — the
+    /// task will still drain the session and the child will be cleaned up
+    /// when the turn finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a setup-time error before any events are emitted if the
+    /// CLI cannot be located or the ACP handshake fails. After the stream
+    /// starts, transport / protocol failures arrive as `Err` items in the
+    /// stream itself, and the configured prompt timeout
+    /// (`EMBACLE_ACP_PROMPT_TIMEOUT_SECS`, default 5 min) becomes a
+    /// terminal `RunnerError::Timeout` event.
+    #[instrument(skip(self, request), fields(model = field::Empty))]
+    pub async fn converse_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<HeadlessEventStream, RunnerError> {
+        let cli_path = self.resolve_cli_path()?;
+        let model = self.resolve_model(request.model.as_deref());
+        Span::current().record("model", field::display(&model));
+        let system_prompt = Self::extract_system_prompt(request);
+        let prompt_blocks = self.build_prompt_blocks(request);
+
+        let (mut transport, mut child, session_id) = setup_session(
+            &cli_path,
+            self.config.github_token.as_deref(),
+            &model,
+            system_prompt,
+        )
+        .await?;
+
+        info!(session_id = %session_id, "ACP: sending streaming prompt");
+        let prompt_id = transport
+            .send_request(
+                "session/prompt",
+                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
+            )
+            .await?;
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let policy = self.config.permission_policy;
+        let timeout = acp_prompt_timeout();
+        let model_for_task = model.clone();
+
+        // Drive the ACP session and emit events on a background task so
+        // the caller can consume the stream incrementally. The task owns
+        // the transport and child, and kills the child when it finishes
+        // — matching the lifecycle of `converse()`.
+        tokio::spawn(async move {
+            let result = time::timeout(
+                timeout,
+                collect_streaming_with_tools(
+                    &mut transport,
+                    prompt_id,
+                    model_for_task,
+                    policy,
+                    &event_tx,
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(response)) => {
+                    info!(
+                        content_len = response.content.len(),
+                        tool_calls = response.tool_calls.len(),
+                        "ACP converse_stream completed successfully"
+                    );
+                    let _ = event_tx.send(Ok(HeadlessStreamEvent::Done(response)));
+                }
+                Ok(Err(e)) => {
+                    let stderr_output = collect_stderr(&mut child).await;
+                    warn!(error = %e, stderr = %stderr_output, "ACP converse_stream failed");
+                    let _ = event_tx.send(Err(e));
+                }
+                Err(_) => {
+                    let stderr_output = collect_stderr(&mut child).await;
+                    warn!(
+                        stderr = %stderr_output,
+                        timeout_secs = timeout.as_secs(),
+                        "ACP converse_stream timed out"
+                    );
+                    let _ = event_tx.send(Err(RunnerError::timeout(format!(
+                        "copilot-acp: prompt timed out after {}s",
+                        timeout.as_secs()
+                    ))));
+                }
+            }
+
+            let _ = child.kill().await;
+        });
+
+        let stream = UnboundedReceiverStream::new(event_rx);
+        Ok(Box::pin(stream))
     }
 }
 
@@ -1632,5 +1884,112 @@ mod tests {
         let runner = test_runner(20);
         let result = runner.resolve_model(None);
         assert_eq!(result, runner.config.model);
+    }
+
+    /// Build a `session/update` notification of an `AgentMessageChunk`
+    /// carrying the given text. Mirrors the ACP wire format consumed by
+    /// `process_notification`.
+    fn make_text_chunk_notification(text: &str) -> Value {
+        json!({
+            "sessionId": "test-session",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": text
+                }
+            }
+        })
+    }
+
+    /// Build a `session/update` notification of a `ToolCall` with the
+    /// given id, title, and status.
+    fn make_tool_call_notification(id: &str, title: &str, status: &str) -> Value {
+        json!({
+            "sessionId": "test-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": id,
+                "title": title,
+                "status": status,
+                "kind": "other",
+                "content": []
+            }
+        })
+    }
+
+    #[test]
+    fn streaming_notification_forwards_text_delta_and_accumulates() {
+        let mut acc = TurnAccumulator::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_notification_streaming(&make_text_chunk_notification("Hello, "), &mut acc, &tx);
+        process_notification_streaming(&make_text_chunk_notification("world!"), &mut acc, &tx);
+
+        // Accumulator behaves like the non-streaming path
+        assert_eq!(acc.content, "Hello, world!");
+        assert_eq!(acc.tool_calls.len(), 0);
+
+        // Both chunks are emitted on the channel in order
+        match rx.try_recv() {
+            Ok(Ok(HeadlessStreamEvent::TextDelta(s))) => assert_eq!(s, "Hello, "),
+            other => panic!("expected first TextDelta, got {other:?}"),
+        }
+        match rx.try_recv() {
+            Ok(Ok(HeadlessStreamEvent::TextDelta(s))) => assert_eq!(s, "world!"),
+            other => panic!("expected second TextDelta, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "expected no more events");
+    }
+
+    #[test]
+    fn streaming_notification_forwards_tool_call() {
+        let mut acc = TurnAccumulator::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_notification_streaming(
+            &make_tool_call_notification("tc_1", "Reading file", "in_progress"),
+            &mut acc,
+            &tx,
+        );
+
+        assert_eq!(acc.tool_calls.len(), 1);
+        assert_eq!(acc.tool_calls[0].id, "tc_1");
+        assert_eq!(acc.tool_calls[0].title, "Reading file");
+
+        match rx.try_recv() {
+            Ok(Ok(HeadlessStreamEvent::ToolCall(tc))) => {
+                assert_eq!(tc.id, "tc_1");
+                assert_eq!(tc.title, "Reading file");
+            }
+            other => panic!("expected ToolCall event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_notification_no_channel_matches_streaming_state() {
+        // The non-streaming entry point must produce the *same* accumulator
+        // state as the streaming one — we just lose the per-event channel.
+        let mut acc_plain = TurnAccumulator::new();
+        process_notification(&make_text_chunk_notification("Hi"), &mut acc_plain);
+        process_notification(
+            &make_tool_call_notification("tc_a", "Tool", "completed"),
+            &mut acc_plain,
+        );
+
+        let mut acc_stream = TurnAccumulator::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_notification_streaming(&make_text_chunk_notification("Hi"), &mut acc_stream, &tx);
+        process_notification_streaming(
+            &make_tool_call_notification("tc_a", "Tool", "completed"),
+            &mut acc_stream,
+            &tx,
+        );
+
+        assert_eq!(acc_plain.content, acc_stream.content);
+        assert_eq!(acc_plain.tool_calls.len(), acc_stream.tool_calls.len());
+        assert_eq!(acc_plain.tool_calls[0].id, acc_stream.tool_calls[0].id);
+        assert_eq!(
+            acc_plain.tool_calls[0].title,
+            acc_stream.tool_calls[0].title
+        );
     }
 }
