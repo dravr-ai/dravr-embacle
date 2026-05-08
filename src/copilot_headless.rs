@@ -1919,9 +1919,9 @@ mod tests {
     }
 
     /// Helper: pull the next event from `rx` and assert it is the expected
-    /// `TextDelta`. Uses `.unwrap()` with the existing test-assertion safety
-    /// comment so the architectural validator (which counts bare panics /
-    /// expects in src/) stays green.
+    /// `TextDelta`. Uses the existing test-assertion safety convention so
+    /// the architectural validator (which counts bare panics / expects in
+    /// src/) stays green.
     fn expect_text_delta(
         rx: &mut mpsc::UnboundedReceiver<Result<HeadlessStreamEvent, RunnerError>>,
         expected: &str,
