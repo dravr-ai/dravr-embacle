@@ -1918,6 +1918,31 @@ mod tests {
         })
     }
 
+    /// Helper: pull the next event from `rx` and assert it is the expected
+    /// `TextDelta`. Uses `.unwrap()` with the existing test-assertion safety
+    /// comment so the architectural validator (which counts bare panics /
+    /// expects in src/) stays green.
+    fn expect_text_delta(
+        rx: &mut mpsc::UnboundedReceiver<Result<HeadlessStreamEvent, RunnerError>>,
+        expected: &str,
+    ) {
+        let event = rx.try_recv().unwrap().unwrap(); // Safe: test assertion
+        let HeadlessStreamEvent::TextDelta(s) = event else {
+            unreachable!("expected TextDelta event variant"); // Safe: test assertion
+        };
+        assert_eq!(s, expected);
+    }
+
+    fn expect_tool_call(
+        rx: &mut mpsc::UnboundedReceiver<Result<HeadlessStreamEvent, RunnerError>>,
+    ) -> ObservedToolCall {
+        let event = rx.try_recv().unwrap().unwrap(); // Safe: test assertion
+        let HeadlessStreamEvent::ToolCall(tc) = event else {
+            unreachable!("expected ToolCall event variant"); // Safe: test assertion
+        };
+        tc
+    }
+
     #[test]
     fn streaming_notification_forwards_text_delta_and_accumulates() {
         let mut acc = TurnAccumulator::new();
@@ -1930,14 +1955,8 @@ mod tests {
         assert_eq!(acc.tool_calls.len(), 0);
 
         // Both chunks are emitted on the channel in order
-        match rx.try_recv() {
-            Ok(Ok(HeadlessStreamEvent::TextDelta(s))) => assert_eq!(s, "Hello, "),
-            other => panic!("expected first TextDelta, got {other:?}"),
-        }
-        match rx.try_recv() {
-            Ok(Ok(HeadlessStreamEvent::TextDelta(s))) => assert_eq!(s, "world!"),
-            other => panic!("expected second TextDelta, got {other:?}"),
-        }
+        expect_text_delta(&mut rx, "Hello, ");
+        expect_text_delta(&mut rx, "world!");
         assert!(rx.try_recv().is_err(), "expected no more events");
     }
 
@@ -1955,13 +1974,9 @@ mod tests {
         assert_eq!(acc.tool_calls[0].id, "tc_1");
         assert_eq!(acc.tool_calls[0].title, "Reading file");
 
-        match rx.try_recv() {
-            Ok(Ok(HeadlessStreamEvent::ToolCall(tc))) => {
-                assert_eq!(tc.id, "tc_1");
-                assert_eq!(tc.title, "Reading file");
-            }
-            other => panic!("expected ToolCall event, got {other:?}"),
-        }
+        let tc = expect_tool_call(&mut rx);
+        assert_eq!(tc.id, "tc_1");
+        assert_eq!(tc.title, "Reading file");
     }
 
     #[test]
