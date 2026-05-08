@@ -1,18 +1,5 @@
 # Changelog
 
-## [0.15.6] — 2026-05-08
-
-### Added
-
-- `CopilotHeadlessRunner::converse_stream()` — streaming variant of
-  `converse()` that emits `HeadlessStreamEvent::TextDelta` /
-  `ToolCall` / `Done` as ACP `session/update` notifications arrive,
-  letting consumers render progressive UX while preserving the same
-  final aggregated `HeadlessToolResponse` the blocking call produces.
-- `HeadlessStreamEvent` enum and `HeadlessEventStream` type alias —
-  exported from the crate root behind the existing `copilot-headless`
-  feature flag.
-
 ## [0.15.5] — 2026-05-01
 
 ### Other
