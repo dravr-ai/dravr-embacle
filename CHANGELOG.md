@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.7] — 2026-05-13
+
+### Fixed
+
+- fix(cli): surface stdout when stderr is empty claude-code on exit=1 writes the error to stdout while emitting zero bytes to stderr. Prefer stderr, fall back to stdout, truncate at 500 chars.
+
+### Other
+
+- build(deps): bump softprops/action-gh-release to v3
+- build(deps): bump agent-client-protocol-schema to 0.12
+
+
+
 ## [0.15.6] — 2026-05-08
 
 
