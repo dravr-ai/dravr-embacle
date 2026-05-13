@@ -114,9 +114,14 @@ impl CliRunnerBase {
 
     /// Check CLI exit code and return an error if non-zero.
     ///
-    /// Logs output byte lengths (not content) and constructs a standard error message.
-    /// The first line of stderr is included in the error for diagnostics, with
-    /// the remainder omitted to avoid leaking prompt content or tool output.
+    /// Logs output byte lengths (not content) and constructs an error
+    /// message that surfaces the most diagnostic stream available.
+    /// Stderr is preferred (where well-behaved Unix programs report
+    /// errors), but some CLIs — notably `claude-code` exit-1 paths —
+    /// write the error to stdout instead, so a non-empty stdout is used
+    /// as a fallback rather than rendering the misleading `(no output)`
+    /// the earlier implementation produced. Up to 500 chars are
+    /// surfaced so multi-line diagnostics aren't truncated to one line.
     ///
     /// # Errors
     ///
@@ -136,15 +141,41 @@ impl CliRunnerBase {
             stderr_len = output.stderr.len(),
             "{runner_name} CLI failed"
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let first_line = stderr.lines().next().unwrap_or("(no output)");
+        let diagnostic = pick_diagnostic_stream(&output.stderr, &output.stdout);
         Err(RunnerError::external_service(
             runner_name,
             format!(
-                "{runner_name} exited with code {}: {first_line}",
+                "{runner_name} exited with code {}: {diagnostic}",
                 output.exit_code
             ),
         ))
+    }
+}
+
+/// Build a short, single-string diagnostic from the CLI's output streams.
+///
+/// Preference order: `stderr` (when non-empty after trim) → `stdout`
+/// (when non-empty after trim) → a literal `(no output on stderr or
+/// stdout)`. Truncated to 500 characters so multi-line errors carry
+/// across without being clipped to a useless first-line, while still
+/// avoiding multi-MB prompt-replay payloads in our error logs and
+/// downstream Slack messages.
+fn pick_diagnostic_stream(stderr: &[u8], stdout: &[u8]) -> String {
+    let stderr_str = String::from_utf8_lossy(stderr);
+    let stdout_str = String::from_utf8_lossy(stdout);
+    let chosen = if !stderr_str.trim().is_empty() {
+        stderr_str
+    } else if !stdout_str.trim().is_empty() {
+        stdout_str
+    } else {
+        return "(no output on stderr or stdout)".to_owned();
+    };
+    let trimmed = chosen.trim();
+    if trimmed.chars().count() <= 500 {
+        trimmed.to_owned()
+    } else {
+        let head: String = trimmed.chars().take(500).collect();
+        format!("{head}… (truncated)")
     }
 }
 
@@ -196,4 +227,49 @@ macro_rules! delegate_provider_base {
             Box::pin(async move { self.base.health_check($runner_name).await })
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_diagnostic_stream;
+
+    #[test]
+    fn prefers_stderr_when_both_present() {
+        let out = pick_diagnostic_stream(b"err line", b"out line");
+        assert_eq!(out, "err line");
+    }
+
+    #[test]
+    fn falls_back_to_stdout_when_stderr_empty() {
+        let out = pick_diagnostic_stream(b"", b"the actual error from claude-code");
+        assert_eq!(out, "the actual error from claude-code");
+    }
+
+    #[test]
+    fn falls_back_to_stdout_when_stderr_whitespace_only() {
+        let out = pick_diagnostic_stream(b"   \n  ", b"stdout has the answer");
+        assert_eq!(out, "stdout has the answer");
+    }
+
+    #[test]
+    fn renders_no_output_when_both_empty() {
+        let out = pick_diagnostic_stream(b"", b"");
+        assert_eq!(out, "(no output on stderr or stdout)");
+    }
+
+    #[test]
+    fn preserves_multiline_errors() {
+        let out = pick_diagnostic_stream(b"", b"line1\nline2\nline3");
+        assert!(out.contains("line1"));
+        assert!(out.contains("line2"));
+        assert!(out.contains("line3"));
+    }
+
+    #[test]
+    fn truncates_oversized_streams() {
+        let big: String = "a".repeat(1500);
+        let out = pick_diagnostic_stream(b"", big.as_bytes());
+        assert!(out.ends_with("… (truncated)"));
+        assert!(out.chars().count() < 600);
+    }
 }
