@@ -117,6 +117,14 @@ pub mod config_file;
 #[cfg(feature = "openai-api")]
 pub mod openai_api;
 
+// Tmux-driven persistent-session modules (behind feature flag)
+/// Persistent-session `LlmProvider` driving a TUI agent via tmux
+#[cfg(feature = "tmux-session")]
+pub mod tmux_runner;
+/// Driveable detached tmux session for long-lived interactive CLIs
+#[cfg(feature = "tmux-session")]
+pub mod tmux_session;
+
 // Copilot Headless modules (behind feature flag)
 /// Configuration for the Copilot Headless (ACP) provider
 #[cfg(feature = "copilot-headless")]
@@ -197,6 +205,12 @@ pub use config_file::{
 // OpenAI API re-exports (behind feature flag)
 #[cfg(feature = "openai-api")]
 pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
+
+// Tmux-session re-exports (behind feature flag)
+#[cfg(feature = "tmux-session")]
+pub use tmux_runner::{TmuxBackend, TmuxRunner, TmuxRunnerConfig};
+#[cfg(feature = "tmux-session")]
+pub use tmux_session::{strip_ansi, TmuxSession};
 
 // Copilot Headless re-exports (behind feature flag)
 #[cfg(feature = "copilot-headless")]

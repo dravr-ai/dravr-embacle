@@ -104,6 +104,9 @@ config-file = ["dep:toml", "dep:dirs"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 # Enable C FFI static library for Swift/C integration (implies copilot-headless)
 ffi = ["copilot-headless"]
+# Enable tmux-driven persistent-session runners for multi-turn interactive CLIs
+# (Claude Code, GitHub Copilot CLI). Requires the `tmux` binary on PATH at runtime.
+tmux-session = ["tokio/sync"]
 
 [dependencies]
 async-trait = "0.1"
