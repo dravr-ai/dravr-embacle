@@ -143,5 +143,10 @@ serde_json = "1.0"
 name = "test_claude_e2e"
 path = "examples/test_claude_e2e.rs"
 
+[[example]]
+name = "tmux_smoke"
+path = "examples/tmux_smoke.rs"
+required-features = ["tmux-session"]
+
 [lints]
 workspace = true
