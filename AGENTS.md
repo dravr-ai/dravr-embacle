@@ -1,5 +1,16 @@
 ## Git Workflow: NO Pull Requests
 
+## After Pushing — MANDATORY CI MONITORING
+
+The Agent MUST monitor CI on every push and not consider work complete until the relevant workflows reach a terminal success status. If CI fails, fix and re-push in the same session. The shared pre-push hook (`.build/hooks/pre-push`) prints this reminder on success.
+
+**Tool priority** (to preserve GitHub PAT rate-limit quota):
+1. **WebFetch** the branch's Actions page at `https://github.com/dravr-ai/dravr-embacle/actions?query=branch%3A<branch>` — no PAT quota cost
+2. `gh run list --branch <branch>` or single targeted `gh run view <id>` — costs one core slot each
+3. GitHub MCP tools (`mcp__github__*`) for non-read operations
+
+**Forbidden:** `gh run watch`, background polling loops, sub-60s polling cadence.
+
 **CRITICAL: NEVER create Pull Requests. All merges happen locally via squash merge.**
 
 - NEVER use `gh pr create` or any PR creation command
