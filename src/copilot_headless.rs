@@ -1,5 +1,5 @@
 // ABOUTME: CopilotHeadlessRunner wraps the copilot CLI via ACP (Agent Client Protocol) for LLM completions.
-// ABOUTME: Spawns copilot --acp per request and communicates via NDJSON-framed JSON-RPC over stdio.
+// ABOUTME: Keeps one copilot --acp subprocess alive across complete() calls so the GitHub→Copilot OAuth token exchange amortizes; per-call session/new is cheap on the warm transport.
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -8,6 +8,7 @@ use std::env;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio_stream::Stream;
@@ -17,7 +18,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, info, instrument, trace, warn, Span};
@@ -339,6 +340,147 @@ async fn setup_session(
                 acp_session_timeout().as_secs()
             )))
         }
+    }
+}
+
+/// A live `copilot --acp` subprocess that has completed the ACP `initialize`
+/// handshake and is ready to accept `session/new` calls without re-running
+/// the GitHub→Copilot OAuth token exchange.
+///
+/// Held inside [`CopilotHeadlessRunner::process`] so successful chat calls
+/// amortize the auth handshake across the subprocess lifetime. The transport
+/// is request/response by JSON-RPC id and cannot interleave concurrent
+/// prompts, so the parent always wraps this in a `tokio::sync::Mutex`.
+struct AcpProcess {
+    child: Child,
+    transport: AcpTransport,
+}
+
+impl AcpProcess {
+    /// Spawn the subprocess and complete the ACP `initialize` handshake.
+    /// On success the returned process is ready for [`Self::new_session`].
+    ///
+    /// On any handshake failure the subprocess is killed before the error
+    /// is returned so callers never leak a half-initialized child.
+    async fn spawn_and_initialize(
+        cli_path: &PathBuf,
+        github_token: Option<&str>,
+    ) -> Result<Self, RunnerError> {
+        let mut child = spawn_copilot(cli_path, github_token)?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RunnerError::internal("Failed to capture copilot stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| RunnerError::internal("Failed to capture copilot stdout"))?;
+        let mut transport = AcpTransport::new(stdin, stdout);
+
+        let init_outcome = time::timeout(acp_session_timeout(), async {
+            info!("ACP: sending initialize handshake");
+            let init_id = transport
+                .send_request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": 1,
+                        "clientInfo": {
+                            "name": "embacle",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "capabilities": {},
+                    }),
+                )
+                .await?;
+            let init_resp = transport.read_response(init_id).await?;
+            info!("ACP: initialize handshake complete");
+            debug!(response = %init_resp, "ACP initialize response");
+            Ok::<_, RunnerError>(())
+        })
+        .await;
+
+        match init_outcome {
+            Ok(Ok(())) => Ok(Self { child, transport }),
+            Ok(Err(e)) => {
+                let stderr_output = collect_stderr(&mut child).await;
+                warn!(error = %e, stderr = %stderr_output, "ACP initialize failed");
+                let _ = child.kill().await;
+                Err(e)
+            }
+            Err(_elapsed) => {
+                let stderr_output = collect_stderr(&mut child).await;
+                warn!(
+                    stderr = %stderr_output,
+                    timeout_secs = acp_session_timeout().as_secs(),
+                    "ACP initialize timed out — copilot process may be hung (auth issue?)"
+                );
+                let _ = child.kill().await;
+                Err(RunnerError::timeout(format!(
+                    "copilot-acp: initialize timed out after {}s (check copilot auth)",
+                    acp_session_timeout().as_secs()
+                )))
+            }
+        }
+    }
+
+    /// Create a fresh ACP session on the already-initialized subprocess.
+    ///
+    /// Cheap relative to [`Self::spawn_and_initialize`]: no new subprocess,
+    /// no new GitHub→Copilot token exchange — copilot reuses the in-process
+    /// token cache it built during `initialize`.
+    async fn new_session(
+        &mut self,
+        model: &str,
+        system_prompt: Option<&str>,
+    ) -> Result<String, RunnerError> {
+        let outcome = time::timeout(acp_session_timeout(), async {
+            let mut session_params = json!({
+                "model": model,
+                "cwd": env::current_dir()
+                    .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
+                "mcpServers": [],
+            });
+            if let Some(sys) = system_prompt {
+                session_params["systemPrompt"] = Value::String(sys.to_owned());
+            }
+            info!(
+                model = %model,
+                has_system_prompt = system_prompt.is_some(),
+                "ACP: creating session"
+            );
+            let req_id = self
+                .transport
+                .send_request("session/new", session_params)
+                .await?;
+            let resp = self.transport.read_response(req_id).await?;
+            let session_id = resp
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RunnerError::external_service("copilot-acp", "Missing sessionId in response")
+                })?
+                .to_owned();
+            info!(session_id = %session_id, model = %model, "ACP session created");
+            Ok::<_, RunnerError>(session_id)
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok(session_id)) => Ok(session_id),
+            Ok(Err(e)) => Err(e),
+            Err(_elapsed) => Err(RunnerError::timeout(format!(
+                "copilot-acp: session/new timed out after {}s",
+                acp_session_timeout().as_secs()
+            ))),
+        }
+    }
+
+    /// Returns true if the subprocess has not yet exited.
+    ///
+    /// Uses `try_wait` (non-blocking) so calling this on a healthy
+    /// subprocess returns immediately without changing its state.
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
@@ -854,6 +996,19 @@ pub type HeadlessEventStream =
 pub struct CopilotHeadlessRunner {
     config: CopilotHeadlessConfig,
     available_models: Vec<String>,
+    /// Long-lived `copilot --acp` subprocess + initialized transport.
+    ///
+    /// Lazily spawned on the first `complete()` call and kept warm across
+    /// calls so the GitHub→Copilot OAuth token exchange amortizes across
+    /// the subprocess lifetime instead of running per request. Cleared and
+    /// respawned on subprocess death or any complete()-path error so the
+    /// next call always starts from a known-good state.
+    ///
+    /// Wrapped in `tokio::sync::Mutex` because the NDJSON transport is
+    /// request/response per JSON-RPC id and cannot interleave concurrent
+    /// prompts without response routing — which the ACP wire format does
+    /// not support.
+    process: Arc<TokioMutex<Option<AcpProcess>>>,
 }
 
 impl CopilotHeadlessRunner {
@@ -867,6 +1022,7 @@ impl CopilotHeadlessRunner {
         Self {
             config: CopilotHeadlessConfig::from_env(),
             available_models: catalog_ids(),
+            process: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -876,6 +1032,7 @@ impl CopilotHeadlessRunner {
         Self {
             config,
             available_models: catalog_ids(),
+            process: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -1235,13 +1392,43 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, session_id) = setup_session(
-            &cli_path,
-            self.config.github_token.as_deref(),
-            &model,
-            system_prompt,
-        )
-        .await?;
+        // Hold the process lock for the full RPC round-trip. ACP transport
+        // is request/response by JSON-RPC id with no response-routing in
+        // the wire format, so concurrent prompts would interleave reads
+        // unsafely. The probe is every 5 minutes and chat traffic is
+        // sequential per chat turn, so contention is in practice low.
+        let mut guard = self.process.lock().await;
+
+        // Detect a subprocess that exited between calls (crash, OOM kill,
+        // upstream disconnect) and drop it so we respawn below.
+        if let Some(p) = guard.as_mut() {
+            if !p.is_alive() {
+                warn!("ACP subprocess exited between calls; respawning");
+                *guard = None;
+            }
+        }
+
+        let process = if let Some(existing) = guard.as_mut() {
+            existing
+        } else {
+            let fresh =
+                AcpProcess::spawn_and_initialize(&cli_path, self.config.github_token.as_deref())
+                    .await?;
+            guard.insert(fresh)
+        };
+
+        let session_id = match process.new_session(&model, system_prompt).await {
+            Ok(id) => id,
+            Err(e) => {
+                // session/new failed on a previously-healthy subprocess.
+                // Could be the cached Copilot OAuth token expired and the
+                // CLI didn't auto-refresh, or the process is wedged. Kill
+                // and clear so the next call respawns and re-authenticates.
+                let _ = process.child.kill().await;
+                *guard = None;
+                return Err(e);
+            }
+        };
 
         info!(
             session_id = %session_id,
@@ -1255,18 +1442,28 @@ impl LlmProvider for CopilotHeadlessRunner {
                 Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
             }
         }
-        let prompt_id = transport
+        let prompt_id = match process
+            .transport
             .send_request(
                 "session/prompt",
                 build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
             )
-            .await?;
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                // Writing to stdin failed — pipe is broken. Discard.
+                let _ = process.child.kill().await;
+                *guard = None;
+                return Err(e);
+            }
+        };
 
         let started = Instant::now();
         let result = time::timeout(
             acp_prompt_timeout(),
             collect_complete(
-                &mut transport,
+                &mut process.transport,
                 prompt_id,
                 model,
                 self.config.permission_policy,
@@ -1274,34 +1471,41 @@ impl LlmProvider for CopilotHeadlessRunner {
         )
         .await;
 
-        if result.is_err() {
-            let stderr_output = collect_stderr(&mut child).await;
-            warn!(stderr = %stderr_output, "ACP complete timed out");
-        }
-
-        let _ = child.kill().await;
-
-        let response = result
-            .map_err(|_| {
-                RunnerError::timeout(format!(
+        match result {
+            Ok(Ok((response, _tool_calls))) => {
+                info!(
+                    latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    content_len = response.content.len(),
+                    tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
+                    finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                    "ACP complete: response received"
+                );
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(content = %response.content, "ACP response body");
+                }
+                // SUCCESS path: leave the subprocess alive so the next call
+                // reuses it. This is the whole point of the pool.
+                Ok(response)
+            }
+            Ok(Err(e)) => {
+                // Prompt failed mid-stream. Transport may be desynced; the
+                // conservative choice is to kill and respawn rather than
+                // risk a corrupt session bleeding into the next call.
+                let _ = process.child.kill().await;
+                *guard = None;
+                Err(e)
+            }
+            Err(_elapsed) => {
+                let stderr_output = collect_stderr(&mut process.child).await;
+                warn!(stderr = %stderr_output, "ACP complete timed out");
+                let _ = process.child.kill().await;
+                *guard = None;
+                Err(RunnerError::timeout(format!(
                     "copilot-acp: prompt timed out after {}s",
                     acp_prompt_timeout().as_secs()
-                ))
-            })?
-            .map(|(response, _tool_calls)| response)?;
-
-        info!(
-            latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            content_len = response.content.len(),
-            tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
-            finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
-            "ACP complete: response received"
-        );
-        if tracing::enabled!(tracing::Level::TRACE) {
-            trace!(content = %response.content, "ACP response body");
+                )))
+            }
         }
-
-        Ok(response)
     }
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
@@ -1445,6 +1649,7 @@ mod tests {
                 ..CopilotHeadlessConfig::default()
             },
             available_models: vec![],
+            process: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -1457,6 +1662,7 @@ mod tests {
                 ..CopilotHeadlessConfig::default()
             },
             available_models: vec![],
+            process: Arc::new(TokioMutex::new(None)),
         }
     }
 
