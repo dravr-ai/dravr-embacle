@@ -1,1 +1,12 @@
-.build/cargo/clippy.toml
+# Dravr shared clippy configuration
+# Source: dravr-build-config/cargo/clippy.toml
+cognitive-complexity-threshold = 25
+
+# Banned methods (anyhow context methods — use structured error types)
+[[disallowed-methods]]
+path = "anyhow::Context::context"
+reason = "Use structured error types with .map_err() instead"
+
+[[disallowed-methods]]
+path = "anyhow::Context::with_context"
+reason = "Use structured error types with .map_err() instead"
