@@ -1,1 +1,2 @@
-.build/cargo/rustfmt.toml
+# Dravr shared rustfmt configuration
+edition = "2021"
