@@ -110,3 +110,22 @@ jobs:
         run: sudo apt-get install -y ripgrep
       - name: Run architectural validation
         run: .build/validation/validate.sh
+
+  # Rehearsal: catch anything that would break `cargo publish` at release
+  # time (git deps in a manifest, missing description, version mismatch
+  # between embacle / embacle-mcp / embacle-server, etc.) on every PR
+  # instead of finding out months later that crates.io has drifted.
+  # `--dry-run` builds the package tarball and runs the same verification
+  # crates.io does without uploading or needing a token.
+  publish-dry-run:
+    name: Publish Dry Run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish -p embacle --dry-run
+      - run: cargo publish -p embacle-mcp --dry-run
+      - run: cargo publish -p embacle-server --dry-run
