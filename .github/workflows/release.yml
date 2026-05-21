@@ -204,6 +204,7 @@ jobs:
         with:
           name: embacle-${{ matrix.target }}
           path: embacle-v*.*
+          retention-days: 7
 
   docker:
     name: Docker Image
