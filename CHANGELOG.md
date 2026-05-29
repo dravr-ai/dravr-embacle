@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.14] — 2026-05-29
+
+### Fixed
+
+- fix(tool-sim): strip echoed <tool_result> scaffolding from CLI replies
+
+
+
 ## [0.15.13] — 2026-05-19
 
 
