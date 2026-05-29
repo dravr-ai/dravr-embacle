@@ -389,6 +389,18 @@ pub fn strip_tool_call_blocks(content: &str) -> String {
 // Tool Result Formatting
 // ============================================================================
 
+/// Literal preamble [`format_tool_results_as_text`] prepends to the injected
+/// tool-result turn. Defined as a constant so [`strip_tool_result_echo`] can
+/// remove it verbatim — the formatter and the stripper MUST stay in lockstep,
+/// otherwise an echoed preamble leaks to the user.
+const TOOL_RESULTS_PREAMBLE: &str = "Here are the results from the tools you requested:";
+
+/// Literal trailing instruction [`format_tool_results_as_text`] appends to the
+/// injected tool-result turn. Stripped by [`strip_tool_result_echo`] for the
+/// same lockstep reason as [`TOOL_RESULTS_PREAMBLE`].
+const TOOL_RESULTS_FOOTER: &str =
+    "Please analyze the data above and respond to the user's question.";
+
 /// Format function responses as text for injection into follow-up messages.
 ///
 /// Uses `<tool_result>` blocks so the LLM can distinguish tool output from
@@ -412,7 +424,8 @@ pub fn strip_tool_call_blocks(content: &str) -> String {
 #[must_use]
 pub fn format_tool_results_as_text(responses: &[FunctionResponse]) -> String {
     let mut text = String::with_capacity(4096);
-    text.push_str("Here are the results from the tools you requested:\n\n");
+    text.push_str(TOOL_RESULTS_PREAMBLE);
+    text.push_str("\n\n");
 
     for resp in responses {
         let _ = writeln!(text, "<tool_result name=\"{}\">", resp.name);
@@ -422,8 +435,61 @@ pub fn format_tool_results_as_text(responses: &[FunctionResponse]) -> String {
         text.push_str("</tool_result>\n\n");
     }
 
-    text.push_str("Please analyze the data above and respond to the user's question.");
+    text.push_str(TOOL_RESULTS_FOOTER);
     text
+}
+
+/// Strip echoed tool-result scaffolding from a model's reply.
+///
+/// In CLI/simulation mode, tool outputs are fed back to the model as a
+/// synthetic user turn built by [`format_tool_results_as_text`] — a
+/// [`TOOL_RESULTS_PREAMBLE`] line, one or more `<tool_result>...</tool_result>`
+/// blocks, and a [`TOOL_RESULTS_FOOTER`] line. Weaker CLI models sometimes copy
+/// that injected turn verbatim into their own output, which leaks the raw tool
+/// JSON to the end user. This removes the `<tool_result>` blocks plus the
+/// preamble/footer literals so only the model's own prose survives.
+///
+/// An unclosed `<tool_result` tag drops the remainder of the text: a half-open
+/// result block is always a leaked JSON dump, never prose. (This is the inverse
+/// of [`strip_tool_call_blocks`], which keeps the remainder — an unclosed
+/// `<tool_call>` is a malformed invocation the model may have prefaced with
+/// real text, whereas an unclosed `<tool_result>` is pure scaffolding.)
+#[must_use]
+pub fn strip_tool_result_echo(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut search_from = 0;
+
+    while let Some(start) = content[search_from..].find("<tool_result") {
+        let abs_start = search_from + start;
+        result.push_str(&content[search_from..abs_start]);
+
+        let close_tag = "</tool_result>";
+        if let Some(end) = content[abs_start..].find(close_tag) {
+            search_from = abs_start + end + close_tag.len();
+        } else {
+            // Unclosed tag — drop the rest (it is a leaked JSON dump).
+            search_from = content.len();
+        }
+    }
+    result.push_str(&content[search_from..]);
+
+    result
+        .replace(TOOL_RESULTS_PREAMBLE, "")
+        .replace(TOOL_RESULTS_FOOTER, "")
+        .trim()
+        .to_owned()
+}
+
+/// Strip all simulation scaffolding from a model's user-facing reply: both
+/// `<tool_call>` blocks (via [`strip_tool_call_blocks`]) and echoed tool-result
+/// scaffolding (via [`strip_tool_result_echo`]).
+///
+/// Apply this at every point where CLI/simulation output becomes the
+/// user-visible answer, so neither the model's tool invocations nor any
+/// parroted-back tool output reaches the end user.
+#[must_use]
+pub fn strip_simulation_artifacts(content: &str) -> String {
+    strip_tool_result_echo(&strip_tool_call_blocks(content))
 }
 
 // ============================================================================
@@ -491,8 +557,10 @@ pub async fn execute_with_text_tools(
         let parsed_tool_calls = parse_tool_call_blocks(&response.content);
 
         if parsed_tool_calls.is_empty() {
-            // No tool calls — this is the final text response
-            let content = strip_tool_call_blocks(&response.content);
+            // No tool calls — this is the final text response. Strip both tool
+            // calls and any echoed tool-result scaffolding so neither reaches
+            // the user.
+            let content = strip_simulation_artifacts(&response.content);
             debug!(
                 iteration,
                 content_len = content.len(),
@@ -526,8 +594,9 @@ pub async fn execute_with_text_tools(
             tool_calls_count += parsed_tool_calls.len() as u32;
         }
 
-        // Add assistant message (with tool calls stripped)
-        let assistant_text = strip_tool_call_blocks(&response.content);
+        // Add assistant message (with tool calls and any echoed tool-result
+        // scaffolding stripped, so parroted output never accumulates).
+        let assistant_text = strip_simulation_artifacts(&response.content);
         if !assistant_text.is_empty() {
             messages.push(ChatMessage::assistant(assistant_text));
         }
@@ -734,6 +803,76 @@ And some more text."#;
         let text = format_tool_results_as_text(&responses);
         assert!(text.contains("<tool_result name=\"get_weather\">"));
         assert!(text.contains("<tool_result name=\"get_time\">"));
+    }
+
+    // --- strip_tool_result_echo tests ---
+
+    #[test]
+    fn strip_tool_result_echo_removes_full_echoed_turn() {
+        // A weak CLI model parrots the entire injected turn back, then adds its
+        // own analysis. Only the analysis must survive.
+        let responses = vec![FunctionResponse {
+            name: "get_activities".to_owned(),
+            response: json!({"activities": [{"name": "Splish splash", "distance_km": 7.9}]}),
+        }];
+        let echoed = format!(
+            "{}\n\nYour biggest ride this week was 7.9 km.",
+            format_tool_results_as_text(&responses)
+        );
+
+        let stripped = strip_tool_result_echo(&echoed);
+        assert_eq!(stripped, "Your biggest ride this week was 7.9 km.");
+        assert!(!stripped.contains("<tool_result"));
+        assert!(!stripped.contains("Here are the results"));
+        assert!(!stripped.contains("Please analyze the data"));
+    }
+
+    #[test]
+    fn strip_tool_result_echo_roundtrips_format_to_empty() {
+        let responses = vec![
+            FunctionResponse {
+                name: "get_stats".to_owned(),
+                response: json!({"total_distance_km": 1234.5}),
+            },
+            FunctionResponse {
+                name: "get_athlete".to_owned(),
+                response: json!({"name": "JF"}),
+            },
+        ];
+
+        // Echoing the injected turn verbatim leaves nothing user-facing.
+        let stripped = strip_tool_result_echo(&format_tool_results_as_text(&responses));
+        assert_eq!(stripped, "");
+    }
+
+    #[test]
+    fn strip_tool_result_echo_drops_unclosed_block() {
+        let echoed = "Here is your data: <tool_result name=\"x\">\n{\"huge\": \"json dump";
+        let stripped = strip_tool_result_echo(echoed);
+        assert_eq!(stripped, "Here is your data:");
+        assert!(!stripped.contains("json dump"));
+    }
+
+    #[test]
+    fn strip_tool_result_echo_preserves_clean_prose() {
+        let content = "Your easy run kept HR in Zone 2 — solid aerobic work.";
+        assert_eq!(strip_tool_result_echo(content), content);
+    }
+
+    #[test]
+    fn strip_simulation_artifacts_removes_both_scaffolds() {
+        let content = "Fetching.\n\n<tool_call>\n{\"name\":\"get_activities\"}\n</tool_call>\n\n\
+            Here are the results from the tools you requested:\n\n\
+            <tool_result name=\"get_activities\">\n{\"x\":1}\n</tool_result>\n\n\
+            Please analyze the data above and respond to the user's question.\n\n\
+            You ran 5 km today.";
+
+        let stripped = strip_simulation_artifacts(content);
+        assert!(!stripped.contains("<tool_call>"));
+        assert!(!stripped.contains("<tool_result"));
+        assert!(!stripped.contains("Here are the results"));
+        assert!(stripped.contains("Fetching."));
+        assert!(stripped.contains("You ran 5 km today."));
     }
 
     // --- inject_tool_catalog tests ---
