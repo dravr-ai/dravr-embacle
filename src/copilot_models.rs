@@ -112,6 +112,12 @@ pub struct ModelCandidate {
 pub const CATALOG: &[ModelCandidate] = &[
     // Claude Opus — newest first
     ModelCandidate {
+        id: "claude-opus-4.8",
+        family: Family::ClaudeOpus,
+        version: (4, 8),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
         id: "claude-opus-4.7",
         family: Family::ClaudeOpus,
         version: (4, 7),
@@ -253,7 +259,7 @@ pub fn rank(candidates: &mut [ModelCandidate]) {
 
 /// Identifier of the top-ranked candidate in [`CATALOG`].
 ///
-/// Returns `"claude-opus-4.7"` today — the catalog is compiled in, so the
+/// Returns `"claude-opus-4.8"` today — the catalog is compiled in, so the
 /// value is statically known and the indexing below cannot panic.
 #[must_use]
 pub fn preferred_default() -> &'static str {
@@ -337,11 +343,12 @@ mod tests {
 
     #[test]
     fn preferred_default_is_newest_opus() {
-        assert_eq!(preferred_default(), "claude-opus-4.7");
+        assert_eq!(preferred_default(), "claude-opus-4.8");
     }
 
     #[test]
     fn next_preferred_walks_catalog() {
+        assert_eq!(next_preferred("claude-opus-4.8"), Some("claude-opus-4.7"));
         assert_eq!(
             next_preferred("claude-opus-4.7"),
             Some("claude-opus-4.7-fast")
