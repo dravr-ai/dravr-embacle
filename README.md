@@ -163,12 +163,7 @@ embacle-server --transport stdio --provider copilot
 
 ### MCP Streamable HTTP
 
-The server also speaks [MCP](https://modelcontextprotocol.io/) at `POST /mcp`, accepting JSON-RPC 2.0 requests. Any MCP-compatible client can connect over HTTP instead of stdio.
-
-| Tool | Description |
-|------|-------------|
-| `prompt` | Send chat messages to an LLM provider, with optional `model` routing (e.g. `copilot:gpt-4o`) |
-| `list_models` | List available providers and the server's default |
+The server also speaks [MCP](https://modelcontextprotocol.io/) at `POST /mcp`, accepting JSON-RPC 2.0 requests. Any MCP-compatible client can connect over HTTP instead of stdio. It exposes the same tool registry as the standalone [`embacle-mcp`](#mcp-tools) server (`get_provider`, `set_provider`, `get_model`, `set_model`, `get_multiplex_provider`, `set_multiplex_provider`, `prompt`).
 
 ```bash
 # MCP initialize handshake
@@ -217,6 +212,37 @@ Streaming is not supported for multiplex requests.
 ### SSE Streaming
 
 Set `"stream": true` for Server-Sent Events output in OpenAI streaming format (`data: {json}\n\n` with `data: [DONE]` terminator).
+
+### Tool Calling
+
+`/v1/chat/completions` accepts OpenAI-style `tools` and `tool_choice` and returns `tool_calls`. The `tool_execution` field selects who runs the tools:
+
+- **`"client"`** (default) — the model's `tool_calls` are returned for you to execute and resubmit (standard OpenAI flow). Works for every runner: providers with native function calling use it directly; others use a text-based `<tool_call>` simulation.
+- **`"server"`** — the server runs an autonomous agent loop, executing tool calls against its own configured MCP tool servers and returning the final answer.
+
+When streaming (`"stream": true`) with tools, tool calls are emitted incrementally as OpenAI `tool_calls` deltas.
+
+#### Server-side execution (MCP)
+
+Configure downstream MCP tool servers — connected via the official [`rmcp`](https://crates.io/crates/rmcp) client (default `mcp-tools` feature) — in `embacle.toml`:
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+…or via the `EMBACLE_MCP_SERVERS` environment variable (a JSON array of the same objects). Then let the server run the tools:
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "copilot", "tool_execution": "server",
+       "messages": [{"role": "user", "content": "What files are in /tmp?"}]}'
+```
+
+The server discovers each configured server's tools on startup. If the request also supplies `tools`, server-side execution is restricted to the named subset.
 
 ### Authentication
 
