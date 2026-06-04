@@ -58,6 +58,53 @@ curl http://localhost:3000/v1/chat/completions \
 
 Streaming is not supported for multiplex requests.
 
+## Tool Calling
+
+`/v1/chat/completions` accepts OpenAI-style `tools` and `tool_choice` and returns
+`tool_calls`. Two execution models are supported via the `tool_execution` field:
+
+- `"client"` (default) — the model's `tool_calls` are returned to you to execute
+  and resubmit, the standard OpenAI flow.
+- `"server"` — the server runs an autonomous agent loop, executing tool calls
+  against its own configured MCP tool servers and returning the final answer.
+
+When the underlying provider streams (`"stream": true`) and tools are requested,
+tool calls are streamed incrementally as OpenAI `tool_calls` deltas.
+
+### Server-side tool execution (MCP)
+
+Configure downstream MCP tool servers (built on the official `rmcp` client, requires
+the default `mcp-tools` feature). Either in `embacle.toml`:
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_servers]]
+name = "github"
+command = "uvx"
+args = ["mcp-server-github"]
+env = { GITHUB_TOKEN = "..." }
+```
+
+…or via the `EMBACLE_MCP_SERVERS` environment variable (a JSON array of the same
+objects). Then ask the server to run the tools itself:
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "copilot",
+    "tool_execution": "server",
+    "messages": [{"role": "user", "content": "What files are in /tmp?"}]
+  }'
+```
+
+The server discovers each configured server's tools on startup. If the request also
+supplies `tools`, server-side execution is restricted to the named subset.
+
 ## Authentication
 
 Optional. Set `EMBACLE_API_KEY` to require bearer token auth. When unset, all requests are allowed (localhost dev mode).

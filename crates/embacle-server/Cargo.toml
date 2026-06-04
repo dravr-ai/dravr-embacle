@@ -15,6 +15,12 @@ readme = "README.md"
 keywords = ["openai", "llm", "mcp", "ai", "rest"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
+[features]
+default = ["mcp-tools"]
+# Server-side tool execution: connect to downstream MCP tool servers as a client
+# and run an autonomous agent loop against them via /v1/chat/completions.
+mcp-tools = ["dep:rmcp"]
+
 [lib]
 name = "embacle_server"
 path = "src/lib.rs"
@@ -27,6 +33,7 @@ path = "src/main.rs"
 embacle = { path = "../..", version = "0.15.15", features = ["config-file", "copilot-headless", "otel"] }
 embacle-mcp = { path = "../embacle-mcp", version = "0.15.15" }
 dravr-tronc = { version = "0.2", features = ["notifications"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process"], optional = true }
 async-trait = "0.1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }

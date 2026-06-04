@@ -16,7 +16,7 @@ use crate::auth;
 use crate::completions;
 use crate::health;
 use crate::models;
-use crate::state::SharedState;
+use crate::state::AppState;
 
 /// Build the application router with all endpoints
 ///
@@ -28,12 +28,12 @@ use crate::state::SharedState;
 ///
 /// The auth middleware is applied to all routes. It only enforces
 /// authentication when `EMBACLE_API_KEY` is set.
-pub fn build(state: SharedState) -> Router {
+pub fn build(state: AppState) -> Router {
     let mcp_server = Arc::new(McpServer::new(
         "embacle-mcp",
         env!("CARGO_PKG_VERSION"),
         embacle_mcp::build_tool_registry(),
-        Arc::clone(&state),
+        Arc::clone(&state.shared),
     ));
 
     let mcp_router = build_mcp_router(mcp_server);

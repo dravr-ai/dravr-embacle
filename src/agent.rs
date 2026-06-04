@@ -103,6 +103,7 @@ pub struct AgentExecutor<'a> {
     tool_handler: TextToolHandler,
     max_turns: u32,
     on_turn: Option<OnTurnCallback>,
+    request_template: Option<ChatRequest>,
 }
 
 impl<'a> AgentExecutor<'a> {
@@ -118,6 +119,7 @@ impl<'a> AgentExecutor<'a> {
             tool_handler,
             max_turns: DEFAULT_MAX_TURNS,
             on_turn: None,
+            request_template: None,
         }
     }
 
@@ -131,6 +133,28 @@ impl<'a> AgentExecutor<'a> {
     pub fn with_on_turn(mut self, callback: OnTurnCallback) -> Self {
         self.on_turn = Some(callback);
         self
+    }
+
+    /// Use a request template so each turn inherits the caller's model and
+    /// sampling parameters (temperature, `max_tokens`, `top_p`, stop sequences).
+    ///
+    /// The template's `messages` are replaced with the running conversation on
+    /// every turn; all other fields are preserved.
+    pub fn with_request_template(mut self, template: ChatRequest) -> Self {
+        self.request_template = Some(template);
+        self
+    }
+
+    /// Build the per-turn request, applying the template if one was set.
+    fn build_turn_request(&self, messages: Vec<ChatMessage>) -> ChatRequest {
+        match &self.request_template {
+            Some(template) => {
+                let mut request = template.clone();
+                request.messages = messages;
+                request
+            }
+            None => ChatRequest::new(messages),
+        }
     }
 
     /// Run the agent loop with the given initial messages.
@@ -175,7 +199,7 @@ impl<'a> AgentExecutor<'a> {
                 });
             }
 
-            let request = ChatRequest::new(messages.clone());
+            let request = self.build_turn_request(messages.clone());
             tracing::info!(
                 turn,
                 provider = self.provider.name(),
@@ -465,6 +489,70 @@ mod tests {
         assert_eq!(result.finish_reason, Some("max_turns".to_owned()));
         assert_eq!(result.total_turns, 3);
         assert_eq!(result.tool_calls.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn request_template_preserves_params() {
+        // Provider captures the request it receives so we can assert on it.
+        struct CapturingProvider {
+            seen_model: Mutex<Option<String>>,
+            seen_temp: Mutex<Option<f32>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for CapturingProvider {
+            fn name(&self) -> &'static str {
+                "capture"
+            }
+            fn display_name(&self) -> &str {
+                "Capture"
+            }
+            fn capabilities(&self) -> LlmCapabilities {
+                LlmCapabilities::text_only()
+            }
+            fn default_model(&self) -> &'static str {
+                "default-model"
+            }
+            fn available_models(&self) -> &[String] {
+                &[]
+            }
+            async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
+                *self.seen_model.lock().expect("lock") = request.model.clone(); // Safe: test assertion
+                *self.seen_temp.lock().expect("lock") = request.temperature; // Safe: test assertion
+                Ok(make_response("done", None))
+            }
+            async fn complete_stream(
+                &self,
+                _request: &ChatRequest,
+            ) -> Result<ChatStream, RunnerError> {
+                Err(RunnerError::internal("not supported"))
+            }
+            async fn health_check(&self) -> Result<bool, RunnerError> {
+                Ok(true)
+            }
+        }
+
+        let provider = CapturingProvider {
+            seen_model: Mutex::new(None),
+            seen_temp: Mutex::new(None),
+        };
+
+        let mut template = ChatRequest::new(vec![]);
+        template.model = Some("gpt-5.4".to_owned());
+        template.temperature = Some(0.3);
+
+        let executor =
+            AgentExecutor::new(&provider, vec![], noop_handler()).with_request_template(template);
+        executor
+            .run(vec![ChatMessage::user("hi")])
+            .await
+            .expect("should succeed"); // Safe: test assertion
+
+        assert_eq!(
+            provider.seen_model.lock().expect("lock").as_deref(), // Safe: test assertion
+            Some("gpt-5.4")
+        );
+        assert_eq!(*provider.seen_temp.lock().expect("lock"), Some(0.3)); // Safe: test assertion
     }
 
     #[tokio::test]

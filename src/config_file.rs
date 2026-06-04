@@ -63,6 +63,28 @@ pub struct EmbacleConfig {
     /// Short name aliases mapping to provider type names
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// Downstream MCP tool servers to spawn for server-side tool execution
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Configuration for a downstream MCP tool server spawned over stdio.
+///
+/// Each entry describes a subprocess that speaks the Model Context Protocol.
+/// The server connects to it as an MCP client, discovers its tools, and routes
+/// tool calls to it during server-side agent execution.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    /// Logical name for this server (used in logs and tool routing diagnostics)
+    pub name: String,
+    /// Executable to spawn (e.g. `npx`, `uvx`, or an absolute path)
+    pub command: String,
+    /// Arguments passed to the command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables to set for the spawned process
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Default configuration values shared across providers
@@ -318,6 +340,41 @@ smart = "claude_code"
         let config = build_runner_config(&provider, &defaults).unwrap(); // Safe: test assertion
         assert_eq!(config.model.as_deref(), Some("override-model"));
         assert_eq!(config.timeout, Duration::from_mins(1));
+    }
+
+    #[test]
+    fn parse_mcp_servers_config() {
+        let toml_str = r#"
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_servers]]
+name = "github"
+command = "uvx"
+args = ["mcp-server-github"]
+env = { GITHUB_TOKEN = "abc123" }
+"#;
+        let config: EmbacleConfig = toml::from_str(toml_str).unwrap(); // Safe: test assertion
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert_eq!(config.mcp_servers[0].name, "filesystem");
+        assert_eq!(config.mcp_servers[0].command, "npx");
+        assert_eq!(config.mcp_servers[0].args.len(), 3);
+        assert!(config.mcp_servers[0].env.is_empty());
+        assert_eq!(config.mcp_servers[1].name, "github");
+        let token = config.mcp_servers[1].env.get("GITHUB_TOKEN").unwrap(); // Safe: test assertion
+        assert_eq!(token, "abc123");
+    }
+
+    #[test]
+    fn config_without_mcp_servers_defaults_empty() {
+        let toml_str = r#"
+[[providers]]
+type = "copilot"
+"#;
+        let config: EmbacleConfig = toml::from_str(toml_str).unwrap(); // Safe: test assertion
+        assert!(config.mcp_servers.is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ use embacle::config::CliRunnerType;
 use embacle::discovery;
 use embacle_mcp::ServerState;
 use embacle_server::completions;
+use embacle_server::state::AppState;
 use http_body_util::BodyExt;
 use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
@@ -37,7 +38,7 @@ fn post_completions(body: &serde_json::Value) -> Request<Body> {
 /// Build a test app with the given default provider
 fn test_app() -> axum::Router {
     let state = Arc::new(RwLock::new(ServerState::new(CliRunnerType::Copilot)));
-    router::build(state)
+    router::build(AppState::new(state))
 }
 
 /// Send a request and parse the response body as JSON

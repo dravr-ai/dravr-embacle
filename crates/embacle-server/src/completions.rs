@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::HashSet;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -13,22 +15,23 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use embacle::config::CliRunnerType;
+use embacle::mcp_tool_bridge::create_mcp_tool_handler;
 use embacle::types::{
     ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, LlmProvider, MessageRole, ResponseFormat,
     RunnerError,
 };
-use embacle::FunctionDeclaration;
+use embacle::{AgentExecutor, FunctionDeclaration};
 use tracing::{debug, error, warn};
 
 use crate::openai_types::{
     ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, Choice, ContentPart,
     ErrorResponse, MessageContent, ModelField, MultiplexProviderResult, MultiplexResponse,
     ResponseFormatRequest, ResponseMessage, StopField, ToolCall, ToolCallFunction, ToolChoice,
-    ToolDefinition as OpenAiToolDefinition, Usage,
+    ToolDefinition as OpenAiToolDefinition, ToolExecutionMode, Usage,
 };
 use crate::provider_resolver::resolve_model;
 use crate::runner::multiplex::{MultiplexEngine, MultiplexParams};
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 use crate::streaming;
 
 /// OpenAI-specified upper bound for temperature
@@ -39,7 +42,7 @@ const MAX_TEMPERATURE: f32 = 2.0;
 /// Dispatches to single-provider or multiplex mode based on the model field.
 /// Supports both streaming (SSE) and non-streaming (JSON) responses.
 pub async fn handle(
-    State(state): State<SharedState>,
+    State(app): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
     if let Some(temp) = request.temperature {
@@ -71,28 +74,35 @@ pub async fn handle(
 
     match request.model {
         ModelField::Multiple(ref models) if models.len() > 1 => {
-            handle_multiplex(&state, &request, models).await
+            handle_multiplex(&app.shared, &request, models).await
         }
         ModelField::Multiple(ref models) if models.len() == 1 => {
-            handle_single(&state, &request, &models[0]).await
+            handle_single(&app, &request, &models[0]).await
         }
         ModelField::Multiple(_) => {
             error_response(StatusCode::BAD_REQUEST, "Model array must not be empty")
         }
-        ModelField::Single(ref model) => handle_single(&state, &request, model).await,
+        ModelField::Single(ref model) => handle_single(&app, &request, model).await,
     }
 }
 
 /// Handle a single-provider request (standard case)
 async fn handle_single(
-    state: &SharedState,
+    app: &AppState,
     request: &ChatCompletionRequest,
     model_str: &str,
 ) -> Response {
+    let state = &app.shared;
     let has_tools = request
         .tools
         .as_ref()
         .is_some_and(|t| !t.is_empty() && !is_tool_choice_none(request.tool_choice.as_ref()));
+
+    // Server-side tool execution: run an autonomous agent loop against the
+    // server's configured MCP tools and return the final answer.
+    if request.tool_execution == Some(ToolExecutionMode::Server) {
+        return handle_server_side_tools(app, request, model_str).await;
+    }
 
     let state_guard = state.read().await;
     let resolved = resolve_model(model_str, state_guard.active_provider());
@@ -160,17 +170,148 @@ async fn handle_single(
     };
 
     let supports_streaming = runner.capabilities().contains(LlmCapabilities::STREAMING);
+    let native_tools = runner
+        .capabilities()
+        .contains(LlmCapabilities::FUNCTION_CALLING);
+
+    // Real streaming of tool calls only works for text-simulated providers:
+    // native-function-calling providers return tool calls out of band.
+    let mode = if request.stream && has_tools && supports_streaming && !native_tools {
+        DispatchMode::StreamToolCalls
+    } else if request.stream && (has_tools || !supports_streaming) {
+        DispatchMode::StreamDowngrade
+    } else if request.stream {
+        DispatchMode::PureStream
+    } else {
+        DispatchMode::NonStreaming
+    };
 
     dispatch_completion(
         runner.as_ref(),
         resolved.runner_type,
         chat_request,
-        request.stream,
+        mode,
         has_tools,
-        supports_streaming,
         warnings_for_response,
     )
     .await
+}
+
+/// Handle server-side tool execution.
+///
+/// Runs an autonomous [`AgentExecutor`] loop using the server's configured MCP
+/// tools, then returns the final assistant message. Tools are executed in-process
+/// by the server (via the MCP client pool) rather than handed back to the caller.
+async fn handle_server_side_tools(
+    app: &AppState,
+    request: &ChatCompletionRequest,
+    model_str: &str,
+) -> Response {
+    let Some(server_tools) = app.server_tools.as_ref() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "tool_execution=server requires the server to be started with configured MCP tool servers ([[mcp_servers]])",
+        );
+    };
+
+    let state_guard = app.shared.read().await;
+    let resolved = resolve_model(model_str, state_guard.active_provider());
+    debug!(
+        provider = %resolved.runner_type,
+        model = ?resolved.model,
+        "Dispatching server-side tool execution"
+    );
+    let runner = match state_guard.get_runner(resolved.runner_type).await {
+        Ok(r) => r,
+        Err(e) => return runner_error_to_response(&e),
+    };
+    drop(state_guard);
+
+    let declarations =
+        select_server_declarations(&server_tools.declarations, request.tools.as_deref());
+    if declarations.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "None of the requested tools are available on the server's configured MCP tool servers",
+        );
+    }
+
+    let messages = convert_messages(&request.messages);
+
+    // Request template so each agent turn inherits the caller's model and params.
+    let mut template = ChatRequest::new(Vec::new());
+    template.model = resolved.model;
+    template.temperature = request.temperature;
+    template.max_tokens = request.max_tokens;
+    template.top_p = request.top_p;
+    template.stop = request.stop.as_ref().map(StopField::to_bounded_vec);
+
+    let handler = create_mcp_tool_handler(Arc::clone(&server_tools.executor));
+    let agent =
+        AgentExecutor::new(runner.as_ref(), declarations, handler).with_request_template(template);
+
+    let result = match agent.run(messages).await {
+        Ok(r) => r,
+        Err(e) => return runner_error_to_response(&e),
+    };
+
+    let model_name = format!("{}:{}", resolved.runner_type, runner.default_model());
+    let usage = Some(Usage {
+        prompt: result.total_usage.prompt_tokens,
+        completion: result.total_usage.completion_tokens,
+        total: result.total_usage.total_tokens,
+    });
+
+    let finish_reason = result.finish_reason.unwrap_or_else(|| "stop".to_owned());
+    let warnings = if finish_reason == "max_turns" {
+        Some(vec![
+            "Agent reached the maximum number of tool-calling turns before completing".to_owned(),
+        ])
+    } else {
+        None
+    };
+
+    let resp = ChatCompletionResponse {
+        id: generate_id(),
+        object: "chat.completion",
+        created: unix_timestamp(),
+        model: model_name,
+        choices: vec![Choice {
+            index: 0,
+            message: ResponseMessage {
+                role: "assistant",
+                content: Some(result.content),
+                tool_calls: None,
+            },
+            finish_reason: Some(finish_reason),
+        }],
+        usage,
+        warnings,
+    };
+
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+/// Select which server-side tool declarations to expose to the agent.
+///
+/// When the client supplies `tools`, the set is restricted to the requested
+/// names — giving the client control over which configured tools may run.
+/// Otherwise every configured tool is offered.
+fn select_server_declarations(
+    available: &[FunctionDeclaration],
+    requested: Option<&[OpenAiToolDefinition]>,
+) -> Vec<FunctionDeclaration> {
+    match requested {
+        Some(tools) if !tools.is_empty() => {
+            let names: HashSet<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+            available
+                .iter()
+                .filter(|d| names.contains(d.name.as_str()))
+                .cloned()
+                .collect()
+        }
+        _ => available.to_vec(),
+    }
 }
 
 /// Check if the response format requests JSON output
@@ -194,64 +335,83 @@ fn strip_json_fences(content: String, json_mode: bool) -> String {
     }
 }
 
-/// Dispatch the completion request to the appropriate execution path
-///
-/// Routes between four modes:
-/// 1. Streaming with tools: downgrade to `complete()`, emit as SSE
-/// 2. Streaming without provider support: downgrade to `complete()`, emit as SSE
-/// 3. Pure streaming: use `complete_stream()`
-/// 4. Non-streaming: use `complete()`, return JSON
+/// Execution path selected for a completion request.
+enum DispatchMode {
+    /// Stream content + `tool_calls` deltas via incremental `<tool_call>`
+    /// extraction (text-simulated provider that supports streaming).
+    StreamToolCalls,
+    /// Buffer via `complete()` then emit as SSE — used for native
+    /// function-calling tools (calls arrive out of band) or providers that do
+    /// not support streaming.
+    StreamDowngrade,
+    /// Pure token streaming via `complete_stream()`.
+    PureStream,
+    /// Non-streaming `complete()` returning JSON.
+    NonStreaming,
+}
+
+/// Dispatch the completion request to the appropriate execution path.
 async fn dispatch_completion(
     runner: &dyn LlmProvider,
     runner_type: CliRunnerType,
     mut chat_request: ChatRequest,
-    stream: bool,
+    mode: DispatchMode,
     has_tools: bool,
-    supports_streaming: bool,
     warnings: Option<Vec<String>>,
 ) -> Response {
     let json_mode = wants_json(chat_request.response_format.as_ref());
 
-    if stream && (has_tools || !supports_streaming) {
-        // Downgrade to non-streaming complete(), emit result as SSE
-        if has_tools {
-            debug!("Downgrading stream+tools to non-streaming complete");
-        } else {
-            debug!(
-                provider = runner.name(),
-                "Provider does not support streaming; downgrading to non-streaming complete"
-            );
-        }
-        match runner.complete(&chat_request).await {
-            Ok(response) => {
-                let model_name = format!("{runner_type}:{}", response.model);
-                let content = strip_json_fences(response.content, json_mode);
-                let (message, finish_reason) = build_response_message(
-                    has_tools,
-                    content,
-                    response.finish_reason,
-                    response.tool_calls.as_ref(),
-                );
-                let reason = finish_reason.as_deref().unwrap_or("stop");
-                streaming::sse_single_response(message, reason, &model_name)
-            }
-            Err(e) => runner_error_to_response(&e),
-        }
-    } else if stream {
-        chat_request.stream = true;
-        match runner.complete_stream(&chat_request).await {
-            Ok(s) => {
-                let model_name = format!("{runner_type}:{}", runner.default_model());
-                if json_mode {
-                    streaming::sse_response_strip_fences(s, &model_name)
-                } else {
-                    streaming::sse_response(s, &model_name)
+    match mode {
+        DispatchMode::StreamToolCalls => {
+            chat_request.stream = true;
+            match runner.complete_stream(&chat_request).await {
+                Ok(s) => {
+                    let model_name = format!("{runner_type}:{}", runner.default_model());
+                    streaming::sse_response_with_tool_calls(s, &model_name)
                 }
+                Err(e) => runner_error_to_response(&e),
             }
-            Err(e) => runner_error_to_response(&e),
         }
-    } else {
-        match runner.complete(&chat_request).await {
+        DispatchMode::StreamDowngrade => {
+            if has_tools {
+                debug!("Downgrading stream+tools to non-streaming complete");
+            } else {
+                debug!(
+                    provider = runner.name(),
+                    "Provider does not support streaming; downgrading to non-streaming complete"
+                );
+            }
+            match runner.complete(&chat_request).await {
+                Ok(response) => {
+                    let model_name = format!("{runner_type}:{}", response.model);
+                    let content = strip_json_fences(response.content, json_mode);
+                    let (message, finish_reason) = build_response_message(
+                        has_tools,
+                        content,
+                        response.finish_reason,
+                        response.tool_calls.as_ref(),
+                    );
+                    let reason = finish_reason.as_deref().unwrap_or("stop");
+                    streaming::sse_single_response(message, reason, &model_name)
+                }
+                Err(e) => runner_error_to_response(&e),
+            }
+        }
+        DispatchMode::PureStream => {
+            chat_request.stream = true;
+            match runner.complete_stream(&chat_request).await {
+                Ok(s) => {
+                    let model_name = format!("{runner_type}:{}", runner.default_model());
+                    if json_mode {
+                        streaming::sse_response_strip_fences(s, &model_name)
+                    } else {
+                        streaming::sse_response(s, &model_name)
+                    }
+                }
+                Err(e) => runner_error_to_response(&e),
+            }
+        }
+        DispatchMode::NonStreaming => match runner.complete(&chat_request).await {
             Ok(response) => {
                 let model_name = format!("{runner_type}:{}", response.model);
                 let usage = response.usage.map(|u| Usage {
@@ -285,7 +445,7 @@ async fn dispatch_completion(
                 (StatusCode::OK, Json(resp)).into_response()
             }
             Err(e) => runner_error_to_response(&e),
-        }
+        },
     }
 }
 
@@ -668,7 +828,7 @@ fn is_tool_choice_none(tool_choice: Option<&ToolChoice>) -> bool {
 }
 
 /// Generate a deterministic tool call ID from function name and index
-fn generate_tool_call_id(name: &str, index: usize) -> String {
+pub(crate) fn generate_tool_call_id(name: &str, index: usize) -> String {
     format!("call_{name}_{index}")
 }
 
@@ -916,6 +1076,51 @@ mod tests {
     fn generate_tool_call_id_format() {
         let id = generate_tool_call_id("get_weather", 0);
         assert_eq!(id, "call_get_weather_0");
+    }
+
+    /// Helper to build an `OpenAI` tool definition with just a name.
+    fn named_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".to_owned(),
+            function: FunctionObject {
+                name: name.to_owned(),
+                description: None,
+                parameters: None,
+            },
+        }
+    }
+
+    /// Helper to build a server-side declaration with just a name.
+    fn named_decl(name: &str) -> FunctionDeclaration {
+        FunctionDeclaration {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters: None,
+        }
+    }
+
+    #[test]
+    fn select_server_declarations_returns_all_when_unrestricted() {
+        let available = vec![named_decl("a"), named_decl("b")];
+        let selected = select_server_declarations(&available, None);
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn select_server_declarations_restricts_to_requested_names() {
+        let available = vec![named_decl("a"), named_decl("b"), named_decl("c")];
+        let requested = vec![named_tool("b"), named_tool("nonexistent")];
+        let selected = select_server_declarations(&available, Some(&requested));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "b");
+    }
+
+    #[test]
+    fn select_server_declarations_empty_request_offers_all() {
+        let available = vec![named_decl("a")];
+        let requested: Vec<ToolDefinition> = vec![];
+        let selected = select_server_declarations(&available, Some(&requested));
+        assert_eq!(selected.len(), 1);
     }
 
     #[test]

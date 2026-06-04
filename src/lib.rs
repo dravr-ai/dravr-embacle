@@ -191,7 +191,7 @@ pub use agui::{AgUiEmitter, AgUiEvent, AgUiEventFilter, AgUiEventKind, NoopEmitt
 #[cfg(feature = "config-file")]
 pub use config_file::{
     build_fallback_from_config, build_runner_config, load_config, load_config_from, resolve_alias,
-    DefaultsConfig, EmbacleConfig, FallbackConfig, ProviderConfig,
+    DefaultsConfig, EmbacleConfig, FallbackConfig, McpServerConfig, ProviderConfig,
 };
 
 // OpenAI API re-exports (behind feature flag)

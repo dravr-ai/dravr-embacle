@@ -41,6 +41,13 @@ pub struct ChatCompletionRequest {
     /// Controls which tools the model may call
     #[serde(default)]
     pub tool_choice: Option<ToolChoice>,
+    /// Where tool calls are executed (embacle extension)
+    ///
+    /// `client` (default) returns `tool_calls` for the caller to execute and
+    /// resubmit. `server` runs an autonomous agent loop against the server's
+    /// configured MCP tool servers and returns the final assistant message.
+    #[serde(default)]
+    pub tool_execution: Option<ToolExecutionMode>,
     /// Controls the response format (text, `json_object`, or `json_schema`)
     #[serde(default)]
     pub response_format: Option<ResponseFormatRequest>,
@@ -50,6 +57,16 @@ pub struct ChatCompletionRequest {
     /// Stop sequence(s) that halt generation — single string or array
     #[serde(default)]
     pub stop: Option<StopField>,
+}
+
+/// Where tool calls are executed for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolExecutionMode {
+    /// Return `tool_calls` to the caller for client-side execution (default, OpenAI-standard)
+    Client,
+    /// Execute tools server-side via configured MCP servers and return the final answer
+    Server,
 }
 
 /// Stop field that accepts either a single string or an array of strings
@@ -760,6 +777,27 @@ mod tests {
         assert!(json.contains("chat.completion.chunk"));
         assert!(json.contains("token"));
         assert!(!json.contains("tool_calls"));
+    }
+
+    #[test]
+    fn deserialize_tool_execution_server() {
+        let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_execution":"server"}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        assert_eq!(req.tool_execution, Some(ToolExecutionMode::Server));
+    }
+
+    #[test]
+    fn deserialize_tool_execution_client() {
+        let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}],"tool_execution":"client"}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        assert_eq!(req.tool_execution, Some(ToolExecutionMode::Client));
+    }
+
+    #[test]
+    fn tool_execution_defaults_to_none() {
+        let json = r#"{"model":"copilot","messages":[{"role":"user","content":"hi"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).expect("deserialize"); // Safe: test assertion
+        assert_eq!(req.tool_execution, None);
     }
 
     #[test]

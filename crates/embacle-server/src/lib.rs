@@ -18,6 +18,7 @@
 //! ## Modules
 //!
 //! - [`completions`] — chat completion handler with multiplex fan-out
+//! - `mcp_client` — MCP stdio client pool for server-side tool execution (feature `mcp-tools`)
 //! - [`models`] — model listing endpoint
 //! - [`health`] — provider health checks
 //! - [`auth`] — optional bearer token authentication
@@ -30,6 +31,8 @@
 pub mod auth;
 pub mod completions;
 pub mod health;
+#[cfg(feature = "mcp-tools")]
+pub mod mcp_client;
 pub mod models;
 pub mod openai_types;
 pub mod provider_resolver;

@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use embacle_server::router;
+use embacle_server::state::AppState;
 
 /// Check whether live tests should run.
 /// Returns `true` when `EMBACLE_LIVE_TESTS=1` and the copilot binary is on PATH.
@@ -28,7 +29,7 @@ fn skip_unless_live() -> bool {
 /// Build a test app wired to the Copilot provider
 fn live_app() -> axum::Router {
     let state = Arc::new(RwLock::new(ServerState::new(CliRunnerType::Copilot)));
-    router::build(state)
+    router::build(AppState::new(state))
 }
 
 /// Build a POST /v1/chat/completions request from a JSON body
