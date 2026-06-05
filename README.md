@@ -5,9 +5,11 @@
 [![CI](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml/badge.svg)](https://github.com/dravr-ai/dravr-embacle/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 
-Standalone Rust library that wraps 12 AI CLI tools and SDKs as pluggable LLM providers, with vision/image support.
+Standalone Rust library that wraps 12 AI CLI tools, SDKs, and a browser-driven web UI as pluggable LLM providers, with vision/image support.
 
-Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to CLI tools that users already have installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
+Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to tools the user has already installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
+
+The same "use what you've already logged into" idea extends to the browser: an optional **web-UI provider** drives the Claude.ai web app through a headless Chrome session and a one-time login — no API key, on your existing Claude.ai account — and is exposed over both the REST API and MCP. See [docs/web-ui.md](docs/web-ui.md).
 
 ## Run It
 
