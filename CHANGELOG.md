@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0] — 2026-06-05
+
+### Added
+
+- feat(web-ui): browser-driven Claude.ai provider (REST + MCP) via dravr-browser
+
+### Other
+
+- test(e2e): skip Copilot headless E2E when backend auth unavailable
+
+
+
 ## [0.16.0] — 2026-06-04
 
 
