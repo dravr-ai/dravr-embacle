@@ -609,6 +609,9 @@ Your Application
             ├── ACP Runners (persistent connection, behind feature flag)
             │   └── CopilotHeadlessRunner → NDJSON/JSON-RPC to `copilot --acp`
             │
+            ├── Browser Web UI Runners (headless browser, behind feature flag)
+            │   └── WebUiRunner           → drives the Claude.ai web UI via dravr-browser
+            │
             ├── Provider Decorators (composable wrappers)
             │   ├── FallbackProvider    → ordered chain with retry and exponential backoff
             │   ├── MetricsProvider     → latency, token, and cost tracking
