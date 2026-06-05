@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Opening a browser window for login. Sign in to Claude.ai; \
          this waits up to 5 minutes for an authenticated session..."
     );
-    let timeout = Duration::from_secs(300);
+    let timeout = Duration::from_mins(5);
     if runner.interactive_login(timeout).await? {
         println!("login: success (profile saved)");
         Ok(())
