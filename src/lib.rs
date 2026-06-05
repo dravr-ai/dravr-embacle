@@ -117,6 +117,10 @@ pub mod config_file;
 #[cfg(feature = "openai-api")]
 pub mod openai_api;
 
+/// Browser-driven web-UI provider (drives Claude.ai via a headless profile)
+#[cfg(feature = "web-ui")]
+pub mod web_ui;
+
 // Copilot Headless modules (behind feature flag)
 /// Configuration for the Copilot Headless (ACP) provider
 #[cfg(feature = "copilot-headless")]
@@ -197,6 +201,9 @@ pub use config_file::{
 // OpenAI API re-exports (behind feature flag)
 #[cfg(feature = "openai-api")]
 pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
+
+#[cfg(feature = "web-ui")]
+pub use web_ui::{WebProviderConfig, WebUiConfig, WebUiRunner};
 
 // Copilot Headless re-exports (behind feature flag)
 #[cfg(feature = "copilot-headless")]

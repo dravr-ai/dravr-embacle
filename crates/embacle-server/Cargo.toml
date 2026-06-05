@@ -16,10 +16,14 @@ keywords = ["openai", "llm", "mcp", "ai", "rest"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [features]
-default = ["mcp-tools"]
+default = ["mcp-tools", "web-ui"]
 # Server-side tool execution: connect to downstream MCP tool servers as a client
 # and run an autonomous agent loop against them via /v1/chat/completions.
 mcp-tools = ["dep:rmcp"]
+# Expose the browser-driven `claude_web` provider over REST + MCP. Pulls in
+# chromiumoxide (via embacle's web-ui feature). Requires a pre-authenticated
+# browser profile on the server host (see docs/web-ui.md).
+web-ui = ["embacle/web-ui"]
 
 [lib]
 name = "embacle_server"

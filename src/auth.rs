@@ -124,6 +124,9 @@ pub async fn check_readiness(
         CliRunnerType::KiloCli => check_version_probe_unverified(binary_path, "kilo").await,
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => check_copilot_readiness(binary_path).await,
+        // ClaudeWeb readiness is browser/session-based, not binary-based.
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => Ok(ProviderReadiness::Ready),
     }
 }
 

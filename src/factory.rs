@@ -32,6 +32,12 @@ pub async fn create_runner(
         return Ok(Box::new(crate::CopilotHeadlessRunner::from_env()));
     }
 
+    // ClaudeWeb drives a browser, not a PATH binary — env-based config
+    #[cfg(feature = "web-ui")]
+    if runner_type == CliRunnerType::ClaudeWeb {
+        return Ok(Box::new(crate::WebUiRunner::from_env()?));
+    }
+
     let binary_name = runner_type.binary_name();
     let env_key = runner_type.env_override_key();
     let env_override = env::var(env_key).ok();
@@ -54,6 +60,8 @@ pub async fn create_runner(
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => unreachable!("handled above"),
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => unreachable!("handled above"),
     };
 
     Ok(runner)
@@ -63,6 +71,12 @@ pub async fn create_runner(
 ///
 /// Unlike [`create_runner()`], this function does not perform binary discovery;
 /// it uses the provided `RunnerConfig` directly.
+///
+/// # Panics
+///
+/// With the `web-ui` feature, panics only if the compiled-in `claude_web`
+/// provider TOML is malformed — a compile-time constant guarded by a unit test,
+/// so never in practice.
 pub async fn create_runner_with_config(
     runner_type: CliRunnerType,
     config: RunnerConfig,
@@ -83,6 +97,16 @@ pub async fn create_runner_with_config(
         // CopilotHeadless ignores RunnerConfig — uses env-based config
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env()),
+        // ClaudeWeb ignores RunnerConfig — drives a browser via the embedded provider config
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => {
+            let provider = crate::WebProviderConfig::claude_web_default()
+                .expect("embedded claude_web provider config is valid"); // Safe: static, unit-tested
+            Box::new(crate::WebUiRunner::new(
+                crate::WebUiConfig::from_env(),
+                provider,
+            ))
+        }
     }
 }
 
@@ -145,6 +169,8 @@ pub fn parse_runner_type(s: &str) -> Option<CliRunnerType> {
         "copilot_headless" | "copilot-headless" | "copilotheadless" | "headless" => {
             Some(CliRunnerType::CopilotHeadless)
         }
+        #[cfg(feature = "web-ui")]
+        "claude_web" | "claude-web" | "claudeweb" | "web" => Some(CliRunnerType::ClaudeWeb),
         _ => None,
     }
 }

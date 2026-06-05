@@ -111,6 +111,17 @@ embacle = "0.16"
 |--------|-------------|----------|
 | GitHub Copilot Headless | `copilot-headless` | NDJSON/JSON-RPC via `copilot --acp`, SDK-managed tool calling, streaming |
 
+### Browser Web UI Runners (feature-flagged)
+
+| Runner | Feature Flag | Features |
+|--------|-------------|----------|
+| Claude (web) | `web-ui` | Drives the Claude.ai web UI via a headless browser + persistent login, streaming, no API key — see [docs/web-ui.md](docs/web-ui.md) |
+
+Built on the standalone [`dravr-browser`](https://github.com/dravr-ai/dravr-browser)
+crate. Exposed over REST + MCP by `embacle-server` (the `web-ui` feature is on by
+default there). Driving a consumer web UI is generally against the provider's
+ToS — intended for your own account; off by default in the core library.
+
 ## Quick Start
 
 Use a CLI runner:

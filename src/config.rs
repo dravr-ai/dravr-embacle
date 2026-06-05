@@ -45,6 +45,9 @@ pub enum CliRunnerType {
     /// GitHub Copilot Headless via ACP protocol (`copilot --acp`)
     #[cfg(feature = "copilot-headless")]
     CopilotHeadless,
+    /// Browser-driven Claude.ai web UI (headless Chrome, persistent profile)
+    #[cfg(feature = "web-ui")]
+    ClaudeWeb,
 }
 
 impl CliRunnerType {
@@ -66,6 +69,8 @@ impl CliRunnerType {
             Self::KiloCli => "kilo",
             #[cfg(feature = "copilot-headless")]
             Self::CopilotHeadless => "copilot",
+            #[cfg(feature = "web-ui")]
+            Self::ClaudeWeb => "chrome",
         }
     }
 
@@ -87,6 +92,8 @@ impl CliRunnerType {
             Self::KiloCli => "KILO_CLI_BINARY",
             #[cfg(feature = "copilot-headless")]
             Self::CopilotHeadless => "COPILOT_CLI_PATH",
+            #[cfg(feature = "web-ui")]
+            Self::ClaudeWeb => "CHROME_PATH",
         }
     }
 }
@@ -108,6 +115,8 @@ impl fmt::Display for CliRunnerType {
             Self::KiloCli => write!(f, "kilo_cli"),
             #[cfg(feature = "copilot-headless")]
             Self::CopilotHeadless => write!(f, "copilot_headless"),
+            #[cfg(feature = "web-ui")]
+            Self::ClaudeWeb => write!(f, "claude_web"),
         }
     }
 }

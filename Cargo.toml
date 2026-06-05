@@ -98,6 +98,8 @@ agui = []
 copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # Enable OpenAI-compatible HTTP API client runner (reqwest-based)
 openai-api = ["dep:reqwest", "tokio/sync"]
+# Enable browser-driven web-UI provider (drives Claude.ai via a headless profile)
+web-ui = ["dep:dravr-browser", "dep:toml", "tokio/sync"]
 # Enable TOML-based configuration file loading
 config-file = ["dep:toml", "dep:dirs"]
 # Enable OpenTelemetry metrics export
@@ -128,6 +130,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 toml = { version = "1.1", optional = true }
 dirs = { version = "6", optional = true }
 
+# Optional: shared headless-browser primitives for the web-ui runner
+dravr-browser = { version = "0.1", optional = true }
+
 # Optional: OpenTelemetry metrics export
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true }
@@ -135,10 +140,21 @@ opentelemetry_sdk = { version = "0.32", optional = true }
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
 serde_json = "1.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "test_claude_e2e"
 path = "examples/test_claude_e2e.rs"
+
+[[example]]
+name = "web_login"
+path = "examples/web_login.rs"
+required-features = ["web-ui"]
+
+[[example]]
+name = "web_query"
+path = "examples/web_query.rs"
+required-features = ["web-ui"]
 
 [lints]
 workspace = true

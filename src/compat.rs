@@ -149,6 +149,8 @@ async fn detect_version(
         | CliRunnerType::KiloCli => "--version",
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => "--version",
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => "--version",
     };
 
     let output = Command::new(binary_path)
@@ -221,6 +223,9 @@ const fn minimum_version(runner_type: CliRunnerType) -> (u32, u32, u32) {
         CliRunnerType::KiloCli => parse_const_version(KILO_CLI_MIN_VERSION),
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => parse_const_version(COPILOT_MIN_VERSION),
+        // ClaudeWeb has no CLI version — it drives a browser.
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => (0, 0, 0),
     }
 }
 
@@ -295,6 +300,9 @@ const fn capabilities_for_runner(runner_type: CliRunnerType) -> CliFeatureFlags 
         CliRunnerType::CopilotHeadless => CliFeatureFlags::JSON_OUTPUT
             .union(CliFeatureFlags::STREAMING)
             .union(CliFeatureFlags::SYSTEM_PROMPT),
+        // ClaudeWeb: browser-driven, streaming via captured SSE — capabilities managed by LlmProvider
+        #[cfg(feature = "web-ui")]
+        CliRunnerType::ClaudeWeb => CliFeatureFlags::STREAMING,
     }
 }
 

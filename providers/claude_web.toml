@@ -1,0 +1,38 @@
+# ABOUTME: Declarative provider config for driving the Claude.ai web UI via a headless browser
+# ABOUTME: Selectors and SSE-extraction rules live here so UI changes are config, not code
+#
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 dravr.ai
+
+[provider]
+name = "claude_web"
+display_name = "Claude (web)"
+# Page opened to start a fresh conversation for each request.
+new_chat_url = "https://claude.ai/new"
+# Page used by the one-time interactive login flow.
+login_url = "https://claude.ai/login"
+# Current URL substrings that indicate an authenticated session.
+login_success_patterns = ["claude.ai/new", "claude.ai/chat", "claude.ai/recents", "claude.ai/project"]
+
+[composer]
+# Contenteditable prompt box (ProseMirror). Comma-separated fallbacks.
+input_selector = "div[contenteditable='true'].ProseMirror, div[contenteditable='true'], textarea"
+# Send button. Comma-separated fallbacks plus a text: match.
+send_button_selector = "button[aria-label='Send message'], button[aria-label='Send Message'], button[data-testid='send-button']"
+
+[response]
+# JS regex (source) matching the streaming completion request URL. The stealth
+# capture hook tees this response's body as it streams.
+stream_url_pattern = "/completion|chat_conversations/[^/]+/completion|/append_message"
+# JSON Pointers (RFC 6901) tried in order against each SSE `data:` JSON payload;
+# the first that resolves to a string is the text delta for that event.
+text_json_pointers = ["/completion", "/delta/text", "/text"]
+# SSE payloads equal to (or containing) any of these end the turn.
+done_markers = ["message_stop", "message_limit", "[DONE]"]
+# DOM fallback: read the last assistant message if no stream was captured.
+assistant_message_selector = "div[data-testid='message-content'], .font-claude-message"
+
+[models]
+# The web UI picks the model via account/plan; requests' `model` is advisory.
+default = "claude-opus-4-8"
+available = ["claude-opus-4-8", "claude-sonnet-4-6"]
