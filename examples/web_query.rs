@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         stop: None,
         response_format: None,
         turn_id: None,
+        mcp_servers: Vec::new(),
     };
 
     let mut stream = runner.complete_stream(&request).await?;

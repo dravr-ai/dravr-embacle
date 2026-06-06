@@ -103,6 +103,7 @@ async fn main() {
         stop: None,
         response_format: None,
         turn_id: None,
+        mcp_servers: Vec::new(),
     };
 
     match runner.complete(&request).await {
@@ -137,6 +138,7 @@ async fn main() {
         stop: None,
         response_format: None,
         turn_id: None,
+        mcp_servers: Vec::new(),
     };
 
     match runner.complete_stream(&stream_request).await {

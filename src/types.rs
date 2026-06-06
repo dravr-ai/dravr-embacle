@@ -479,6 +479,60 @@ pub enum ResponseFormat {
 // Request/Response Types
 // ============================================================================
 
+/// A name/value pair for an MCP HTTP header or stdio environment variable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpHeader {
+    /// Header or environment-variable name.
+    pub name: String,
+    /// Header or environment-variable value.
+    pub value: String,
+}
+
+/// Transport an ACP-managed agent uses to reach an [`McpServerConfig`].
+///
+/// Mirrors the transports in the Agent Client Protocol `McpServer` schema.
+/// `Stdio` is mandatory for all ACP agents; `Http`/`Sse` are available only
+/// when the agent advertises the matching `mcpCapabilities` at initialize.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum McpTransport {
+    /// Streamable HTTP transport.
+    Http {
+        /// URL of the MCP server.
+        url: String,
+        /// HTTP headers sent on every request (e.g. `Authorization`).
+        headers: Vec<McpHeader>,
+    },
+    /// Server-Sent Events transport.
+    Sse {
+        /// URL of the MCP server.
+        url: String,
+        /// HTTP headers sent on every request.
+        headers: Vec<McpHeader>,
+    },
+    /// Stdio subprocess transport.
+    Stdio {
+        /// Path to the MCP server executable.
+        command: String,
+        /// Command-line arguments.
+        args: Vec<String>,
+        /// Environment variables set when launching the server.
+        env: Vec<McpHeader>,
+    },
+}
+
+/// An MCP server an ACP-managed provider (Copilot Headless) should connect to,
+/// exposing its tools to the model for native tool calling.
+///
+/// Providers without SDK tool calling ignore this; only the ACP `converse()`
+/// path forwards it into `session/new`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerConfig {
+    /// Human-readable identifier for the server.
+    pub name: String,
+    /// Transport the agent uses to reach the server.
+    pub transport: McpTransport,
+}
+
 /// Configuration for a chat completion request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -523,6 +577,13 @@ pub struct ChatRequest {
     /// never generate it themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<ConversationTurnId>,
+    /// MCP servers an ACP-managed provider should expose to the model for
+    /// native tool calling.
+    ///
+    /// Only the Copilot Headless `converse()` path forwards these into the ACP
+    /// `session/new` request; providers without SDK tool calling ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl ChatRequest {
@@ -541,7 +602,15 @@ impl ChatRequest {
             stop: None,
             response_format: None,
             turn_id: None,
+            mcp_servers: Vec::new(),
         }
+    }
+
+    /// Set the MCP servers an ACP-managed provider exposes to the model.
+    #[must_use]
+    pub fn with_mcp_servers(mut self, mcp_servers: Vec<McpServerConfig>) -> Self {
+        self.mcp_servers = mcp_servers;
+        self
     }
 
     /// Set the model to use

@@ -853,6 +853,7 @@ mod tests {
             stop: None,
             response_format: None,
             turn_id: None,
+            mcp_servers: Vec::new(),
         };
         assert_eq!(WebUiRunner::render_prompt(&req), "hello world");
     }
@@ -881,6 +882,7 @@ mod tests {
             stop: None,
             response_format: None,
             turn_id: None,
+            mcp_servers: Vec::new(),
         };
         let prompt = WebUiRunner::render_prompt(&req);
         assert!(prompt.contains("[System]"));

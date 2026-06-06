@@ -26,8 +26,8 @@ use tracing::{debug, field, info, instrument, trace, warn, Span};
 use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
 use crate::copilot_models::catalog_ids;
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, MessageRole,
-    RunnerError, StreamChunk, TokenUsage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
+    McpServerConfig, McpTransport, MessageRole, RunnerError, StreamChunk, TokenUsage,
 };
 
 /// Default prompt timeout (5 minutes). Override with `EMBACLE_ACP_PROMPT_TIMEOUT_SECS`.
@@ -56,6 +56,47 @@ fn build_prompt_params(session_id: &str, prompt: &[Value], max_tokens: Option<u3
         params["maxTokens"] = Value::from(mt);
     }
     params
+}
+
+/// Serialize embacle MCP server configs into the ACP `session/new`
+/// `mcpServers` wire format.
+///
+/// Matches the Agent Client Protocol `McpServer` schema: HTTP/SSE are
+/// `type`-tagged and carry `{name,url,headers:[{name,value}]}`; stdio is
+/// untagged and carries `{name,command,args,env:[{name,value}]}`. The
+/// `headers_to_json` shape pins the `{name,value}` pairs the schema's
+/// `HttpHeader`/`EnvVariable` expect.
+fn mcp_servers_to_acp_json(servers: &[McpServerConfig]) -> Vec<Value> {
+    fn headers_to_json(headers: &[McpHeader]) -> Vec<Value> {
+        headers
+            .iter()
+            .map(|h| json!({ "name": h.name, "value": h.value }))
+            .collect()
+    }
+
+    servers
+        .iter()
+        .map(|server| match &server.transport {
+            McpTransport::Http { url, headers } => json!({
+                "type": "http",
+                "name": server.name,
+                "url": url,
+                "headers": headers_to_json(headers),
+            }),
+            McpTransport::Sse { url, headers } => json!({
+                "type": "sse",
+                "name": server.name,
+                "url": url,
+                "headers": headers_to_json(headers),
+            }),
+            McpTransport::Stdio { command, args, env } => json!({
+                "name": server.name,
+                "command": command,
+                "args": args,
+                "env": headers_to_json(env),
+            }),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +290,7 @@ async fn setup_session(
     github_token: Option<&str>,
     model: &str,
     system_prompt: Option<&str>,
+    mcp_servers: &[McpServerConfig],
 ) -> Result<(AcpTransport, Child, String), RunnerError> {
     let mut child = spawn_copilot(cli_path, github_token)?;
 
@@ -284,18 +326,24 @@ async fn setup_session(
         info!("ACP: initialize handshake complete");
         debug!(response = %init_resp, "ACP initialize response");
 
-        // Create session with model and optional system prompt
+        // Create session with model, optional system prompt, and any MCP
+        // servers the model should call tools from.
         let mut session_params = json!({
             "model": model,
             "cwd": env::current_dir()
                 .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
-            "mcpServers": [],
+            "mcpServers": mcp_servers_to_acp_json(mcp_servers),
         });
         if let Some(sys) = system_prompt {
             session_params["systemPrompt"] = Value::String(sys.to_owned());
         }
 
-        info!(model = %model, has_system_prompt = system_prompt.is_some(), "ACP: creating session");
+        info!(
+            model = %model,
+            has_system_prompt = system_prompt.is_some(),
+            mcp_servers = mcp_servers.len(),
+            "ACP: creating session"
+        );
         let session_id_req = transport
             .send_request("session/new", session_params)
             .await?;
@@ -432,13 +480,14 @@ impl AcpProcess {
         &mut self,
         model: &str,
         system_prompt: Option<&str>,
+        mcp_servers: &[McpServerConfig],
     ) -> Result<String, RunnerError> {
         let outcome = time::timeout(acp_session_timeout(), async {
             let mut session_params = json!({
                 "model": model,
                 "cwd": env::current_dir()
                     .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
-                "mcpServers": [],
+                "mcpServers": mcp_servers_to_acp_json(mcp_servers),
             });
             if let Some(sys) = system_prompt {
                 session_params["systemPrompt"] = Value::String(sys.to_owned());
@@ -446,6 +495,7 @@ impl AcpProcess {
             info!(
                 model = %model,
                 has_system_prompt = system_prompt.is_some(),
+                mcp_servers = mcp_servers.len(),
                 "ACP: creating session"
             );
             let req_id = self
@@ -1181,6 +1231,7 @@ impl CopilotHeadlessRunner {
             self.config.github_token.as_deref(),
             &model,
             system_prompt,
+            &request.mcp_servers,
         )
         .await?;
 
@@ -1289,6 +1340,7 @@ impl CopilotHeadlessRunner {
             self.config.github_token.as_deref(),
             &model,
             system_prompt,
+            &request.mcp_servers,
         )
         .await?;
 
@@ -1369,11 +1421,19 @@ impl LlmProvider for CopilotHeadlessRunner {
     }
 
     fn capabilities(&self) -> LlmCapabilities {
-        // SDK_TOOL_CALLING is intentionally omitted: Copilot ACP manages its own
-        // tools internally (GitHub, code search) and cannot execute external MCP tools.
-        // Without this flag, callers fall through to text-based tool calling where
-        // the host application parses <tool_call> blocks and executes tools itself.
-        LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION
+        let base =
+            LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION;
+        // SDK_TOOL_CALLING is opt-in via `mcp_tool_calling`. When set, the
+        // caller passes `mcp_servers` per request and Copilot calls those tools
+        // natively over ACP — the CLI advertises `mcpCapabilities {http,sse}` at
+        // initialize, so it CAN execute external MCP tools. When unset, callers
+        // fall through to text-based tool calling, where the host parses
+        // <tool_call> blocks and executes tools itself.
+        if self.config.mcp_tool_calling {
+            base | LlmCapabilities::SDK_TOOL_CALLING
+        } else {
+            base
+        }
     }
 
     fn default_model(&self) -> &str {
@@ -1417,7 +1477,10 @@ impl LlmProvider for CopilotHeadlessRunner {
             guard.insert(fresh)
         };
 
-        let session_id = match process.new_session(&model, system_prompt).await {
+        let session_id = match process
+            .new_session(&model, system_prompt, &request.mcp_servers)
+            .await
+        {
             Ok(id) => id,
             Err(e) => {
                 // session/new failed on a previously-healthy subprocess.
@@ -1519,6 +1582,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             self.config.github_token.as_deref(),
             &model,
             system_prompt.as_deref(),
+            &request.mcp_servers,
         )
         .await?;
 
@@ -1962,11 +2026,53 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_include_vision_but_not_sdk_tool_calling() {
-        let caps =
-            LlmCapabilities::STREAMING | LlmCapabilities::SYSTEM_MESSAGES | LlmCapabilities::VISION;
+    fn capabilities_omit_sdk_tool_calling_by_default() {
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig::default());
+        let caps = runner.capabilities();
         assert!(caps.supports_vision());
-        assert!(!caps.supports_sdk_tool_calling());
+        assert!(caps.supports_streaming());
+        assert!(
+            !caps.supports_sdk_tool_calling(),
+            "default config falls through to text-based tool calling"
+        );
+    }
+
+    #[test]
+    fn capabilities_advertise_sdk_tool_calling_when_mcp_enabled() {
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
+            mcp_tool_calling: true,
+            ..CopilotHeadlessConfig::default()
+        });
+        assert!(
+            runner.capabilities().supports_sdk_tool_calling(),
+            "mcp_tool_calling=true routes tool turns through the ACP converse() loop"
+        );
+    }
+
+    #[test]
+    fn mcp_servers_to_acp_json_http_matches_wire_format() {
+        let servers = vec![McpServerConfig {
+            name: "dravr".to_owned(),
+            transport: McpTransport::Http {
+                url: "http://localhost:8081/mcp".to_owned(),
+                headers: vec![McpHeader {
+                    name: "Authorization".to_owned(),
+                    value: "Bearer tok".to_owned(),
+                }],
+            },
+        }];
+        let json = mcp_servers_to_acp_json(&servers);
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["type"], "http");
+        assert_eq!(json[0]["name"], "dravr");
+        assert_eq!(json[0]["url"], "http://localhost:8081/mcp");
+        assert_eq!(json[0]["headers"][0]["name"], "Authorization");
+        assert_eq!(json[0]["headers"][0]["value"], "Bearer tok");
+    }
+
+    #[test]
+    fn mcp_servers_to_acp_json_empty_is_empty_array() {
+        assert!(mcp_servers_to_acp_json(&[]).is_empty());
     }
 
     #[test]

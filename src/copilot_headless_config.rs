@@ -45,6 +45,12 @@ pub struct CopilotHeadlessConfig {
     /// system instructions regardless of how the ACP provider handles `systemPrompt`.
     /// Default: true.
     pub inject_system_in_prompt: bool,
+    /// Advertise `SDK_TOOL_CALLING` so callers route tool turns through the
+    /// ACP `converse()` loop with per-request MCP servers (native tool
+    /// calling), instead of falling through to text-based `<tool_call>`
+    /// parsing. The caller must pass `mcp_servers` on each request for tools
+    /// to be reachable. Default: false.
+    pub mcp_tool_calling: bool,
 }
 
 impl CopilotHeadlessConfig {
@@ -57,6 +63,7 @@ impl CopilotHeadlessConfig {
     /// - `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` — GitHub auth token
     /// - `COPILOT_HEADLESS_MAX_HISTORY_TURNS` — Max conversation history turns (default: 20)
     /// - `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` — Re-inject system prompt in prompt text (default: false)
+    /// - `COPILOT_HEADLESS_MCP_TOOL_CALLING` — Advertise `SDK_TOOL_CALLING` for native ACP MCP tool calling (default: false)
     #[must_use]
     pub fn from_env() -> Self {
         let cli_path = env::var("COPILOT_CLI_PATH").ok().map(PathBuf::from);
@@ -88,6 +95,9 @@ impl CopilotHeadlessConfig {
                 !matches!(v.to_lowercase().as_str(), "0" | "false" | "no")
             });
 
+        let mcp_tool_calling = env::var("COPILOT_HEADLESS_MCP_TOOL_CALLING")
+            .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
+
         Self {
             cli_path,
             model,
@@ -95,6 +105,7 @@ impl CopilotHeadlessConfig {
             permission_policy,
             max_history_turns,
             inject_system_in_prompt,
+            mcp_tool_calling,
         }
     }
 }
@@ -108,6 +119,7 @@ impl Default for CopilotHeadlessConfig {
             permission_policy: PermissionPolicy::default(),
             max_history_turns: DEFAULT_MAX_HISTORY_TURNS,
             inject_system_in_prompt: true,
+            mcp_tool_calling: false,
         }
     }
 }
