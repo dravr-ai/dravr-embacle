@@ -191,9 +191,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
-version = "2.12.1"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84d7ced0ae9557296835c32bf1b1e02b44c746701f898460fb000d7eaa84f00a"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 dependencies = [
  "serde_core",
 ]
@@ -586,7 +586,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "embacle"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "axum",

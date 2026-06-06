@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.0] — 2026-06-06
+
+### Added
+
+- feat(acp): per-request mcp_servers for native Copilot ACP tool calling ChatRequest.mcp_servers flows into session/new; opt-in mcp_tool_calling re-enables SDK_TOOL_CALLING to route tool turns through converse().
+
+### Fixed
+
+- fix(example): Duration::from_mins in web_login for clippy 1.96
+
+
+
 ## [0.17.0] — 2026-06-05
 
 ### Added
