@@ -281,6 +281,37 @@ fn acp_session_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// ACP `mode` config value that runs the agent loop to completion.
+const AUTOPILOT_MODE_VALUE: &str =
+    "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+
+/// Switch a session to Autopilot mode so Copilot runs the tool loop to
+/// completion (call tools → consume results → synthesize) within a single
+/// prompt turn.
+///
+/// In the default Agent mode, Copilot ends the turn right after the tool
+/// batch — the model never consumes the results, so callers get a bare
+/// "I'll pull X…" preface. Autopilot ("runs until task completion without
+/// user interaction") makes Copilot feed results back to the model and emit a
+/// real answer. Only meaningful when the session has MCP tools to call.
+async fn set_autopilot_mode(
+    transport: &mut AcpTransport,
+    session_id: &str,
+) -> Result<(), RunnerError> {
+    let req_id = transport
+        .send_request(
+            "session/set_config_option",
+            json!({
+                "sessionId": session_id,
+                "configId": "mode",
+                "value": AUTOPILOT_MODE_VALUE,
+            }),
+        )
+        .await?;
+    let _ = transport.read_response(req_id).await?;
+    Ok(())
+}
+
 /// Initialize ACP connection and create a session.
 ///
 /// Returns the transport and session id ready for prompting.
@@ -358,6 +389,19 @@ async fn setup_session(
             .to_owned();
 
         info!(session_id = %session_id, model = %model, "ACP session created");
+
+        // With MCP tools available, run the loop to completion (see
+        // `set_autopilot_mode`). Best-effort: on failure we log and continue
+        // in the default Agent mode rather than aborting the turn.
+        if !mcp_servers.is_empty() {
+            match set_autopilot_mode(&mut transport, &session_id).await {
+                Ok(()) => info!(session_id = %session_id, "ACP: session mode set to Autopilot"),
+                Err(e) => {
+                    warn!(session_id = %session_id, error = %e, "ACP: failed to set Autopilot mode");
+                }
+            }
+        }
+
         Ok::<_, RunnerError>((session_id,))
     })
     .await;
@@ -511,6 +555,18 @@ impl AcpProcess {
                 })?
                 .to_owned();
             info!(session_id = %session_id, model = %model, "ACP session created");
+
+            // Run the tool loop to completion when MCP tools are available
+            // (see `set_autopilot_mode`); best-effort.
+            if !mcp_servers.is_empty() {
+                match set_autopilot_mode(&mut self.transport, &session_id).await {
+                    Ok(()) => info!(session_id = %session_id, "ACP: session mode set to Autopilot"),
+                    Err(e) => {
+                        warn!(session_id = %session_id, error = %e, "ACP: failed to set Autopilot mode");
+                    }
+                }
+            }
+
             Ok::<_, RunnerError>(session_id)
         })
         .await;
