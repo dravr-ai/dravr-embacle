@@ -1,7 +1,7 @@
 # ABOUTME: Multi-stage Docker build for embacle-server and embacle-mcp binaries
 # ABOUTME: Runtime includes Node.js for installing npm-based CLI backends
 
-FROM rust:1-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release -p embacle-server -p embacle-mcp
