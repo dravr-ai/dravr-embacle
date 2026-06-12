@@ -25,7 +25,7 @@ path = "src/main.rs"
 
 [dependencies]
 embacle = { path = "../..", version = "0.19.0" }
-dravr-tronc = "0.2"
+dravr-tronc = "0.3"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
