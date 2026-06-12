@@ -243,7 +243,7 @@ pub async fn build_fallback_from_config(
             RunnerConfig::new(binary_path)
         };
 
-        let runner = create_runner_with_config(runner_type, runner_config).await;
+        let runner = create_runner_with_config(runner_type, runner_config).await?;
         providers.push(runner);
     }
 

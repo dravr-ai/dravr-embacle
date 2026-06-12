@@ -15,6 +15,16 @@
 //! - [`ServerState`] / [`SharedState`] — shared server state with provider and runner cache
 //! - [`build_tool_registry`] — default tool registry with all 7 MCP tools
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
+
 pub mod runner;
 pub mod state;
 pub mod tools;

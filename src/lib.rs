@@ -27,6 +27,16 @@
 //! can report run/step/tool/text progress to user-facing clients without
 //! coupling to a specific transport.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
+
 /// Core types: traits, messages, requests, responses, and errors
 pub mod types;
 

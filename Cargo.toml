@@ -45,6 +45,12 @@ unsafe_code = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
+# Error-handling restriction lints — parity with dravr-platform's zero-tolerance policy
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+str_to_string = "deny"
+
 
 # Type conversion casts - allowed when properly validated
 cast_possible_truncation = "allow"

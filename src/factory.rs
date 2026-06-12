@@ -80,8 +80,8 @@ pub async fn create_runner(
 pub async fn create_runner_with_config(
     runner_type: CliRunnerType,
     config: RunnerConfig,
-) -> Box<dyn LlmProvider> {
-    match runner_type {
+) -> Result<Box<dyn LlmProvider>, RunnerError> {
+    Ok(match runner_type {
         CliRunnerType::ClaudeCode => Box::new(ClaudeCodeRunner::new(config)),
         CliRunnerType::Copilot => Box::new(CopilotRunner::new(config)),
         CliRunnerType::CursorAgent => Box::new(CursorAgentRunner::new(config)),
@@ -100,14 +100,13 @@ pub async fn create_runner_with_config(
         // ClaudeWeb ignores RunnerConfig — drives a browser via the embedded provider config
         #[cfg(feature = "web-ui")]
         CliRunnerType::ClaudeWeb => {
-            let provider = crate::WebProviderConfig::claude_web_default()
-                .expect("embedded claude_web provider config is valid"); // Safe: static, unit-tested
+            let provider = crate::WebProviderConfig::claude_web_default()?;
             Box::new(crate::WebUiRunner::new(
                 crate::WebUiConfig::from_env(),
                 provider,
             ))
         }
-    }
+    })
 }
 
 /// All provider types supported by embacle, in discovery priority order

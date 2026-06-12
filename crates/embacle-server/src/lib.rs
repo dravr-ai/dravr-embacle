@@ -28,6 +28,16 @@
 //! - [`state`] — re-export of unified state from embacle-mcp
 //! - [`runner`] — runner factory bridging to embacle core
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
+
 pub mod auth;
 pub mod completions;
 pub mod health;

@@ -8,6 +8,13 @@
 
 //! End-to-end test for Claude Code CLI runner.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::str_to_string
+)]
+
 use std::process;
 use std::time::Duration;
 
