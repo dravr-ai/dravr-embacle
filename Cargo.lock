@@ -546,12 +546,13 @@ dependencies = [
 
 [[package]]
 name = "dravr-tronc"
-version = "0.3.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50438122675e0f5c2fe99407592e4db40d0fc0bf6fa37b1b4a3e4576a765f190"
+checksum = "5918d1d2a0e60b97f60b31d6a372e1e710beb1b3ff3b35599d6aede93f7ce4b2"
 dependencies = [
  "async-trait",
  "axum",
+ "bitflags",
  "chrono",
  "clap",
  "futures",
@@ -586,7 +587,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "embacle"
-version = "0.19.0"
+version = "0.19.2"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -611,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -625,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "async-trait",
  "axum",

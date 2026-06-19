@@ -23,7 +23,7 @@ use embacle_mcp::ServerState;
 use embacle_server::completions;
 use embacle_server::state::AppState;
 use http_body_util::BodyExt;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use embacle_server::router;
@@ -44,7 +44,7 @@ fn post_completions(body: &serde_json::Value) -> Request<Body> {
 
 /// Build a test app with the given default provider
 fn test_app() -> axum::Router {
-    let state = Arc::new(RwLock::new(ServerState::new(CliRunnerType::Copilot)));
+    let state = Arc::new(ServerState::new(CliRunnerType::Copilot));
     router::build(AppState::new(state))
 }
 
@@ -708,7 +708,7 @@ async fn provider_resolver_round_trip_via_completions() {
 #[tokio::test]
 async fn state_active_provider_accessible() {
     let state = ServerState::new(CliRunnerType::ClaudeCode);
-    assert_eq!(state.active_provider(), CliRunnerType::ClaudeCode);
+    assert_eq!(state.active_provider().await, CliRunnerType::ClaudeCode);
 }
 
 #[tokio::test]
@@ -771,7 +771,10 @@ async fn mcp_initialize_returns_protocol_version() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 1);
-    assert_eq!(json["result"]["protocolVersion"], "2024-11-05");
+    // dravr-tronc 0.5's dual-era engine advertises its current protocol revision
+    // (2025-11-25) in the initialize response rather than echoing the legacy
+    // version the client requested; the client adapts per the MCP handshake.
+    assert_eq!(json["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(json["result"]["serverInfo"]["name"], "embacle-mcp");
     assert!(json["result"]["capabilities"]["tools"].is_object());
 }

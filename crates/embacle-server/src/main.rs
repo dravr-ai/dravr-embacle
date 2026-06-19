@@ -28,7 +28,6 @@ use embacle_mcp::ServerState;
 use opentelemetry::global;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 
 #[cfg(feature = "mcp-tools")]
 use embacle_server::mcp_client::McpClientPool;
@@ -145,7 +144,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         _ => effective_provider,
     };
 
-    let state = Arc::new(RwLock::new(ServerState::new(effective_provider)));
+    let state = Arc::new(ServerState::new(effective_provider));
 
     tracing::info!(
         transport = %cli.transport,

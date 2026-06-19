@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.19.2] — 2026-06-19
+
+### Changed
+
+- deps: migrate `embacle-mcp` and `embacle-server` to dravr-tronc 0.5.3 (dual-era
+  MCP engine). tronc 0.5 hands tools/handlers a shared `&Arc<ServerState>` with no
+  outer `RwLock`, so the active provider/model/multiplex config moved to a
+  per-field interior `RwLock<ActiveConfig>`; those accessors are now `&self` async
+  (the runner cache was already interior `Mutex`). All three crates aligned to a
+  single workspace version. The core `embacle` crate is unchanged.
+
 ## [0.19.0] — 2026-06-07
 
 

@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
-use dravr_tronc::McpTool;
+use dravr_tronc::mcp::schema::{Tool, ToolResponse};
+use dravr_tronc::{McpTool, ToolContext};
 
 use crate::state::{ServerState, SharedState};
 
@@ -17,8 +17,8 @@ pub struct GetModel;
 
 #[async_trait]
 impl McpTool<ServerState> for GetModel {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "get_model".to_owned(),
             description: "Get the current model and list available models for the active provider"
                 .to_owned(),
@@ -26,15 +26,19 @@ impl McpTool<ServerState> for GetModel {
                 "type": "object",
                 "properties": {}
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, _arguments: Value) -> CallToolResult {
-        let state_guard = state.read().await;
-        let provider = state_guard.active_provider();
-        let current_model = state_guard.active_model().map(ToOwned::to_owned);
-        let runner_result = state_guard.get_runner(provider).await;
-        drop(state_guard);
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        _arguments: Value,
+    ) -> ToolResponse {
+        let provider = state.active_provider().await;
+        let current_model = state.active_model().await;
+        let runner_result = state.get_runner(provider).await;
 
         let (default_model, available_models) = match runner_result {
             Ok(runner) => (
@@ -42,7 +46,7 @@ impl McpTool<ServerState> for GetModel {
                 runner.available_models().to_vec(),
             ),
             Err(e) => {
-                return CallToolResult::text(
+                return ToolResponse::text(
                     json!({
                         "provider": provider.to_string(),
                         "current_model": current_model,
@@ -53,7 +57,7 @@ impl McpTool<ServerState> for GetModel {
             }
         };
 
-        CallToolResult::text(
+        ToolResponse::text(
             json!({
                 "provider": provider.to_string(),
                 "current_model": current_model,
@@ -70,8 +74,8 @@ pub struct SetModel;
 
 #[async_trait]
 impl McpTool<ServerState> for SetModel {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "set_model".to_owned(),
             description: "Set the model for the active provider (pass null to reset to default)"
                 .to_owned(),
@@ -85,21 +89,25 @@ impl McpTool<ServerState> for SetModel {
                 },
                 "required": ["model"]
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, arguments: Value) -> CallToolResult {
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        arguments: Value,
+    ) -> ToolResponse {
         let model = arguments
             .get("model")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
 
-        let mut state_guard = state.write().await;
-        state_guard.set_active_model(model.clone());
-        let provider = state_guard.active_provider();
-        drop(state_guard);
+        state.set_active_model(model.clone()).await;
+        let provider = state.active_provider().await;
 
-        CallToolResult::text(
+        ToolResponse::text(
             json!({
                 "provider": provider.to_string(),
                 "current_model": model,

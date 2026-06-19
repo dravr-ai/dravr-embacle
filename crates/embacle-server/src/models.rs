@@ -24,7 +24,6 @@ use crate::state::SharedState;
 /// with provider prefix (e.g., "copilot:gpt-4o").
 pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
     let mut data = Vec::new();
-    let state_guard = state.read().await;
 
     for &provider in ALL_PROVIDERS {
         let binary_name = provider.binary_name();
@@ -36,7 +35,7 @@ pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
             continue;
         }
 
-        match state_guard.get_runner(provider).await {
+        match state.get_runner(provider).await {
             Ok(runner) => {
                 let provider_name = runner.name();
                 let models = runner.available_models();

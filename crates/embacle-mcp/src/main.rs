@@ -25,7 +25,6 @@ use dravr_tronc::McpServer;
 use embacle::types::RunnerError;
 use embacle_mcp::runner::{parse_runner_type, valid_provider_names};
 use embacle_mcp::ServerState;
-use tokio::sync::RwLock;
 
 /// embacle-mcp — MCP server exposing embacle LLM runners via Model Context Protocol
 #[derive(Parser)]
@@ -54,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         ))
     })?;
 
-    let state = Arc::new(RwLock::new(ServerState::new(provider)));
+    let state = Arc::new(ServerState::new(provider));
     let registry = embacle_mcp::build_tool_registry();
     let server = Arc::new(McpServer::new(
         "embacle-mcp",

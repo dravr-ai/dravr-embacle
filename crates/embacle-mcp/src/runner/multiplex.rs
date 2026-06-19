@@ -95,10 +95,7 @@ async fn dispatch_single(
 ) -> ProviderResponse {
     let start = Instant::now();
 
-    let runner = {
-        let state_guard = state.read().await;
-        state_guard.get_runner(provider).await
-    };
+    let runner = state.get_runner(provider).await;
 
     let runner = match runner {
         Ok(r) => r,

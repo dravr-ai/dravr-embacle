@@ -1,5 +1,5 @@
 // ABOUTME: Shared server state plus the axum AppState carrying the optional MCP tool executor
-// ABOUTME: SharedState (Arc<RwLock<ServerState>>) is reused from embacle-mcp; AppState adds tools
+// ABOUTME: SharedState (Arc<ServerState>) is reused from embacle-mcp; AppState adds tools
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai

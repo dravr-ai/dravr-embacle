@@ -13,17 +13,28 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::runner::factory;
 
-/// Type alias for the shared state handle used across the server
-pub type SharedState = Arc<RwLock<ServerState>>;
+/// Type alias for the shared state handle used across the server.
+///
+/// `dravr-tronc` 0.5 shares state as `Arc<S>`, so the mutable provider/model
+/// configuration lives behind a per-field interior `RwLock` rather than an
+/// outer one.
+pub type SharedState = Arc<ServerState>;
+
+/// Interior-mutable provider configuration: the active provider, the optional
+/// model override, and the multiplex fan-out list, co-locked so a provider
+/// switch can atomically reset the model.
+struct ActiveConfig {
+    provider: CliRunnerType,
+    model: Option<String>,
+    multiplex: Vec<CliRunnerType>,
+}
 
 /// Central server state tracking provider configuration and cached runners
 ///
 /// Runners are created lazily on first access and cached for reuse.
 /// The active provider and model determine how prompt dispatch behaves.
 pub struct ServerState {
-    active_provider: CliRunnerType,
-    active_model: Option<String>,
-    multiplex_providers: Vec<CliRunnerType>,
+    config: RwLock<ActiveConfig>,
     runners: Mutex<HashMap<CliRunnerType, Arc<dyn LlmProvider>>>,
 }
 
@@ -31,42 +42,45 @@ impl ServerState {
     /// Create server state with the given default provider
     pub fn new(default_provider: CliRunnerType) -> Self {
         Self {
-            active_provider: default_provider,
-            active_model: None,
-            multiplex_providers: Vec::new(),
+            config: RwLock::new(ActiveConfig {
+                provider: default_provider,
+                model: None,
+                multiplex: Vec::new(),
+            }),
             runners: Mutex::new(HashMap::new()),
         }
     }
 
     /// Get the currently active provider type
-    pub const fn active_provider(&self) -> CliRunnerType {
-        self.active_provider
+    pub async fn active_provider(&self) -> CliRunnerType {
+        self.config.read().await.provider
     }
 
     /// Switch the active provider (resets the active model)
-    pub fn set_active_provider(&mut self, provider: CliRunnerType) {
-        self.active_provider = provider;
-        self.active_model = None;
+    pub async fn set_active_provider(&self, provider: CliRunnerType) {
+        let mut config = self.config.write().await;
+        config.provider = provider;
+        config.model = None;
     }
 
     /// Get the currently selected model (None means use provider default)
-    pub fn active_model(&self) -> Option<&str> {
-        self.active_model.as_deref()
+    pub async fn active_model(&self) -> Option<String> {
+        self.config.read().await.model.clone()
     }
 
     /// Set the model to use for subsequent requests
-    pub fn set_active_model(&mut self, model: Option<String>) {
-        self.active_model = model;
+    pub async fn set_active_model(&self, model: Option<String>) {
+        self.config.write().await.model = model;
     }
 
     /// Get the list of providers configured for multiplex dispatch
-    pub fn multiplex_providers(&self) -> &[CliRunnerType] {
-        &self.multiplex_providers
+    pub async fn multiplex_providers(&self) -> Vec<CliRunnerType> {
+        self.config.read().await.multiplex.clone()
     }
 
     /// Set the providers used when multiplexing prompts
-    pub fn set_multiplex_providers(&mut self, providers: Vec<CliRunnerType>) {
-        self.multiplex_providers = providers;
+    pub async fn set_multiplex_providers(&self, providers: Vec<CliRunnerType>) {
+        self.config.write().await.multiplex = providers;
     }
 
     /// Get or lazily create a runner for the given provider type
@@ -104,30 +118,30 @@ impl ServerState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_state_uses_provided_provider() {
+    #[tokio::test]
+    async fn default_state_uses_provided_provider() {
         let state = ServerState::new(CliRunnerType::Copilot);
-        assert_eq!(state.active_provider(), CliRunnerType::Copilot);
-        assert!(state.active_model().is_none());
-        assert!(state.multiplex_providers().is_empty());
+        assert_eq!(state.active_provider().await, CliRunnerType::Copilot);
+        assert!(state.active_model().await.is_none());
+        assert!(state.multiplex_providers().await.is_empty());
     }
 
-    #[test]
-    fn set_provider_resets_model() {
-        let mut state = ServerState::new(CliRunnerType::Copilot);
-        state.set_active_model(Some("gpt-4o".to_owned()));
-        assert_eq!(state.active_model(), Some("gpt-4o"));
+    #[tokio::test]
+    async fn set_provider_resets_model() {
+        let state = ServerState::new(CliRunnerType::Copilot);
+        state.set_active_model(Some("gpt-4o".to_owned())).await;
+        assert_eq!(state.active_model().await, Some("gpt-4o".to_owned()));
 
-        state.set_active_provider(CliRunnerType::ClaudeCode);
-        assert_eq!(state.active_provider(), CliRunnerType::ClaudeCode);
-        assert!(state.active_model().is_none());
+        state.set_active_provider(CliRunnerType::ClaudeCode).await;
+        assert_eq!(state.active_provider().await, CliRunnerType::ClaudeCode);
+        assert!(state.active_model().await.is_none());
     }
 
-    #[test]
-    fn multiplex_providers_round_trip() {
-        let mut state = ServerState::new(CliRunnerType::Copilot);
+    #[tokio::test]
+    async fn multiplex_providers_round_trip() {
+        let state = ServerState::new(CliRunnerType::Copilot);
         let providers = vec![CliRunnerType::ClaudeCode, CliRunnerType::OpenCode];
-        state.set_multiplex_providers(providers.clone());
-        assert_eq!(state.multiplex_providers(), &providers);
+        state.set_multiplex_providers(providers.clone()).await;
+        assert_eq!(state.multiplex_providers().await, providers);
     }
 }

@@ -104,8 +104,7 @@ async fn handle_single(
         return handle_server_side_tools(app, request, model_str).await;
     }
 
-    let state_guard = state.read().await;
-    let resolved = resolve_model(model_str, state_guard.active_provider());
+    let resolved = resolve_model(model_str, state.active_provider().await);
     debug!(
         provider = %resolved.runner_type,
         model = ?resolved.model,
@@ -114,11 +113,10 @@ async fn handle_single(
         "Dispatching completion"
     );
 
-    let runner = match state_guard.get_runner(resolved.runner_type).await {
+    let runner = match state.get_runner(resolved.runner_type).await {
         Ok(r) => r,
         Err(e) => return runner_error_to_response(&e),
     };
-    drop(state_guard);
 
     let strict = request
         .strict_capabilities
@@ -214,18 +212,16 @@ async fn handle_server_side_tools(
         );
     };
 
-    let state_guard = app.shared.read().await;
-    let resolved = resolve_model(model_str, state_guard.active_provider());
+    let resolved = resolve_model(model_str, app.shared.active_provider().await);
     debug!(
         provider = %resolved.runner_type,
         model = ?resolved.model,
         "Dispatching server-side tool execution"
     );
-    let runner = match state_guard.get_runner(resolved.runner_type).await {
+    let runner = match app.shared.get_runner(resolved.runner_type).await {
         Ok(r) => r,
         Err(e) => return runner_error_to_response(&e),
     };
-    drop(state_guard);
 
     let declarations =
         select_server_declarations(&server_tools.declarations, request.tools.as_deref());
@@ -466,8 +462,7 @@ async fn handle_multiplex(
         .strict_capabilities
         .unwrap_or_else(|| env::var("EMBACLE_STRICT_CAPS").is_ok_and(|v| v == "true" || v == "1"));
 
-    let state_guard = state.read().await;
-    let default_provider = state_guard.active_provider();
+    let default_provider = state.active_provider().await;
     let resolved: Vec<_> = models
         .iter()
         .map(|m| resolve_model(m, default_provider))
@@ -486,7 +481,7 @@ async fn handle_multiplex(
         request.response_format.as_ref().map(server_format_to_core);
 
     for &provider_type in &providers {
-        let runner = match state_guard.get_runner(provider_type).await {
+        let runner = match state.get_runner(provider_type).await {
             Ok(r) => r,
             Err(e) => return runner_error_to_response(&e),
         };
@@ -505,7 +500,6 @@ async fn handle_multiplex(
         }
     }
 
-    drop(state_guard);
     let engine = MultiplexEngine::new(state);
     let params = MultiplexParams {
         temperature: request.temperature,

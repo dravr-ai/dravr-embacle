@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use embacle::types::{ChatMessage, ChatRequest, MessageRole};
 use serde_json::{json, Value};
 
-use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
-use dravr_tronc::McpTool;
+use dravr_tronc::mcp::schema::{Tool, ToolResponse};
+use dravr_tronc::{McpTool, ToolContext};
 
 use crate::runner::multiplex::MultiplexEngine;
 use crate::state::{ServerState, SharedState};
@@ -21,8 +21,8 @@ pub struct Prompt;
 
 #[async_trait]
 impl McpTool<ServerState> for Prompt {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "prompt".to_owned(),
             description:
                 "Send a chat prompt to the active LLM provider, or multiplex to all configured providers"
@@ -73,13 +73,19 @@ impl McpTool<ServerState> for Prompt {
                 },
                 "required": ["messages"]
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, arguments: Value) -> CallToolResult {
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        arguments: Value,
+    ) -> ToolResponse {
         let messages = match parse_messages(&arguments) {
             Ok(msgs) => msgs,
-            Err(e) => return CallToolResult::error(e),
+            Err(e) => return ToolResponse::error(e),
         };
 
         let multiplex = arguments
@@ -96,17 +102,15 @@ impl McpTool<ServerState> for Prompt {
 }
 
 /// Execute a prompt against the single active provider
-async fn execute_single(state: &SharedState, messages: &[ChatMessage]) -> CallToolResult {
-    let state_guard = state.read().await;
-    let provider = state_guard.active_provider();
-    let runner = match state_guard.get_runner(provider).await {
+async fn execute_single(state: &SharedState, messages: &[ChatMessage]) -> ToolResponse {
+    let provider = state.active_provider().await;
+    let runner = match state.get_runner(provider).await {
         Ok(r) => r,
         Err(e) => {
-            return CallToolResult::error(format!("Failed to create runner: {e}"));
+            return ToolResponse::error(format!("Failed to create runner: {e}"));
         }
     };
-    let model = state_guard.active_model().map(ToOwned::to_owned);
-    drop(state_guard);
+    let model = state.active_model().await;
 
     let mut request = ChatRequest::new(messages.to_vec());
     if let Some(m) = model {
@@ -115,22 +119,19 @@ async fn execute_single(state: &SharedState, messages: &[ChatMessage]) -> CallTo
 
     match runner.complete(&request).await {
         Ok(response) => match serde_json::to_string_pretty(&response) {
-            Ok(json) => CallToolResult::text(json),
-            Err(e) => CallToolResult::error(format!("Response serialization failed: {e}")),
+            Ok(json) => ToolResponse::text(json),
+            Err(e) => ToolResponse::error(format!("Response serialization failed: {e}")),
         },
-        Err(e) => CallToolResult::error(format!("Completion error: {e}")),
+        Err(e) => ToolResponse::error(format!("Completion error: {e}")),
     }
 }
 
 /// Execute a prompt against all configured multiplex providers
-async fn execute_multiplex(state: &SharedState, messages: &[ChatMessage]) -> CallToolResult {
-    let providers = {
-        let state_guard = state.read().await;
-        state_guard.multiplex_providers().to_vec()
-    };
+async fn execute_multiplex(state: &SharedState, messages: &[ChatMessage]) -> ToolResponse {
+    let providers = state.multiplex_providers().await;
 
     if providers.is_empty() {
-        return CallToolResult::error(
+        return ToolResponse::error(
             "No multiplex providers configured. Use set_multiplex_provider first.".to_owned(),
         );
     }
@@ -138,10 +139,10 @@ async fn execute_multiplex(state: &SharedState, messages: &[ChatMessage]) -> Cal
     let engine = MultiplexEngine::new(Arc::clone(state));
     match engine.execute(messages, &providers).await {
         Ok(result) => match serde_json::to_string_pretty(&result) {
-            Ok(json) => CallToolResult::text(json),
-            Err(e) => CallToolResult::error(format!("Result serialization failed: {e}")),
+            Ok(json) => ToolResponse::text(json),
+            Err(e) => ToolResponse::error(format!("Result serialization failed: {e}")),
         },
-        Err(e) => CallToolResult::error(format!("Multiplex error: {e}")),
+        Err(e) => ToolResponse::error(format!("Multiplex error: {e}")),
     }
 }
 
