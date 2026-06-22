@@ -1,9 +1,16 @@
 name: Homebrew
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Invoked by release.yml as its final step, after the tap formula is pushed,
+  # so the install test runs against the just-released version (race-free). The
+  # old `push: tags` trigger was vestigial: releases here are workflow_dispatch,
+  # never tag-triggered, and a tag push fires before the formula is updated.
+  workflow_call:
+    inputs:
+      version:
+        description: 'Released version to verify against (e.g. 0.19.3)'
+        required: false
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -43,15 +50,18 @@ jobs:
           embacle-server --version
           embacle-mcp --version
 
-      - name: Verify version matches tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Only when invoked from release.yml with the released version; a bare
+      # workflow_dispatch run has no expected version and skips this check.
+      - name: Verify version matches release
+        if: inputs.version != ''
+        env:
+          EXPECTED: ${{ inputs.version }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
           SERVER_VERSION=$(embacle-server --version | awk '{print $2}')
           MCP_VERSION=$(embacle-mcp --version | awk '{print $2}')
-          echo "Tag: ${TAG}, Server: ${SERVER_VERSION}, MCP: ${MCP_VERSION}"
-          [ "$SERVER_VERSION" = "$TAG" ] || { echo "Server version mismatch"; exit 1; }
-          [ "$MCP_VERSION" = "$TAG" ] || { echo "MCP version mismatch"; exit 1; }
+          echo "Expected: ${EXPECTED}, Server: ${SERVER_VERSION}, MCP: ${MCP_VERSION}"
+          [ "$SERVER_VERSION" = "$EXPECTED" ] || { echo "Server version mismatch"; exit 1; }
+          [ "$MCP_VERSION" = "$EXPECTED" ] || { echo "MCP version mismatch"; exit 1; }
 
       - name: Smoke test — server starts and serves health endpoint
         run: |

@@ -413,3 +413,15 @@ jobs:
           git add Formula/embacle.rb Formula/embacle-ffi.rb
           git commit -m "chore: bump embacle to v${VERSION}"
           git push
+
+  # Final gate: now that the tap formula points at this release, install it
+  # via brew + exercise the FFI lib end-to-end. A tag push cannot auto-trigger
+  # homebrew.yml (release.yml pushes the tag with GITHUB_TOKEN, which does not
+  # fire downstream workflows), so call it here — after the formula is live —
+  # and pass the released version for an exact version-match check.
+  validate-homebrew:
+    name: Validate Homebrew install
+    needs: [version, update-homebrew]
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
