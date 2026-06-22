@@ -30,6 +30,12 @@ jobs:
       - name: Install from tap
         run: |
           brew tap dravr-ai/tap
+          # Homebrew 6.0 added "tap trust": third-party formulae must be
+          # explicitly trusted before install. `brew trust` is the documented,
+          # non-interactive CI path; it is absent on older brew (< 6.0), which
+          # needs no trust, so tolerate that with `|| true`. (Preferred over the
+          # HOMEBREW_NO_REQUIRE_TAP_TRUST bypass, which Homebrew will remove.)
+          brew trust dravr-ai/tap || true
           brew install embacle
 
       - name: Verify binaries exist
