@@ -117,6 +117,13 @@ jobs:
   # instead of finding out months later that crates.io has drifted.
   # `--dry-run` builds the package tarball and runs the same verification
   # crates.io does without uploading or needing a token.
+  #
+  # All three crates are published in ONE invocation: embacle-mcp/-server
+  # depend on `embacle = "<this version>"`, which is not on crates.io until
+  # release time. A per-crate dry-run resolves those deps against the registry
+  # and fails ("failed to select a version for the requirement `embacle`").
+  # A workspace co-publish makes cargo treat the to-be-published sibling
+  # versions as available and resolve them locally in dependency order.
   publish-dry-run:
     name: Publish Dry Run
     runs-on: ubuntu-latest
@@ -126,6 +133,4 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo publish -p embacle --dry-run
-      - run: cargo publish -p embacle-mcp --dry-run
-      - run: cargo publish -p embacle-server --dry-run
+      - run: cargo publish -p embacle -p embacle-mcp -p embacle-server --dry-run
