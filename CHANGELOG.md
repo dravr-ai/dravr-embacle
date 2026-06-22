@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.3] — 2026-06-22
+
+### Added
+
+- feat(mcp): migrate to dravr-tronc 0.5.3; release v0.19.2 ActiveConfig->interior RwLock (provider/model/multiplex accessors &self async); init protocolVersion now 2025-11-25; -mcp/-server only.
+- feat(release): adopt dravr-tronc 0.3 via coordinated republish (embacle-mcp/server 0.19.1) Republish embacle-mcp+embacle-server 0.19.1 on tronc 0.3.1 so the publish graph resolves a single tronc version; root embacle (no tronc dep) stays 0.19.0.
+
+### Fixed
+
+- fix(ci): combine publish dry-run into one workspace invocation Per-crate dry-run resolved internal embacle dep vs crates.io (only 0.19.0 there, not the unpublished 0.19.2) and failed; co-publishing all three resolves siblings locally. Verified cargo 1.96.0 exit 0.
+
+### Other
+
+- style(lints): enforce error-handling restriction lints; create_runner_with_config -> Result Sole prod fix: ClaudeWeb embedded-config parse propagated via ? (was expect); crate-root cfg_attr(test, allow) + tests/examples allow attrs; --all-targets clippy green.
+- Revert "chore(deps): bump dravr-tronc 0.2 -> 0.3" (publish-dry-run version skew) embacle-server publishes against registry embacle-mcp 0.19.0 (tronc 0.2) -> two tronc versions clash; needs a coordinated member-crate release to adopt 0.3.
+- chore(deps): bump dravr-tronc 0.2 -> 0.3 (now published to crates.io) Server/mcp crates compile against 0.3.1; picks up otel + NotifyLayer + error-handling fixes.
+
+
+
 ## [0.19.2] — 2026-06-19
 
 ### Changed
