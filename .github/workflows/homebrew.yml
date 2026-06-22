@@ -18,6 +18,15 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # GitHub's ubuntu runners ship Homebrew at /home/linuxbrew/.linuxbrew but
+      # do not put it on PATH in non-login shells, so `brew` is not found.
+      # macOS runners already have brew on PATH.
+      - name: Set up Homebrew on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew || { echo "linuxbrew not found on runner"; exit 1; }
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
       - name: Install from tap
         run: |
           brew tap dravr-ai/tap
@@ -43,21 +52,28 @@ jobs:
           embacle-server --provider copilot --port 9876 &
           SERVER_PID=$!
 
-          # Wait for the server to be ready (up to 10 seconds)
+          # Wait for the HTTP server to accept connections (up to 10 seconds).
+          # In CI no provider CLI is installed, so /health returns 503
+          # (degraded) — use curl WITHOUT -f so any HTTP response counts as
+          # "up"; -f would treat the expected 503 as a connection failure.
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:9876/health >/dev/null 2>&1; then
+            if curl -s -o /dev/null http://localhost:9876/health; then
               echo "Server is up after $((i / 2))s"
               break
             fi
             sleep 0.5
           done
 
-          # Verify health endpoint returns JSON with providers
-          HEALTH=$(curl -sf http://localhost:9876/health)
+          # /health: accept the degraded 503 (no provider creds in CI) — this is
+          # a smoke test that the binary boots and serves, not that a provider is
+          # authenticated. Just verify the handler returns JSON with a providers
+          # field. (-f omitted so the 503 body is still captured.)
+          HEALTH=$(curl -s http://localhost:9876/health)
           echo "Health response: ${HEALTH}"
           echo "${HEALTH}" | grep -q '"providers"' || { echo "Health missing providers"; kill $SERVER_PID; exit 1; }
 
-          # Verify models endpoint
+          # /v1/models always returns 200 with a data array (empty when no
+          # provider CLI is present), so -f is correct here.
           MODELS=$(curl -sf http://localhost:9876/v1/models)
           echo "Models response: ${MODELS}"
           echo "${MODELS}" | grep -q '"data"' || { echo "Models missing data"; kill $SERVER_PID; exit 1; }
@@ -75,7 +91,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # llvm-tools provides llvm-nm, used below to read the static archive —
+      # macOS's system nm (Xcode) cannot parse Rust 1.96's LLVM object files.
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: llvm-tools
 
       - uses: Swatinem/rust-cache@v2
 
@@ -98,10 +118,15 @@ jobs:
 
       - name: Verify FFI symbols exported
         run: |
-          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_init" || { echo "embacle_init not found"; exit 1; }
-          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_chat_completion" || { echo "embacle_chat_completion not found"; exit 1; }
-          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_free_string" || { echo "embacle_free_string not found"; exit 1; }
-          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_shutdown" || { echo "embacle_shutdown not found"; exit 1; }
+          # Use the toolchain-matched llvm-nm: Apple's system nm cannot read
+          # object files produced by Rust 1.96's bundled LLVM ("Unknown
+          # attribute kind"). llvm-nm ships in the llvm-tools component under
+          # the rustlib bin dir (sibling of the target libdir).
+          NM="$(rustc --print target-libdir)/../bin/llvm-nm"
+          "$NM" "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_init" || { echo "embacle_init not found"; exit 1; }
+          "$NM" "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_chat_completion" || { echo "embacle_chat_completion not found"; exit 1; }
+          "$NM" "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_free_string" || { echo "embacle_free_string not found"; exit 1; }
+          "$NM" "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_shutdown" || { echo "embacle_shutdown not found"; exit 1; }
           echo "All 4 FFI symbols verified"
 
       - name: Verify C header compiles
