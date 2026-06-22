@@ -89,7 +89,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # llvm-tools provides llvm-nm, used below to read the static archive —
       # macOS's system nm (Xcode) cannot parse Rust 1.96's LLVM object files.
