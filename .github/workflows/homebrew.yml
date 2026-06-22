@@ -79,20 +79,29 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # /usr/local/lib is not writable without sudo on GitHub's ubuntu runners,
+      # and on arm macOS it does not exist (Homebrew lives in /opt/homebrew), so
+      # the default install path made every FFI run fail at the install step.
+      # Install to a user-writable prefix instead — running the whole script
+      # under sudo is not an option because root lacks the runner's rustup
+      # toolchain. install-ffi.sh honours the PREFIX env var for install+uninstall.
+      - name: Set install prefix
+        run: echo "PREFIX=$HOME/.local" >> "$GITHUB_ENV"
+
       - name: Build and install FFI
         run: ./scripts/install-ffi.sh
 
       - name: Verify library installed
         run: |
-          test -f /usr/local/lib/libembacle.a || { echo "libembacle.a not found"; exit 1; }
-          test -f /usr/local/include/embacle.h || { echo "embacle.h not found"; exit 1; }
+          test -f "$PREFIX/lib/libembacle.a" || { echo "libembacle.a not found"; exit 1; }
+          test -f "$PREFIX/include/embacle.h" || { echo "embacle.h not found"; exit 1; }
 
       - name: Verify FFI symbols exported
         run: |
-          nm /usr/local/lib/libembacle.a | grep -q "T.*embacle_init" || { echo "embacle_init not found"; exit 1; }
-          nm /usr/local/lib/libembacle.a | grep -q "T.*embacle_chat_completion" || { echo "embacle_chat_completion not found"; exit 1; }
-          nm /usr/local/lib/libembacle.a | grep -q "T.*embacle_free_string" || { echo "embacle_free_string not found"; exit 1; }
-          nm /usr/local/lib/libembacle.a | grep -q "T.*embacle_shutdown" || { echo "embacle_shutdown not found"; exit 1; }
+          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_init" || { echo "embacle_init not found"; exit 1; }
+          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_chat_completion" || { echo "embacle_chat_completion not found"; exit 1; }
+          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_free_string" || { echo "embacle_free_string not found"; exit 1; }
+          nm "$PREFIX/lib/libembacle.a" | grep -q "T.*embacle_shutdown" || { echo "embacle_shutdown not found"; exit 1; }
           echo "All 4 FFI symbols verified"
 
       - name: Verify C header compiles
@@ -105,13 +114,13 @@ jobs:
               return 0;
           }
           EOF
-          cc -c -I/usr/local/include /tmp/test_embacle.c -o /tmp/test_embacle.o
+          cc -c -I"$PREFIX/include" /tmp/test_embacle.c -o /tmp/test_embacle.o
           echo "C header compiles successfully"
           rm -f /tmp/test_embacle.c /tmp/test_embacle.o
 
       - name: Test uninstall
         run: |
           ./scripts/install-ffi.sh --uninstall
-          test ! -f /usr/local/lib/libembacle.a || { echo "libembacle.a still present after uninstall"; exit 1; }
-          test ! -f /usr/local/include/embacle.h || { echo "embacle.h still present after uninstall"; exit 1; }
+          test ! -f "$PREFIX/lib/libembacle.a" || { echo "libembacle.a still present after uninstall"; exit 1; }
+          test ! -f "$PREFIX/include/embacle.h" || { echo "embacle.h still present after uninstall"; exit 1; }
           echo "Uninstall verified"
