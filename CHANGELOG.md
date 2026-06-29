@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.4] — 2026-06-29
+
+### Added
+
+- feat(ci): auto-validate Homebrew install after release release.yml now calls homebrew.yml (reusable workflow_call) as a final gated job once the tap formula is pushed, passing the released version for an exact match; drops the vestigial push:tags trigger (GITHUB_TOKEN tag pushes never fired it and would race the formula update). workflow_dispatch retained for manual runs.
+
+### Fixed
+
+- fix(copilot-headless): route ACP sessions to the configured model via settings.json copilot --acp routes by ~/.copilot/settings.json "model" and ignores both the session/new model field and the --model flag (cosmetic label only); write the model into settings.json before each spawn (preserving other keys), track the warm-process model and respawn on change, and log the real routing model — fixes ACP sessions silently falling through to the account GPT/Gemini default while logs claimed the requested model.
+- fix(ci): trust dravr-ai tap for Homebrew 6.0 install (ubuntu) Homebrew 6.0 refuses untrusted third-party taps; brew trust dravr-ai/tap (|| true for older brew) before install. Last of 4 Homebrew jobs.
+- fix(ci): make Homebrew test harness pass (llvm-nm, linuxbrew PATH, 503 health) macOS FFI symbols via toolchain llvm-nm (Apple nm can't read Rust 1.96 LLVM objects); add linuxbrew to PATH on ubuntu (brew not found); smoke test accepts degraded 503 /health (no provider CLIs in CI) by dropping curl -f. All validated locally.
+
+
+
 ## [0.19.3] — 2026-06-22
 
 ### Added
