@@ -5,7 +5,8 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -240,11 +241,87 @@ impl AcpTransport {
 // ACP session lifecycle
 // ---------------------------------------------------------------------------
 
-/// Spawn the copilot --acp subprocess with piped stdio.
-fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child, RunnerError> {
+/// Ensure the GitHub Copilot CLI config selects `model` for the next
+/// `copilot --acp` session, returning the settings path on success.
+///
+/// `copilot --acp` routes by the `"model"` field in `$HOME/.copilot/settings.json`
+/// ONLY — it ignores both the ACP `session/new` `model` field and the `--model`
+/// flag (those set a cosmetic `currentModelId` label, not the served model). With
+/// no settings.json the CLI falls through to the account's default / experiment
+/// routing (e.g. GPT auto-selection), so a `claude-sonnet-4.6` request silently
+/// runs GPT/Gemini. Read-modify-write that file so the session actually runs
+/// `model`, preserving any unrelated keys (theme, effortLevel, ...) already there.
+///
+/// Errors are the caller's to downgrade to a warning: a config write failure must
+/// never abort a turn — it just leaves the previous/default model in effect.
+fn ensure_copilot_settings_model(model: &str) -> Result<PathBuf, RunnerError> {
+    let home = env::var_os("HOME").ok_or_else(|| {
+        RunnerError::internal("HOME is not set; cannot locate copilot settings.json")
+    })?;
+    write_settings_model(&PathBuf::from(home).join(".copilot"), model)
+}
+
+/// Read-modify-write `<copilot_dir>/settings.json` so its `"model"` key is
+/// `model`, preserving any other keys. Split from [`ensure_copilot_settings_model`]
+/// so it is testable against a temp dir without mutating the process `HOME`.
+fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, RunnerError> {
+    fs::create_dir_all(copilot_dir)
+        .map_err(|e| RunnerError::internal(format!("create {}: {e}", copilot_dir.display())))?;
+    let path = copilot_dir.join("settings.json");
+
+    // Preserve existing keys; a missing or unparseable file starts empty.
+    let mut settings = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    settings["model"] = Value::String(model.to_owned());
+
+    let body = serde_json::to_string_pretty(&settings)
+        .map_err(|e| RunnerError::internal(format!("serialize copilot settings: {e}")))?;
+    fs::write(&path, body)
+        .map_err(|e| RunnerError::internal(format!("write {}: {e}", path.display())))?;
+    Ok(path)
+}
+
+/// Spawn the copilot --acp subprocess with piped stdio, pinning `model`.
+///
+/// Pinning happens two ways, because the `--acp` server resolves its model
+/// differently from the rest of the CLI:
+/// 1. [`ensure_copilot_settings_model`] writes `model` into
+///    `~/.copilot/settings.json` — the field `copilot --acp` ACTUALLY routes by.
+/// 2. The `--model` flag is also passed; for `--acp` it only sets the cosmetic
+///    `currentModelId` label, but it keeps that label consistent with the route
+///    and is the real selector for the non-ACP (`-p`) paths.
+///
+/// The model is fixed for the lifetime of the spawned subprocess — callers
+/// reusing a warm process must respawn to change it.
+fn spawn_copilot(
+    cli_path: &PathBuf,
+    github_token: Option<&str>,
+    model: &str,
+) -> Result<Child, RunnerError> {
+    // The route-determining step. Non-fatal: on failure copilot keeps whatever
+    // model its settings.json already selects rather than aborting the spawn.
+    match ensure_copilot_settings_model(model) {
+        Ok(path) => info!(
+            model = %model,
+            settings = %path.display(),
+            "ACP: pinned routing model in copilot settings.json"
+        ),
+        Err(e) => warn!(
+            model = %model,
+            error = %e,
+            "ACP: could not pin routing model in settings.json; copilot may use its default model"
+        ),
+    }
+
     let mut cmd = Command::new(cli_path);
-    cmd.arg("--acp")
-        .stdin(Stdio::piped())
+    cmd.arg("--acp");
+    if !model.is_empty() {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -252,7 +329,7 @@ fn spawn_copilot(cli_path: &PathBuf, github_token: Option<&str>) -> Result<Child
         cmd.env("COPILOT_GITHUB_TOKEN", token);
     }
 
-    info!(cli_path = %cli_path.display(), "Spawning copilot --acp subprocess");
+    info!(cli_path = %cli_path.display(), model = %model, "Spawning copilot --acp subprocess");
 
     let child = cmd
         .spawn()
@@ -323,7 +400,7 @@ async fn setup_session(
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
 ) -> Result<(AcpTransport, Child, String), RunnerError> {
-    let mut child = spawn_copilot(cli_path, github_token)?;
+    let mut child = spawn_copilot(cli_path, github_token, model)?;
 
     let stdin = child
         .stdin
@@ -446,6 +523,10 @@ async fn setup_session(
 struct AcpProcess {
     child: Child,
     transport: AcpTransport,
+    /// The model this subprocess was spawned with via `copilot --acp --model`.
+    /// Fixed for the subprocess lifetime — a request for a different model
+    /// requires respawning (see [`CopilotHeadlessRunner::complete`]).
+    model: String,
 }
 
 impl AcpProcess {
@@ -457,8 +538,9 @@ impl AcpProcess {
     async fn spawn_and_initialize(
         cli_path: &PathBuf,
         github_token: Option<&str>,
+        model: &str,
     ) -> Result<Self, RunnerError> {
-        let mut child = spawn_copilot(cli_path, github_token)?;
+        let mut child = spawn_copilot(cli_path, github_token, model)?;
         let stdin = child
             .stdin
             .take()
@@ -492,7 +574,11 @@ impl AcpProcess {
         .await;
 
         match init_outcome {
-            Ok(Ok(())) => Ok(Self { child, transport }),
+            Ok(Ok(())) => Ok(Self {
+                child,
+                transport,
+                model: model.to_owned(),
+            }),
             Ok(Err(e)) => {
                 let stderr_output = collect_stderr(&mut child).await;
                 warn!(error = %e, stderr = %stderr_output, "ACP initialize failed");
@@ -1516,10 +1602,20 @@ impl LlmProvider for CopilotHeadlessRunner {
         let mut guard = self.process.lock().await;
 
         // Detect a subprocess that exited between calls (crash, OOM kill,
-        // upstream disconnect) and drop it so we respawn below.
+        // upstream disconnect) and drop it so we respawn below. Also respawn
+        // when the requested model differs from the one the warm subprocess
+        // was spawned with: `--model` is fixed at spawn time, so a live
+        // process locked to model A cannot serve a request for model B.
         if let Some(p) = guard.as_mut() {
             if !p.is_alive() {
                 warn!("ACP subprocess exited between calls; respawning");
+                *guard = None;
+            } else if p.model != model {
+                info!(
+                    warm_model = %p.model,
+                    requested_model = %model,
+                    "ACP requested model changed; respawning warm subprocess to re-pin --model"
+                );
                 *guard = None;
             }
         }
@@ -1527,9 +1623,12 @@ impl LlmProvider for CopilotHeadlessRunner {
         let process = if let Some(existing) = guard.as_mut() {
             existing
         } else {
-            let fresh =
-                AcpProcess::spawn_and_initialize(&cli_path, self.config.github_token.as_deref())
-                    .await?;
+            let fresh = AcpProcess::spawn_and_initialize(
+                &cli_path,
+                self.config.github_token.as_deref(),
+                &model,
+            )
+            .await?;
             guard.insert(fresh)
         };
 
@@ -1690,6 +1789,48 @@ mod tests {
     use super::*;
     use crate::types::ChatMessage;
     use serde_json::json;
+
+    #[test]
+    fn write_settings_model_creates_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let copilot = dir.path().join(".copilot");
+        let path = write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["model"], "claude-sonnet-4.6");
+    }
+
+    #[test]
+    fn write_settings_model_preserves_other_keys() {
+        // The real settings.json carries theme/effortLevel/etc; only "model" must change.
+        let dir = tempfile::tempdir().unwrap();
+        let copilot = dir.path().join(".copilot");
+        fs::create_dir_all(&copilot).unwrap();
+        fs::write(
+            copilot.join("settings.json"),
+            r#"{"theme":"auto","effortLevel":"high","model":"gemini-3.5-flash"}"#,
+        )
+        .unwrap();
+        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(copilot.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["model"], "claude-sonnet-4.6"); // overwritten
+        assert_eq!(v["theme"], "auto"); // preserved
+        assert_eq!(v["effortLevel"], "high"); // preserved
+    }
+
+    #[test]
+    fn write_settings_model_recovers_from_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let copilot = dir.path().join(".copilot");
+        fs::create_dir_all(&copilot).unwrap();
+        fs::write(copilot.join("settings.json"), "not valid json {{").unwrap();
+        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(copilot.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["model"], "claude-sonnet-4.6");
+    }
 
     /// Build a valid ACP permission request JSON with the given option kinds.
     ///

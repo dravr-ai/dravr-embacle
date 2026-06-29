@@ -162,5 +162,10 @@ name = "web_query"
 path = "examples/web_query.rs"
 required-features = ["web-ui"]
 
+[[example]]
+name = "acp_model_smoke"
+path = "examples/acp_model_smoke.rs"
+required-features = ["copilot-headless"]
+
 [lints]
 workspace = true
