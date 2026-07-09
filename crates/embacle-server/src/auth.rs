@@ -96,7 +96,7 @@ impl fmt::Display for InsecureBindError {
 
 impl Error for InsecureBindError {}
 
-/// Whether `host` resolves to a loopback interface (127.0.0.0/8, ::1, localhost)
+/// Whether `host` resolves to a loopback interface (`127.0.0.0/8`, `::1`, localhost)
 ///
 /// Anything that does not parse as a loopback address — including `0.0.0.0`,
 /// `::`, and unknown names — is treated as non-loopback so the guardian fails
@@ -110,10 +110,7 @@ fn is_loopback_host(host: &str) -> bool {
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(trimmed);
-    stripped
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
+    stripped.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Resolve the startup authentication posture for an HTTP bind.
@@ -174,21 +171,21 @@ mod tests {
 
     #[test]
     fn allows_loopback_dev_without_key() {
-        assert_eq!(
-            resolve_startup_auth("127.0.0.1", false).unwrap(),
-            AuthMode::LoopbackDev
-        );
+        assert!(matches!(
+            resolve_startup_auth("127.0.0.1", false),
+            Ok(AuthMode::LoopbackDev)
+        ));
     }
 
     #[test]
     fn enforces_when_key_present_on_any_host() {
-        assert_eq!(
-            resolve_startup_auth("0.0.0.0", true).unwrap(),
-            AuthMode::Enforced
-        );
-        assert_eq!(
-            resolve_startup_auth("127.0.0.1", true).unwrap(),
-            AuthMode::Enforced
-        );
+        assert!(matches!(
+            resolve_startup_auth("0.0.0.0", true),
+            Ok(AuthMode::Enforced)
+        ));
+        assert!(matches!(
+            resolve_startup_auth("127.0.0.1", true),
+            Ok(AuthMode::Enforced)
+        ));
     }
 }
