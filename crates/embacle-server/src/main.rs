@@ -29,6 +29,7 @@ use opentelemetry::global;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::net::TcpListener;
 
+use embacle_server::auth;
 #[cfg(feature = "mcp-tools")]
 use embacle_server::mcp_client::McpClientPool;
 use embacle_server::router;
@@ -163,6 +164,23 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             stdio::run(server).await?;
         }
         "http" => {
+            // Guardian fails closed: never serve tool execution on a reachable
+            // interface without an API key. Loopback dev binds warn and proceed.
+            match auth::resolve_startup_auth(&cli.host, auth::api_key_configured()) {
+                Ok(auth::AuthMode::Enforced) => {
+                    tracing::info!("EMBACLE_API_KEY set; bearer authentication enforced");
+                }
+                Ok(auth::AuthMode::LoopbackDev) => {
+                    tracing::warn!(
+                        host = %cli.host,
+                        "No EMBACLE_API_KEY set; unauthenticated access allowed on loopback bind only"
+                    );
+                }
+                Err(e) => {
+                    return Err(RunnerError::config(e.to_string()).into());
+                }
+            }
+
             #[cfg(feature = "mcp-tools")]
             let server_tools = build_server_tools(config.as_ref()).await;
             #[cfg(not(feature = "mcp-tools"))]
