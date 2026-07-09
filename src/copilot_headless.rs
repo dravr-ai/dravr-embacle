@@ -1792,28 +1792,28 @@ mod tests {
 
     #[test]
     fn write_settings_model_creates_file_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
         let copilot = dir.path().join(".copilot");
-        let path = write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
-        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let path = write_settings_model(&copilot, "claude-sonnet-4.6").unwrap(); // Safe: test assertion on function under test
+        let raw = fs::read_to_string(&path).unwrap(); // Safe: test reads file it just created
+        let v: Value = serde_json::from_str(&raw).unwrap(); // Safe: test parses JSON it just wrote
         assert_eq!(v["model"], "claude-sonnet-4.6");
     }
 
     #[test]
     fn write_settings_model_preserves_other_keys() {
         // The real settings.json carries theme/effortLevel/etc; only "model" must change.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
         let copilot = dir.path().join(".copilot");
-        fs::create_dir_all(&copilot).unwrap();
+        fs::create_dir_all(&copilot).unwrap(); // Safe: test setup, dir inside fresh tempdir
         fs::write(
             copilot.join("settings.json"),
             r#"{"theme":"auto","effortLevel":"high","model":"gemini-3.5-flash"}"#,
         )
-        .unwrap();
-        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
-        let v: Value =
-            serde_json::from_str(&fs::read_to_string(copilot.join("settings.json")).unwrap())
-                .unwrap();
+        .unwrap(); // Safe: test setup, write into fresh tempdir
+        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap(); // Safe: test assertion on function under test
+        let raw = fs::read_to_string(copilot.join("settings.json")).unwrap(); // Safe: test reads file it just wrote
+        let v: Value = serde_json::from_str(&raw).unwrap(); // Safe: test parses JSON written by function under test
         assert_eq!(v["model"], "claude-sonnet-4.6"); // overwritten
         assert_eq!(v["theme"], "auto"); // preserved
         assert_eq!(v["effortLevel"], "high"); // preserved
@@ -1821,14 +1821,13 @@ mod tests {
 
     #[test]
     fn write_settings_model_recovers_from_corrupt_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
         let copilot = dir.path().join(".copilot");
-        fs::create_dir_all(&copilot).unwrap();
-        fs::write(copilot.join("settings.json"), "not valid json {{").unwrap();
-        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap();
-        let v: Value =
-            serde_json::from_str(&fs::read_to_string(copilot.join("settings.json")).unwrap())
-                .unwrap();
+        fs::create_dir_all(&copilot).unwrap(); // Safe: test setup, dir inside fresh tempdir
+        fs::write(copilot.join("settings.json"), "not valid json {{").unwrap(); // Safe: test setup, write into fresh tempdir
+        write_settings_model(&copilot, "claude-sonnet-4.6").unwrap(); // Safe: test assertion on function under test
+        let raw = fs::read_to_string(copilot.join("settings.json")).unwrap(); // Safe: test reads file it just wrote
+        let v: Value = serde_json::from_str(&raw).unwrap(); // Safe: test parses JSON written by function under test
         assert_eq!(v["model"], "claude-sonnet-4.6");
     }
 
