@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.5] — 2026-07-10
+
+### Fixed
+
+- fix(claude-code): classify prompt-too-long as ContextLength (400), not 502
+- fix(clippy): backtick doc addrs, is_ok_and, unwrap-free auth tests CI clippy --all-targets flagged doc_markdown (127.0.0.0/8, ::1) + map().unwrap_or -> is_ok_and in is_loopback_host; arch-validation counted 3 test unwrap()s — replaced with matches!. Fixes the 52d04d6 CI failure.
+
+### Other
+
+- test(copilot_headless): annotate safe test unwraps for arch-validation 15 test-only unwrap sites (tempdir/fs/serde setup) get same-line // Safe: comments; zero flagged remain
+
+
+
 ## [0.19.4] — 2026-06-29
 
 ### Added
