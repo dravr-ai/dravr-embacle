@@ -39,6 +39,11 @@ struct ClaudeResponse {
     result: Option<String>,
     #[serde(default)]
     is_error: bool,
+    /// Why the CLI stopped. `"prompt_too_long"` marks a permanent context-window
+    /// overflow (vs a transient upstream failure) so we can surface it as a
+    /// non-retryable 400 instead of a retryable 502.
+    #[serde(default)]
+    terminal_reason: Option<String>,
     session_id: Option<String>,
     usage: Option<ClaudeUsage>,
 }
@@ -145,13 +150,28 @@ impl ClaudeCodeRunner {
         })?;
 
         if parsed.is_error {
-            return Err(RunnerError::external_service(
-                "claude-code",
-                parsed
-                    .result
-                    .as_deref()
-                    .unwrap_or("Unknown error from Claude Code"),
-            ));
+            let message = parsed
+                .result
+                .as_deref()
+                .unwrap_or("Unknown error from Claude Code");
+            // A context-window overflow is permanent for the identical prompt:
+            // classify it as ContextLength (HTTP 400, non-transient) so the caller
+            // shrinks the request instead of retrying the same oversized blob.
+            // Detect via the CLI's structured `terminal_reason` first, falling back
+            // to the human-readable message.
+            let is_context_overflow = parsed
+                .terminal_reason
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case("prompt_too_long"))
+                || message.to_ascii_lowercase().contains("prompt is too long");
+            if is_context_overflow {
+                // Phrase includes "context length" so OpenAI-compatible clients that
+                // classify by message (not just HTTP status) recognise the overflow.
+                return Err(RunnerError::context_length(format!(
+                    "claude-code: context length exceeded — {message}"
+                )));
+            }
+            return Err(RunnerError::external_service("claude-code", message));
         }
 
         let content = parsed.result.unwrap_or_default();
@@ -339,6 +359,26 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::ExternalService);
         assert!(err.message.contains("rate limited"));
+    }
+
+    #[test]
+    fn test_parse_response_prompt_too_long_is_context_length() {
+        // A context-window overflow must classify as ContextLength (non-transient
+        // 400), not ExternalService (transient 502) — otherwise the caller retries
+        // the identical oversized prompt. Detected via structured terminal_reason.
+        let json = br#"{"result":"Prompt is too long","is_error":true,"terminal_reason":"prompt_too_long"}"#;
+        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ContextLength);
+        assert!(!err.kind.is_transient());
+        assert!(err.message.contains("Prompt is too long"));
+    }
+
+    #[test]
+    fn test_parse_response_prompt_too_long_via_message_fallback() {
+        // Same classification when terminal_reason is absent but the message says so.
+        let json = br#"{"result":"Prompt is too long","is_error":true}"#;
+        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ContextLength);
     }
 
     #[test]

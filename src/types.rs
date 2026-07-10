@@ -51,6 +51,13 @@ pub enum ErrorKind {
     Config,
     /// Guardrail policy violation (request or response rejected)
     Guardrail,
+    /// Input prompt exceeds the underlying model's context window.
+    ///
+    /// A permanent, caller-side error: retrying the identical prompt cannot
+    /// succeed (contrast `ExternalService`, which is transient). Surfaced as an
+    /// HTTP 400 `context_length_exceeded` so OpenAI-compatible clients classify
+    /// it as non-retryable instead of hammering the same oversized request.
+    ContextLength,
     /// Requested model is not available on the underlying provider
     ///
     /// Typically means the model has been rotated out or the account is not
@@ -124,6 +131,14 @@ impl RunnerError {
     pub fn guardrail(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Guardrail,
+            message: message.into(),
+        }
+    }
+
+    /// Create a context-length-exceeded error (permanent, caller-side).
+    pub fn context_length(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::ContextLength,
             message: message.into(),
         }
     }
@@ -793,6 +808,7 @@ mod tests {
         assert!(!ErrorKind::AuthFailure.is_transient());
         assert!(!ErrorKind::Config.is_transient());
         assert!(!ErrorKind::Guardrail.is_transient());
+        assert!(!ErrorKind::ContextLength.is_transient());
         assert!(!ErrorKind::ModelUnavailable.is_transient());
     }
 
