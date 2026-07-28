@@ -227,6 +227,15 @@ pub fn generate_tool_catalog(declarations: &[FunctionDeclaration]) -> String {
     catalog
 }
 
+/// Deepest schema-node recursion when documenting a parameter.
+///
+/// A guard against a pathological or self-referential schema inflating the
+/// system prompt without bound, not a working limit. Note it counts schema
+/// nodes, and stepping from an array to its `items` costs a level, so the
+/// deepest real schema — `weeks` → week → `days` → day → day fields — sits at
+/// five, comfortably inside this.
+const MAX_PARAM_DEPTH: usize = 8;
+
 /// Append parameter documentation for a single function declaration
 fn append_parameter_docs(catalog: &mut String, decl: &FunctionDeclaration) {
     let Some(ref params) = decl.parameters else {
@@ -239,19 +248,89 @@ fn append_parameter_docs(catalog: &mut String, decl: &FunctionDeclaration) {
         return;
     }
 
-    let required: Vec<&str> = params
+    catalog.push_str("Parameters:\n");
+    append_property_lines(catalog, params, 0);
+}
+
+/// Render one object schema's `properties` as bullet lines, recursing into
+/// nested objects and into the item schema of arrays of objects.
+///
+/// Without the recursion a nested parameter reached the model as nothing but
+/// its top-level name and type — `` `outline` (object) `` — leaving every inner
+/// field name invisible. On providers without native function calling the
+/// catalog is the *only* schema the model ever sees, so it had to guess the
+/// nested shape and guessed wrong every time: `save_training_plan` failed 24 of
+/// 24 live calls (2026-07-12 → 2026-07-28) while every flat-schema tool
+/// succeeded, the model sending `week_label`/`day`/`session` against a schema
+/// wanting `week_start`/`date`/`sport`/`workout`.
+///
+/// A parameter expands only when it genuinely has nested fields, which keeps
+/// the rendering of a purely scalar schema byte-identical to the pre-recursion
+/// output — tools that already worked gain neither a token nor a risk.
+fn append_property_lines(catalog: &mut String, schema: &Value, depth: usize) {
+    let Some(props_obj) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return;
+    };
+    let required: Vec<&str> = schema
         .get("required")
         .and_then(|r| r.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    catalog.push_str("Parameters:\n");
-    for (name, schema) in props_obj {
-        let type_str = schema.get("type").and_then(|t| t.as_str()).unwrap_or("any");
+    let indent = "  ".repeat(depth);
+    for (name, prop) in props_obj {
+        let type_str = prop.get("type").and_then(|t| t.as_str()).unwrap_or("any");
         let is_required = required.contains(&name.as_str());
         let req_label = if is_required { ", required" } else { "" };
-        let _ = writeln!(catalog, "- `{name}` ({type_str}{req_label})");
+
+        let nested = nested_object_schema(prop).filter(|_| depth + 1 < MAX_PARAM_DEPTH);
+
+        // Describe every field the recursion reveals — whether it expands
+        // further or is a leaf. The format hints that make a nested field
+        // fillable at all live on the leaves ("Race date, YYYY-MM-DD.", "One
+        // of: rest | base | build | peak | taper."); a bare `date (string)`
+        // is exactly what let the model send a French week label.
+        //
+        // A top-level scalar stays bare, which is what keeps a schema with no
+        // nesting rendering byte-for-byte as it did before the recursion — the
+        // tools already succeeding on every call gain neither token nor risk.
+        let describe = depth > 0 || nested.is_some();
+        let description = prop
+            .get("description")
+            .and_then(|d| d.as_str())
+            .filter(|_| describe)
+            .map_or_else(String::new, |d| format!(" — {d}"));
+        let label = if nested.is_some() && type_str == "array" {
+            "array of object"
+        } else {
+            type_str
+        };
+        let _ = writeln!(
+            catalog,
+            "{indent}- `{name}` ({label}{req_label}){description}"
+        );
+
+        if let Some(inner) = nested {
+            append_property_lines(catalog, inner, depth + 1);
+        }
     }
+}
+
+/// The object schema a parameter expands into — itself when it is an object
+/// carrying `properties`, or its `items` when it is an array of such objects.
+///
+/// `None` for a scalar or an array of scalars, which have no inner field names
+/// to reveal and so keep their single-line rendering.
+fn nested_object_schema(prop: &Value) -> Option<&Value> {
+    let has_fields = |v: &Value| {
+        v.get("properties")
+            .and_then(|p| p.as_object())
+            .is_some_and(|p| !p.is_empty())
+    };
+    if has_fields(prop) {
+        return Some(prop);
+    }
+    prop.get("items").filter(|items| has_fields(items))
 }
 
 /// Append a few-shot example showing the expected tool-call interaction
@@ -273,28 +352,51 @@ fn append_few_shot_example(catalog: &mut String, decl: &FunctionDeclaration) {
 
 /// Build example arguments from a function declaration's parameter schema
 fn build_example_args(decl: &FunctionDeclaration) -> serde_json::Map<String, Value> {
-    let mut args = serde_json::Map::new();
     let Some(ref params) = decl.parameters else {
-        return args;
+        return serde_json::Map::new();
     };
-    let Some(props_obj) = params.get("properties").and_then(|p| p.as_object()) else {
-        return args;
-    };
-
-    for (name, schema) in props_obj {
-        let type_str = schema
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("string");
-        let example_value = match type_str {
-            "integer" | "number" => Value::Number(serde_json::Number::from(1)),
-            "boolean" => Value::Bool(true),
-            "array" => Value::Array(vec![Value::String("example".to_owned())]),
-            _ => Value::String("example".to_owned()),
-        };
-        args.insert(name.clone(), example_value);
+    match example_for_schema(params, 0) {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
     }
-    args
+}
+
+/// Build a shape-correct example value for one schema node.
+///
+/// Recurses so a nested parameter is demonstrated as the object it actually is.
+/// The pre-recursion generator emitted `"outline": "example"` for an
+/// object-typed parameter — a worked example contradicting the very shape the
+/// model is being asked to produce, at the moment it is learning the format.
+fn example_for_schema(schema: &Value, depth: usize) -> Value {
+    let type_str = schema
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("string");
+    match type_str {
+        "object" => {
+            let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+                return Value::Object(serde_json::Map::new());
+            };
+            if depth + 1 >= MAX_PARAM_DEPTH {
+                return Value::Object(serde_json::Map::new());
+            }
+            let mut map = serde_json::Map::new();
+            for (name, prop) in props {
+                map.insert(name.clone(), example_for_schema(prop, depth + 1));
+            }
+            Value::Object(map)
+        }
+        "array" => match schema.get("items") {
+            Some(items) if depth + 1 < MAX_PARAM_DEPTH => {
+                Value::Array(vec![example_for_schema(items, depth + 1)])
+            }
+            // No item schema to follow: the original placeholder element.
+            _ => Value::Array(vec![Value::String("example".to_owned())]),
+        },
+        "integer" | "number" => Value::Number(serde_json::Number::from(1)),
+        "boolean" => Value::Bool(true),
+        _ => Value::String("example".to_owned()),
+    }
 }
 
 /// Inject a tool catalog into the system prompt of a message list.
@@ -806,6 +908,144 @@ And some more text."#;
         // Natural, in-role framing is present instead.
         assert!(catalog.contains("You have access to the tools"));
         assert!(catalog.contains("Available tools:"));
+    }
+
+    /// A `save_training_plan`-shaped declaration: an object parameter holding a
+    /// nested object, and an array parameter whose items are objects that
+    /// themselves hold an array of objects.
+    fn nested_declaration() -> FunctionDeclaration {
+        FunctionDeclaration {
+            name: "save_training_plan".to_owned(),
+            description: "Persist the training plan you agreed with the athlete".to_owned(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "coach_id": {"type": "string", "description": "Coach persona slug."},
+                    "outline": {
+                        "type": "object",
+                        "description": "The plan outline.",
+                        "required": ["goal_race"],
+                        "properties": {
+                            "goal_race": {
+                                "type": "object",
+                                "description": "The goal (A) race.",
+                                "required": ["name", "date"],
+                                "properties": {
+                                    "name": {"type": "string", "description": "Race name."},
+                                    "date": {"type": "string", "description": "Race date, YYYY-MM-DD."}
+                                }
+                            }
+                        }
+                    },
+                    "weeks": {
+                        "type": "array",
+                        "description": "Day-by-day weeks to save.",
+                        "items": {
+                            "type": "object",
+                            "required": ["week_start", "days"],
+                            "properties": {
+                                "week_start": {"type": "string", "description": "First day, YYYY-MM-DD."},
+                                "days": {
+                                    "type": "array",
+                                    "description": "The day rows.",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["date", "sport"],
+                                        "properties": {
+                                            "date": {"type": "string", "description": "Day date, YYYY-MM-DD."},
+                                            "sport": {"type": "string", "description": "Sport or 'rest'."}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "required": ["outline"]
+            })),
+        }
+    }
+
+    #[test]
+    fn catalog_reveals_nested_object_and_array_item_fields() {
+        // Regression (2026-07-28): every inner field name was dropped, so on a
+        // provider without native function calling the model never saw
+        // `week_start` / `date` / `sport` and invented `week_label` / `day` /
+        // `session` instead — 24 of 24 live save_training_plan calls rejected.
+        let catalog = generate_tool_catalog(&[nested_declaration()]);
+
+        // Fields one level down, through an object.
+        assert!(catalog.contains("`goal_race` (object, required)"));
+        assert!(catalog.contains("`name` (string, required)"));
+
+        // Fields reached only through an array's item schema.
+        assert!(catalog.contains("`week_start` (string, required)"));
+        assert!(catalog.contains("`sport` (string, required)"));
+
+        // An array of objects is labelled as such, not bare `array`.
+        assert!(catalog.contains("`weeks` (array of object)"));
+        assert!(catalog.contains("`days` (array of object, required)"));
+
+        // Descriptions ride along on expanded fields: they carry the format
+        // hints ("YYYY-MM-DD") without which a field name cannot be filled in.
+        assert!(catalog.contains("Race date, YYYY-MM-DD."));
+        assert!(catalog.contains("First day, YYYY-MM-DD."));
+
+        // Nesting is legible as indentation.
+        assert!(catalog.contains("  - `goal_race`"));
+        assert!(catalog.contains("    - `date`"));
+    }
+
+    #[test]
+    fn catalog_rendering_of_a_flat_schema_is_byte_identical() {
+        // The recursion must be invisible to schemas that have no nesting: the
+        // tools already succeeding on every call must gain neither a token nor
+        // a behaviour change. Keys render in serde_json's sorted map order.
+        let catalog = generate_tool_catalog(&[FunctionDeclaration {
+            name: "get_activities".to_owned(),
+            description: "Get the user's recent activities".to_owned(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "description": "Fitness provider to query."},
+                    "limit": {"type": "integer", "description": "How many to return."}
+                },
+                "required": ["provider"]
+            })),
+        }]);
+
+        assert!(
+            catalog.contains("Parameters:\n- `limit` (integer)\n- `provider` (string, required)\n")
+        );
+        // Scalar parameters stay bare — no description, no indentation.
+        assert!(!catalog.contains("Fitness provider to query."));
+        assert!(!catalog.contains("  - `"));
+    }
+
+    #[test]
+    fn few_shot_example_has_the_nested_shape_not_a_placeholder_string() {
+        // The worked example is the model's most literal template. Emitting
+        // `"outline": "example"` for an object parameter taught the exact
+        // mistake the live failures made.
+        let args = build_example_args(&nested_declaration());
+
+        let outline = args.get("outline").expect("outline in example"); // Safe: test asserts on the declaration it just built
+        assert!(
+            outline.is_object(),
+            "object parameter must render as an object, got {outline}"
+        );
+        assert!(outline
+            .pointer("/goal_race/date")
+            .is_some_and(Value::is_string));
+
+        let weeks = args.get("weeks").expect("weeks in example"); // Safe: test asserts on the declaration it just built
+        assert!(weeks.is_array(), "array parameter must render as an array");
+        assert!(
+            weeks
+                .pointer("/0/days/0/sport")
+                .is_some_and(Value::is_string),
+            "array items must recurse into their object schema: {weeks}"
+        );
     }
 
     // --- format_tool_results_as_text tests ---
