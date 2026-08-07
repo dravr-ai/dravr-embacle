@@ -16,7 +16,7 @@ use tracing::instrument;
 
 use crate::config::RunnerConfig;
 use crate::process::run_cli_command;
-use crate::prompt::prepare_user_prompt;
+use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 
 /// Default model for Kiro CLI (delegates to Kiro's auto-selection)
@@ -175,7 +175,7 @@ impl LlmProvider for KiroCliRunner {
 
     #[instrument(skip_all, fields(runner = "kiro"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let prepared = prepare_user_prompt(&request.messages)?;
+        let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
 

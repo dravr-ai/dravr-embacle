@@ -1253,9 +1253,10 @@ impl CopilotHeadlessRunner {
     /// To provide conversation continuity, prior user/assistant exchanges are
     /// serialized into a `<conversation-history>` block prepended to the prompt.
     ///
-    /// The system prompt is passed via ACP `session/new` `systemPrompt` and also
-    /// prepended as plain text to the prompt so the model reliably sees it.
-    /// Set `inject_system_in_prompt` to `false` to skip the prompt-text injection.
+    /// The system prompt is prepended as plain text to the prompt. It is also
+    /// sent via ACP `session/new` `systemPrompt`, but Copilot CLI's request
+    /// schema strips unknown keys, so that field never reaches the model —
+    /// verified against the pinned CLI. The prompt-text copy is the delivery.
     ///
     /// The number of history messages is capped by `max_history_turns` from
     /// [`CopilotHeadlessConfig`]. Only the most recent turns are kept.
@@ -1263,11 +1264,13 @@ impl CopilotHeadlessRunner {
     /// Always includes a text block. When the last user message has images,
     /// appends image blocks with `type: "image"`, `data`, and `mimeType`.
     fn build_prompt_blocks(&self, request: &ChatRequest) -> Vec<Value> {
-        let system = if self.config.inject_system_in_prompt {
-            Self::extract_system_prompt(request)
-        } else {
-            None
-        };
+        // ALWAYS inlined. Copilot CLI's ACP `session/new` schema silently strips
+        // unknown keys, so the `systemPrompt` field never reaches the model —
+        // prompt-text inlining is the only delivery path this runner has. The
+        // former `inject_system_in_prompt` knob had no correct `false` value: it
+        // did not select an alternative mechanism, it selected none, shipping
+        // every turn with no persona and no safety scaffolding, silently.
+        let system = Self::extract_system_prompt(request);
         let max_turns = self.config.max_history_turns;
 
         // Separate non-system messages into history (all but last user) + last user
@@ -1914,17 +1917,6 @@ mod tests {
     }
 
     /// Create a test runner with system prompt injection disabled.
-    fn test_runner_no_system_injection(max_history_turns: usize) -> CopilotHeadlessRunner {
-        CopilotHeadlessRunner {
-            config: CopilotHeadlessConfig {
-                max_history_turns,
-                inject_system_in_prompt: false,
-                ..CopilotHeadlessConfig::default()
-            },
-            available_models: vec![],
-            process: Arc::new(TokioMutex::new(None)),
-        }
-    }
 
     #[test]
     fn build_prompt_blocks_text_only_no_system() {
@@ -1950,20 +1942,6 @@ mod tests {
                                                         // System prompt injected as plain text — no XML tags
         assert!(text.contains("You are a fitness assistant"));
         assert!(!text.contains("<system-instructions>"));
-        assert!(text.contains("Hello"));
-    }
-
-    #[test]
-    fn build_prompt_blocks_skips_system_when_injection_disabled() {
-        let runner = test_runner_no_system_injection(20);
-        let request = ChatRequest::new(vec![
-            ChatMessage::system("You are a fitness assistant"),
-            ChatMessage::user("Hello"),
-        ]);
-        let blocks = runner.build_prompt_blocks(&request);
-        assert_eq!(blocks.len(), 1);
-        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
-        assert!(!text.contains("You are a fitness assistant"));
         assert!(text.contains("Hello"));
     }
 
@@ -2318,27 +2296,6 @@ mod tests {
         assert!(!text.contains("<system-instructions>"));
 
         // Conversation history and current message also present
-        assert!(text.contains("<conversation-history>"));
-        assert!(text.contains("User: First question"));
-        assert!(text.contains("Second question"));
-    }
-
-    #[test]
-    fn disabled_injection_multi_turn_no_system_in_prompt() {
-        let runner = test_runner_no_system_injection(20);
-        let request = ChatRequest::new(vec![
-            ChatMessage::system("Return JSON only"),
-            ChatMessage::user("First question"),
-            ChatMessage::assistant("{\"answer\": 1}"),
-            ChatMessage::user("Second question"),
-        ]);
-        let blocks = runner.build_prompt_blocks(&request);
-        let text = blocks[0]["text"].as_str().unwrap(); // Safe: test assertion
-
-        // System prompt NOT in text when injection is disabled
-        assert!(!text.contains("Return JSON only"));
-
-        // History and current message still present
         assert!(text.contains("<conversation-history>"));
         assert!(text.contains("User: First question"));
         assert!(text.contains("Second question"));

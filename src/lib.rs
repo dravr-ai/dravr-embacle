@@ -37,6 +37,8 @@
     )
 )]
 
+/// Per-runner System-message delivery contract.
+pub mod system_delivery;
 /// Core types: traits, messages, requests, responses, and errors
 pub mod types;
 
