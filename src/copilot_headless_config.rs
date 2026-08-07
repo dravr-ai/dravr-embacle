@@ -110,8 +110,3 @@ impl Default for CopilotHeadlessConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

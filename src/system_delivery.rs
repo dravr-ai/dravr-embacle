@@ -95,7 +95,7 @@ impl CliRunnerType {
 mod tests {
     use super::*;
     use crate::prompt::{build_prompt, build_user_prompt};
-    use crate::types::{ChatMessage, MessageRole};
+    use crate::types::ChatMessage;
 
     const SYSTEM_TEXT: &str = "You are Dravr, the athlete's coach, and nothing else.";
 
@@ -119,7 +119,8 @@ mod tests {
     }
 
     /// And the excluding builder genuinely excludes — so a runner declaring
-    /// SeparateChannel must actually have one, or the text goes nowhere.
+    /// [`SystemDelivery::SeparateChannel`] must actually have one, or the text
+    /// goes nowhere.
     #[test]
     fn the_excluding_builder_really_drops_the_system_text() {
         let prompt = build_user_prompt(&messages());
@@ -157,8 +158,8 @@ mod tests {
     }
 
     /// Exactly one runner may exclude, and only because it has `--system-prompt`.
-    /// If a future runner declares SeparateChannel, this test forces the author
-    /// to justify it here rather than in a silent import choice.
+    /// If a future runner declares [`SystemDelivery::SeparateChannel`], this test
+    /// forces the author to justify it here rather than in a silent import choice.
     #[test]
     fn only_claude_code_uses_a_separate_channel() {
         let separate: Vec<CliRunnerType> = [
