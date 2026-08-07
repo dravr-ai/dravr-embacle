@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.0] — 2026-08-07
+
+### Fixed
+
+- fix: clear the warnings the flag removal left behind
+
+
+
 ## [0.19.7] — 2026-07-28
 
 
