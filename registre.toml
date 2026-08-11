@@ -1,7 +1,7 @@
 # ABOUTME: llm-registre configuration — where this repo's limitation issues are filed
 # ABOUTME: The tracker is private; most code repos here are public (see the gates' README)
 
-# dravr-ai/carnet is the private register shared by every project. A limitation
+# dravr-ai/dravr-carnet is the private register for the dravr-* family. A limitation
 # issue states precisely where a defence is incomplete, so it never goes on a
 # public code repo's own tracker.
-tracker = "dravr-ai/carnet"
+tracker = "dravr-ai/dravr-carnet"
