@@ -5,3 +5,7 @@
 # issue states precisely where a defence is incomplete, so it never goes on a
 # public code repo's own tracker.
 tracker = "dravr-ai/dravr-carnet"
+
+# Every dark-launched feature must be ledgered, so an unarmed phase always
+# carries a review date.
+require_ledger = true
