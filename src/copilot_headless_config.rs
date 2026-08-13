@@ -12,13 +12,28 @@ use crate::copilot_models::preferred_default;
 /// Policy for handling ACP permission requests from the copilot subprocess.
 ///
 /// Controls whether tool-execution permission prompts are auto-approved or denied.
+///
+/// **Denies by default.** The subprocess's own tools — shell, git, file editing —
+/// run in the host process's working directory, so a host that builds its prompt
+/// from untrusted input (an end user's chat text, say) turns an approval into
+/// arbitrary execution next to its environment and credentials. That is not a
+/// hypothetical: a Dravr coaching turn was observed making five `shell`/`bash`/
+/// `Grep`/`Glob` calls during a user's request, because the default approved them.
+///
+/// A host that genuinely wants the subprocess to run tools must now say so
+/// explicitly with [`PermissionPolicy::AutoApprove`]. Every current consumer
+/// wants denial, and the safe value should not depend on each one remembering to
+/// set an env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PermissionPolicy {
-    /// Automatically approve permission requests by selecting the best allow option.
-    #[default]
-    AutoApprove,
     /// Deny all permission requests by cancelling them.
+    #[default]
     DenyAll,
+    /// Automatically approve permission requests by selecting the best allow option.
+    ///
+    /// Only safe when the prompt is fully trusted — never when it is assembled
+    /// from end-user input.
+    AutoApprove,
 }
 
 /// Default number of conversation history turns injected into the ACP prompt.
@@ -70,13 +85,16 @@ impl CopilotHeadlessConfig {
             .or_else(|_| env::var("GITHUB_TOKEN"))
             .ok();
 
+        // Approval is opt-in and must be spelled out. An unset — or misspelled —
+        // value denies, so a typo degrades to the safe side rather than silently
+        // handing the subprocess a shell.
         let permission_policy = match env::var("COPILOT_HEADLESS_PERMISSION_POLICY")
             .unwrap_or_default()
             .to_lowercase()
             .as_str()
         {
-            "deny_all" | "denyall" | "deny" => PermissionPolicy::DenyAll,
-            _ => PermissionPolicy::AutoApprove,
+            "auto_approve" | "autoapprove" | "approve" => PermissionPolicy::AutoApprove,
+            _ => PermissionPolicy::DenyAll,
         };
 
         let max_history_turns = env::var("COPILOT_HEADLESS_MAX_HISTORY_TURNS")
