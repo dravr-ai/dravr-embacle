@@ -37,7 +37,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --quiet -- -D warnings
+      # --all-features so feature-gated code is linted too. Without it, modules
+      # behind a non-default feature are never compiled here and accumulate
+      # lints invisibly — agui.rs carried a map().unwrap_or() violation that
+      # only ever appeared when someone happened to lint locally with the flag.
+      - run: cargo clippy --workspace --all-targets --all-features --quiet -- -D warnings
 
   fmt:
     name: Format
