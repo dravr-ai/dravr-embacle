@@ -1,5 +1,8 @@
 // ABOUTME: The ACP permission policy must deny unless a host opts into approval
 // ABOUTME: An approving default gave a Dravr coaching turn shell in the service container
+//
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 dravr.ai
 
 //! The copilot subprocess's own tools (shell, git, file editing) run in the
 //! host process's working directory. A host that assembles its prompt from
@@ -31,7 +34,9 @@ fn approval_requires_an_explicit_spelling() {
     // Guards the parser's fallback arm, which is the value that actually
     // reaches production — the derived default alone would not have caught the
     // original bug, because the env path had its own approving fallback.
-    for raw in ["", "  ", "yes", "true", "1", "allow", "deny_all", "nonsense"] {
+    for raw in [
+        "", "  ", "yes", "true", "1", "allow", "deny_all", "nonsense",
+    ] {
         assert_eq!(
             policy_for(raw),
             PermissionPolicy::DenyAll,
