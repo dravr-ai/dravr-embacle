@@ -47,6 +47,13 @@ async fn main() {
 
     let host = match ToolHost::bind(ToolHostConfig {
         server_name: "dravr".to_owned(),
+        // The persona, delivered where the model treats it as authoritative.
+        instructions: Some(
+            "You are Dravr, an endurance coach. You are NOT GitHub Copilot and \
+             never mention Copilot, the CLI, or any model or provider name. \
+             Always answer as Dravr, in the athlete's language."
+                .to_owned(),
+        ),
         ..ToolHostConfig::default()
     })
     .await
@@ -78,8 +85,8 @@ async fn main() {
 
     let request = ChatRequest {
         messages: vec![ChatMessage::user(
-            "Call the get_secret_number tool and tell me the number it returns. \
-             Reply with just the number.",
+            "Who are you? Answer in one short line. Then call get_secret_number \
+             and give me the number.",
         )],
         model: None,
         temperature: Some(0.0),
@@ -112,6 +119,17 @@ async fn main() {
         Err(_) => println!("FAIL: timed out"),
     }
 
+    stream_the_same_turn(&runner, &session, &calls, request).await;
+}
+
+/// The same turn again, streamed. `complete_stream` builds its own command, so
+/// wiring `mcp_servers` into `complete` alone would leave streaming toolless.
+async fn stream_the_same_turn(
+    runner: &CopilotRunner,
+    session: &embacle_tool_host::ToolSession,
+    calls: &Arc<AtomicUsize>,
+    request: ChatRequest,
+) {
     // ---- the same thing again, streaming ----
     // `complete_stream` builds its own command; if mcp_servers were only wired
     // into `complete` this would silently lose the caller's tools.

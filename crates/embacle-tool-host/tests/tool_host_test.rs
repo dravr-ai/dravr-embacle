@@ -525,3 +525,80 @@ async fn the_static_adapter_preserves_the_error_kind() {
         "the message must reach the model, got {text:?}"
     );
 }
+
+/// Instructions are served at `initialize`, which is the only route a caller's
+/// persona has into an agent's SYSTEM prompt.
+///
+/// A CLI runner with no system-prompt flag can otherwise only put a persona in
+/// the prompt body, where the model reads it as the user talking and answers as
+/// itself. That is what made a coach identify as the underlying model instead of
+/// the persona, and the reply had to be withheld from the athlete.
+#[tokio::test]
+async fn instructions_are_served_at_initialize() {
+    const PERSONA: &str = "You are Dravr, an endurance coach.";
+
+    let host = ToolHost::bind(ToolHostConfig {
+        instructions: Some(PERSONA.to_owned()),
+        ..ToolHostConfig::default()
+    })
+    .await
+    .expect("binds");
+    let executor = Arc::new(RecordingExecutor {
+        calls: AtomicUsize::new(0),
+    });
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor)));
+    let servers = session.mcp_servers();
+
+    let (status, result) = post(
+        &url_of(&servers),
+        &bearer_of(&servers),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, 200, "initialize is served: {result}");
+    assert_eq!(
+        result["result"]["instructions"].as_str(),
+        Some(PERSONA),
+        "the caller's instructions must reach the agent verbatim: {result}"
+    );
+}
+
+/// A host with no instructions advertises none, rather than an empty string a
+/// client might fold into its prompt as a blank directive.
+#[tokio::test]
+async fn no_instructions_means_the_field_is_absent() {
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+    let executor = Arc::new(RecordingExecutor {
+        calls: AtomicUsize::new(0),
+    });
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor)));
+    let servers = session.mcp_servers();
+
+    let (_, result) = post(
+        &url_of(&servers),
+        &bearer_of(&servers),
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": { "name": "test", "version": "1" } }
+        }),
+    )
+    .await;
+
+    assert!(
+        result["result"]["instructions"].is_null(),
+        "absent, not empty: {result}"
+    );
+}

@@ -165,6 +165,12 @@ impl CopilotRunner {
         // text-simulation fallback never worked on this runner.
         if !mcp_servers.is_empty() {
             cmd.args(["--additional-mcp-config", &mcp_config_json(mcp_servers)]);
+            // Folds each server's `initialize` instructions into Copilot's
+            // SYSTEM prompt. This CLI has no --system-prompt flag, so a caller
+            // with a persona to impose can otherwise only put it in the prompt
+            // body — where the model reads it as the user talking and answers
+            // as itself. This is the one channel that reaches the system layer.
+            cmd.arg("--allow-all-mcp-server-instructions");
         }
 
         // Prevent reading project AGENTS.md instructions

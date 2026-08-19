@@ -80,6 +80,15 @@ pub struct ToolHostConfig {
     /// `0` lets the kernel assign, which is what you want: no port to
     /// configure, and no collision between concurrent stacks on one host.
     pub port: u16,
+    /// Natural-language instructions served at `initialize`.
+    ///
+    /// An agent that opts in — Copilot's CLI does so with
+    /// `--allow-all-mcp-server-instructions` — folds these into its SYSTEM
+    /// prompt. That matters when the caller has a persona to impose: a CLI
+    /// runner with no system-prompt flag can only put one in the prompt body,
+    /// where the model reads it as the user talking and answers as itself.
+    /// This is the one channel that reaches the system layer.
+    pub instructions: Option<String>,
 }
 
 impl Default for ToolHostConfig {
@@ -88,6 +97,7 @@ impl Default for ToolHostConfig {
             server_name: "tools".to_owned(),
             bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 0,
+            instructions: None,
         }
     }
 }
@@ -280,6 +290,7 @@ impl ToolHost {
             .local_addr()
             .map_err(|e| RunnerError::config(format!("tool host bound but has no address: {e}")))?;
 
+        let instructions = config.instructions;
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(Inner {
             server_name: config.server_name,
@@ -288,16 +299,18 @@ impl ToolHost {
             shutdown: RwLock::new(Some(tx)),
         });
 
-        let server = Arc::new(
-            McpServer::new(
-                "embacle-tool-host",
-                env!("CARGO_PKG_VERSION"),
-                ToolRegistry::new(),
-                Arc::clone(&inner),
-            )
-            .with_tool_dispatcher(Arc::new(Forwarding))
-            .with_auth_hook(Arc::new(BearerSessions)),
-        );
+        let mut server = McpServer::new(
+            "embacle-tool-host",
+            env!("CARGO_PKG_VERSION"),
+            ToolRegistry::new(),
+            Arc::clone(&inner),
+        )
+        .with_tool_dispatcher(Arc::new(Forwarding))
+        .with_auth_hook(Arc::new(BearerSessions));
+        if let Some(text) = instructions {
+            server = server.with_instructions(text);
+        }
+        let server = Arc::new(server);
 
         let router = mcp_router(server);
         tokio::spawn(async move {
