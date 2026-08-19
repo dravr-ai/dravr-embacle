@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use embacle::types::{ChatMessage, ChatRequest, LlmProvider, RunnerError};
 use embacle::{CopilotRunner, McpToolDefinition, McpToolExecutor, RunnerConfig};
 use embacle_tool_host::{StaticSurface, ToolHost, ToolHostConfig};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::time::timeout;
 
@@ -108,6 +109,50 @@ async fn main() {
             }
         }
         Ok(Err(e)) => println!("FAIL: complete() error: {e}"),
-        Err(_) => println!("FAIL: timed out after 240s"),
+        Err(_) => println!("FAIL: timed out"),
+    }
+
+    // ---- the same thing again, streaming ----
+    // `complete_stream` builds its own command; if mcp_servers were only wired
+    // into `complete` this would silently lose the caller's tools.
+    println!("\n=== streaming ===");
+    let before = calls.load(Ordering::SeqCst);
+    let stream_request = ChatRequest {
+        messages: vec![ChatMessage::user(
+            "Call the get_secret_number tool and tell me the number it returns. \
+             Reply with just the number.",
+        )],
+        mcp_servers: session.mcp_servers(),
+        ..request
+    };
+
+    match timeout(
+        Duration::from_mins(4),
+        runner.complete_stream(&stream_request),
+    )
+    .await
+    {
+        Ok(Ok(mut stream)) => {
+            let mut streamed = String::new();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(c) => streamed.push_str(&c.delta),
+                    Err(e) => {
+                        println!("stream error: {e}");
+                        break;
+                    }
+                }
+            }
+            let during = calls.load(Ordering::SeqCst) - before;
+            println!("--- streamed ---\n{streamed}");
+            println!("executor invocations (streaming): {during}");
+            if during >= 1 && streamed.contains(SECRET) {
+                println!("PASS: streaming carries the caller's tools too.");
+            } else {
+                println!("FAIL: streaming lost the tools.");
+            }
+        }
+        Ok(Err(e)) => println!("FAIL: complete_stream() error: {e}"),
+        Err(_) => println!("FAIL: streaming timed out"),
     }
 }
