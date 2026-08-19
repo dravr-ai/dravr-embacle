@@ -473,3 +473,55 @@ async fn shutdown_stops_the_listener() {
     }
     panic!("the listener was still accepting two seconds after shutdown");
 }
+
+/// The simple adapter still hands the model something to branch on.
+///
+/// `McpToolExecutor` returns `Result<Value, RunnerError>`, so a declining tool
+/// can only come back as `Err`. Flattening that to prose would leave the model
+/// with nothing machine-readable — the exact fidelity loss `ToolOutcome`
+/// exists to prevent, reintroduced by the convenience wrapper.
+#[tokio::test]
+async fn the_static_adapter_preserves_the_error_kind() {
+    struct FailingExecutor;
+
+    #[async_trait]
+    impl McpToolExecutor for FailingExecutor {
+        async fn execute(&self, _tool: &str, _args: &Value) -> Result<Value, RunnerError> {
+            Err(RunnerError::auth_failure("token expired"))
+        }
+    }
+
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+    let session = host.open_session(Arc::new(StaticSurface::new(
+        one_tool(),
+        Arc::new(FailingExecutor),
+    )));
+    let servers = session.mcp_servers();
+
+    let (status, result) = post(
+        &url_of(&servers),
+        &bearer_of(&servers),
+        call("get_activities"),
+    )
+    .await;
+
+    assert_eq!(status, 200, "a failing tool is still an in-band result");
+    assert!(
+        result["result"]["isError"].as_bool().unwrap_or(false),
+        "must be flagged as an error: {result}"
+    );
+    assert_eq!(
+        result["result"]["structuredContent"]["error_kind"].as_str(),
+        Some("AuthFailure"),
+        "the kind must survive as a machine-readable discriminator: {result}"
+    );
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        text.contains("token expired"),
+        "the message must reach the model, got {text:?}"
+    );
+}

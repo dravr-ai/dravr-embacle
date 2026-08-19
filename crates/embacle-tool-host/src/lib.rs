@@ -58,7 +58,7 @@ use dravr_tronc::mcp::transport::http::mcp_router;
 use embacle::types::{McpHeader, McpServerConfig, McpTransport, RunnerError};
 use embacle::{McpToolDefinition, McpToolExecutor};
 use rand::RngCore;
-use serde_json::Value;
+use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -174,6 +174,19 @@ pub trait ToolSurface: Send + Sync {
 ///
 /// The simple case, kept simple: callers with nothing dynamic to say hand over
 /// a `Vec` and an executor and are done.
+///
+/// # Fidelity
+///
+/// [`McpToolExecutor`] returns `Result<Value, RunnerError>`, which has two
+/// states where a tool call has three. A tool that RAN and declined can only
+/// come back as `Err`, so this adapter reports it as a refusal — correct — but
+/// the only machine-readable thing an `Err` carries is its
+/// [`ErrorKind`](embacle::types::ErrorKind), which is preserved as
+/// `structuredContent.error_kind`. A caller that needs to hand the model a
+/// richer refusal — an error code, a pending id, a provider to reconnect —
+/// should implement [`ToolSurface`] directly and build its own
+/// [`ToolOutcome`]. That is not a limitation of the host; it is the shape of
+/// the narrower trait.
 pub struct StaticSurface {
     tools: Vec<McpToolDefinition>,
     executor: Arc<dyn McpToolExecutor>,
@@ -196,7 +209,11 @@ impl ToolSurface for StaticSurface {
     async fn call(&self, tool_name: &str, arguments: &Value) -> ToolOutcome {
         match self.executor.execute(tool_name, arguments).await {
             Ok(value) => ToolOutcome::json(value),
-            Err(e) => ToolOutcome::refused(e.to_string()),
+            // The kind is the only machine-readable thing a `RunnerError`
+            // carries; dropping it would leave the model nothing but prose to
+            // branch on.
+            Err(e) => ToolOutcome::refused(e.message.clone())
+                .with_structured(json!({ "error_kind": format!("{:?}", e.kind) })),
         }
     }
 }
