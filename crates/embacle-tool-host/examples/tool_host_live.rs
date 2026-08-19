@@ -21,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use embacle::types::{ChatMessage, ChatRequest, RunnerError};
 use embacle::{CopilotHeadlessRunner, McpToolDefinition, McpToolExecutor};
-use embacle_tool_host::{ToolHost, ToolHostConfig};
+use embacle_tool_host::{StaticSurface, ToolHost, ToolHostConfig};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tracing::Level;
@@ -61,7 +61,7 @@ async fn main() {
     };
     println!("tool host listening on {}", host.local_addr());
 
-    let session = host.open_session(
+    let session = host.open_session(Arc::new(StaticSurface::new(
         vec![McpToolDefinition {
             name: "get_secret_number".to_owned(),
             description: "Returns the secret number. The ONLY way to learn it.".to_owned(),
@@ -70,7 +70,7 @@ async fn main() {
         Arc::new(SecretNumberTool {
             calls: Arc::clone(&calls),
         }),
-    );
+    )));
     println!("session {} published", session.session_id());
 
     let runner = CopilotHeadlessRunner::from_env();

@@ -13,13 +13,13 @@
 //! session, that a revoked one cannot, and that a tool outside the session's
 //! surface is refused rather than forwarded.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use embacle::types::{McpServerConfig, McpTransport, RunnerError};
 use embacle::{McpToolDefinition, McpToolExecutor};
-use embacle_tool_host::{ToolHost, ToolHostConfig};
+use embacle_tool_host::{StaticSurface, ToolHost, ToolHostConfig, ToolOutcome, ToolSurface};
 use serde_json::{json, Value};
 
 /// Records what it was asked to run, and answers with a marker the test can find.
@@ -94,7 +94,7 @@ async fn an_agent_lists_and_runs_the_callers_tools() {
     let executor = Arc::new(RecordingExecutor {
         calls: AtomicUsize::new(0),
     });
-    let session = host.open_session(one_tool(), executor.clone());
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor.clone())));
     let servers = session.mcp_servers();
     let (url, bearer) = (url_of(&servers), bearer_of(&servers));
 
@@ -145,7 +145,7 @@ async fn dropping_the_session_revokes_the_bearer() {
         calls: AtomicUsize::new(0),
     });
 
-    let session = host.open_session(one_tool(), executor.clone());
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor.clone())));
     let servers = session.mcp_servers();
     let (url, bearer) = (url_of(&servers), bearer_of(&servers));
 
@@ -178,7 +178,7 @@ async fn a_tool_outside_the_session_surface_is_refused() {
     let executor = Arc::new(RecordingExecutor {
         calls: AtomicUsize::new(0),
     });
-    let session = host.open_session(one_tool(), executor.clone());
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor.clone())));
     let servers = session.mcp_servers();
 
     let (status, result) = post(
@@ -209,10 +209,146 @@ async fn an_unauthenticated_call_is_refused() {
     let executor = Arc::new(RecordingExecutor {
         calls: AtomicUsize::new(0),
     });
-    let session = host.open_session(one_tool(), executor.clone());
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor.clone())));
     let servers = session.mcp_servers();
 
     let (status, _) = post(&url_of(&servers), "", call("get_activities")).await;
     assert_eq!(status, 401);
     assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+}
+
+/// A surface whose visible set changes. The whole reason listing is asked per
+/// call rather than fixed at session open.
+struct WithdrawingSurface {
+    visible: AtomicBool,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ToolSurface for WithdrawingSurface {
+    async fn list_tools(&self) -> Vec<McpToolDefinition> {
+        if self.visible.load(Ordering::SeqCst) {
+            one_tool()
+        } else {
+            Vec::new()
+        }
+    }
+
+    async fn call(&self, tool_name: &str, _arguments: &Value) -> ToolOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ToolOutcome::json(json!({ "ran": tool_name }))
+    }
+}
+
+/// A tool withdrawn mid-session disappears from the listing AND stops being
+/// callable — without reopening the session.
+///
+/// This is the guarantee a caller needs to gate on state that moves: a role
+/// change, a quota crossing, an interview that must withhold a tool until it
+/// finishes. Fixing the list at open would let the agent keep calling a tool
+/// the caller has since withdrawn.
+#[tokio::test]
+async fn a_tool_withdrawn_mid_session_stops_being_listed_and_callable() {
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+    let surface = Arc::new(WithdrawingSurface {
+        visible: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+    });
+    let session = host.open_session(surface.clone());
+    let servers = session.mcp_servers();
+    let (url, bearer) = (url_of(&servers), bearer_of(&servers));
+
+    let (_, listed) = post(
+        &url,
+        &bearer,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["tools"].as_array().map(Vec::len),
+        Some(1),
+        "visible while the surface says so"
+    );
+
+    let (status, _) = post(&url, &bearer, call("get_activities")).await;
+    assert_eq!(status, 200);
+    assert_eq!(surface.calls.load(Ordering::SeqCst), 1);
+
+    // The caller withdraws it. No session reopen, no new bearer.
+    surface.visible.store(false, Ordering::SeqCst);
+
+    let (_, listed) = post(
+        &url,
+        &bearer,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["tools"].as_array().map(Vec::len),
+        Some(0),
+        "the listing must reflect the withdrawal immediately"
+    );
+
+    let (status, result) = post(&url, &bearer, call("get_activities")).await;
+    assert_eq!(status, 200, "a refusal is in-band");
+    assert!(
+        result["result"]["isError"].as_bool().unwrap_or(false),
+        "a withdrawn tool must be refused: {result}"
+    );
+    assert_eq!(
+        surface.calls.load(Ordering::SeqCst),
+        1,
+        "the withdrawn call must never reach the caller's surface"
+    );
+}
+
+/// A refusal is neither success nor transport failure: the model must receive
+/// the reason AND see it flagged.
+#[tokio::test]
+async fn a_refusal_carries_its_reason_and_is_flagged() {
+    struct RefusingSurface;
+
+    #[async_trait]
+    impl ToolSurface for RefusingSurface {
+        async fn list_tools(&self) -> Vec<McpToolDefinition> {
+            one_tool()
+        }
+        async fn call(&self, _tool_name: &str, _arguments: &Value) -> ToolOutcome {
+            ToolOutcome::refused("daily limit reached — try tomorrow")
+                .with_structured(json!({ "code": "quota_exceeded" }))
+        }
+    }
+
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+    let session = host.open_session(Arc::new(RefusingSurface));
+    let servers = session.mcp_servers();
+
+    let (status, result) = post(
+        &url_of(&servers),
+        &bearer_of(&servers),
+        call("get_activities"),
+    )
+    .await;
+
+    assert_eq!(status, 200, "a refusal is served, not a transport error");
+    assert!(
+        result["result"]["isError"].as_bool().unwrap_or(false),
+        "must be flagged: {result}"
+    );
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        text.contains("daily limit reached"),
+        "the model must receive the reason, got {text:?}"
+    );
+    assert_eq!(
+        result["result"]["structuredContent"]["code"].as_str(),
+        Some("quota_exceeded"),
+        "structured content must survive: {result}"
+    );
 }

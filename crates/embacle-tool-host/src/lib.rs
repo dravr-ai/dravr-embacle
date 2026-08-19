@@ -92,12 +92,122 @@ impl Default for ToolHostConfig {
     }
 }
 
-/// What one live session may see and run.
-struct SessionState {
-    /// Constant-time compared, so a wrong bearer cannot be recovered by timing.
-    bearer: String,
+/// One tool call's outcome, in MCP's own shape.
+///
+/// Three states, not two. `Result` can say "it worked" or "it failed", but a
+/// tool that RAN and declined — a quota refusal, a guard saying no, a provider
+/// that needs reconnecting — is neither: the model should read the reason and
+/// adapt, exactly as it reads a success. Collapsing that into `Err` throws away
+/// the text the model needed; collapsing it into `Ok` tells the model it
+/// succeeded.
+#[derive(Debug, Clone)]
+pub struct ToolOutcome {
+    /// Text handed to the model.
+    pub text: String,
+    /// Machine-readable payload mirrored into MCP `structuredContent`.
+    pub structured: Option<Value>,
+    /// MCP `isError`. True for a refusal the model should adapt to.
+    pub is_error: bool,
+}
+
+impl ToolOutcome {
+    /// A successful call carrying JSON. The text is the compact encoding, which
+    /// is what a model reads when a server sends no separate rendering.
+    #[must_use]
+    pub fn json(value: Value) -> Self {
+        Self {
+            text: value.to_string(),
+            structured: Some(value),
+            is_error: false,
+        }
+    }
+
+    /// A successful call carrying prose.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            structured: None,
+            is_error: false,
+        }
+    }
+
+    /// The tool ran and declined. `reason` is for the model, not the operator.
+    #[must_use]
+    pub fn refused(reason: impl Into<String>) -> Self {
+        Self {
+            text: reason.into(),
+            structured: None,
+            is_error: true,
+        }
+    }
+
+    /// Attach structured content to a refusal, so a caller can carry a machine
+    /// -readable code alongside the prose.
+    #[must_use]
+    pub fn with_structured(mut self, value: Value) -> Self {
+        self.structured = Some(value);
+        self
+    }
+}
+
+/// The caller's tool surface, consulted per request.
+///
+/// Both halves are asked every time, deliberately. A caller whose visible set
+/// is fixed for a turn can answer from a `Vec` and pay nothing; a caller whose
+/// set depends on state that can change — a role, a quota, an interview in
+/// progress that must withhold a tool until it ends — can answer from that
+/// state at the moment the agent asks. Fixing the list at session open would
+/// make the second kind unrepresentable, and a gate that cannot be re-asked is
+/// a gate that silently stops applying.
+#[async_trait]
+pub trait ToolSurface: Send + Sync {
+    /// Tools visible to this session right now.
+    async fn list_tools(&self) -> Vec<McpToolDefinition>;
+
+    /// Run one call. A tool absent from `list_tools` is already refused by the
+    /// host, so this is only reached for a tool the surface just advertised.
+    async fn call(&self, tool_name: &str, arguments: &Value) -> ToolOutcome;
+}
+
+/// A surface whose tool list never changes, backed by an [`McpToolExecutor`].
+///
+/// The simple case, kept simple: callers with nothing dynamic to say hand over
+/// a `Vec` and an executor and are done.
+pub struct StaticSurface {
     tools: Vec<McpToolDefinition>,
     executor: Arc<dyn McpToolExecutor>,
+}
+
+impl StaticSurface {
+    /// Wrap a fixed tool list and its executor.
+    #[must_use]
+    pub const fn new(tools: Vec<McpToolDefinition>, executor: Arc<dyn McpToolExecutor>) -> Self {
+        Self { tools, executor }
+    }
+}
+
+#[async_trait]
+impl ToolSurface for StaticSurface {
+    async fn list_tools(&self) -> Vec<McpToolDefinition> {
+        self.tools.clone()
+    }
+
+    async fn call(&self, tool_name: &str, arguments: &Value) -> ToolOutcome {
+        match self.executor.execute(tool_name, arguments).await {
+            Ok(value) => ToolOutcome::json(value),
+            Err(e) => ToolOutcome::refused(e.to_string()),
+        }
+    }
+}
+
+/// What one live session may see and run.
+struct SessionState {
+    /// Stable correlation key, also what the auth hook hands the dispatcher.
+    id: String,
+    /// Constant-time compared, so a wrong bearer cannot be recovered by timing.
+    bearer: String,
+    surface: Arc<dyn ToolSurface>,
     calls_served: AtomicU64,
 }
 
@@ -188,22 +298,18 @@ impl ToolHost {
         self.inner.addr
     }
 
-    /// Open a turn-scoped session over `tools`, run by `executor`.
+    /// Open a turn-scoped session served by `surface`.
     ///
     /// The returned guard owns the session's lifetime. Hold it for exactly as
     /// long as the turn may legitimately call tools.
     #[must_use]
-    pub fn open_session(
-        &self,
-        tools: Vec<McpToolDefinition>,
-        executor: Arc<dyn McpToolExecutor>,
-    ) -> ToolSession {
+    pub fn open_session(&self, surface: Arc<dyn ToolSurface>) -> ToolSession {
         let session_id = uuid::Uuid::new_v4().to_string();
         let bearer = mint_bearer();
         let state = Arc::new(SessionState {
+            id: session_id.clone(),
             bearer: bearer.clone(),
-            tools,
-            executor,
+            surface,
             calls_served: AtomicU64::new(0),
         });
         if let Ok(mut sessions) = self.inner.sessions.write() {
@@ -340,14 +446,9 @@ impl AuthHook<Inner> for BearerSessions {
                     www_authenticate: "Bearer".to_owned(),
                 })
             },
-            |session| Ok(ToolContext::new().with_request_id(Value::from(session_tag(&session)))),
+            |session| Ok(ToolContext::new().with_request_id(Value::from(session.id.clone()))),
         )
     }
-}
-
-/// Stable non-secret tag for a session, used to route a call to its state.
-fn session_tag(session: &Arc<SessionState>) -> String {
-    format!("{:p}", Arc::as_ptr(session))
 }
 
 /// Forwards `tools/list` and `tools/call` into the caller's executor.
@@ -356,18 +457,24 @@ struct Forwarding;
 #[async_trait]
 impl ToolDispatcher<Inner> for Forwarding {
     async fn list_tools(&self, state: &Arc<Inner>, ctx: &ToolContext) -> Vec<Tool> {
-        resolve(state, ctx).map_or_else(Vec::new, |session| {
-            session
-                .tools
-                .iter()
-                .map(|t| Tool {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema: t.input_schema.clone(),
-                    annotations: None,
-                })
-                .collect()
-        })
+        let Some(session) = resolve(state, ctx) else {
+            return Vec::new();
+        };
+        // Asked now, not at session open: a caller gating on state that moves —
+        // a role, a quota, an interview that must withhold a tool until it ends
+        // — gets to answer for the moment the agent is asking about.
+        session
+            .surface
+            .list_tools()
+            .await
+            .into_iter()
+            .map(|t| Tool {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+                annotations: None,
+            })
+            .collect()
     }
 
     async fn call_tool(
@@ -381,27 +488,34 @@ impl ToolDispatcher<Inner> for Forwarding {
             return ToolResponse::error("session is no longer open".to_owned());
         };
 
-        // Refuse a tool this session was never granted. The agent should not be
-        // able to reach past the surface its caller published for this turn.
-        if !session.tools.iter().any(|t| t.name == name) {
+        // Re-check visibility at call time against the SAME live answer the
+        // listing came from. A tool withheld between the agent's list and its
+        // call must not run just because it was visible a moment ago.
+        if !session
+            .surface
+            .list_tools()
+            .await
+            .iter()
+            .any(|t| t.name == name)
+        {
             return ToolResponse::error(format!("unknown tool: {name}"));
         }
 
         session.calls_served.fetch_add(1, Ordering::SeqCst);
-        match session.executor.execute(name, &arguments).await {
-            Ok(value) => ToolResponse::text(value.to_string()),
-            // A refusal the model can adapt to, not a transport failure.
-            Err(e) => ToolResponse::error(e.to_string()),
-        }
+        let outcome = session.surface.call(name, &arguments).await;
+        let mut response = if outcome.is_error {
+            ToolResponse::error(outcome.text)
+        } else {
+            ToolResponse::text(outcome.text)
+        };
+        response.structured_content = outcome.structured;
+        response
     }
 }
 
 /// Recover the session a request authenticated as.
 fn resolve(state: &Arc<Inner>, ctx: &ToolContext) -> Option<Arc<SessionState>> {
-    let tag = ctx.request_id.as_ref()?.as_str()?;
+    let id = ctx.request_id.as_ref()?.as_str()?;
     let sessions = state.sessions.read().ok()?;
-    sessions
-        .values()
-        .find(|s| session_tag(s) == tag)
-        .map(Arc::clone)
+    sessions.get(id).map(Arc::clone)
 }
