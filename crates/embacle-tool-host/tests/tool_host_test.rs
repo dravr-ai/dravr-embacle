@@ -15,12 +15,14 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use embacle::types::{McpServerConfig, McpTransport, RunnerError};
 use embacle::{McpToolDefinition, McpToolExecutor};
 use embacle_tool_host::{StaticSurface, ToolHost, ToolHostConfig, ToolOutcome, ToolSurface};
 use serde_json::{json, Value};
+use tokio::time::sleep;
 
 /// Records what it was asked to run, and answers with a marker the test can find.
 struct RecordingExecutor {
@@ -351,4 +353,123 @@ async fn a_refusal_carries_its_reason_and_is_flagged() {
         Some("quota_exceeded"),
         "structured content must survive: {result}"
     );
+}
+
+/// Two turns in flight at once stay isolated: each sees only its own tools and
+/// reaches only its own executor.
+///
+/// Every other test opens one session, which is the case that cannot fail. A
+/// server is only useful if the normal case — several turns at once — holds.
+#[tokio::test]
+async fn concurrent_sessions_do_not_leak_into_each_other() {
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+
+    let alice_exec = Arc::new(RecordingExecutor {
+        calls: AtomicUsize::new(0),
+    });
+    let bob_exec = Arc::new(RecordingExecutor {
+        calls: AtomicUsize::new(0),
+    });
+
+    let alice_tool = vec![McpToolDefinition {
+        name: "alice_only".to_owned(),
+        description: "Alice's tool".to_owned(),
+        input_schema: json!({ "type": "object", "properties": {} }),
+    }];
+
+    let alice = host.open_session(Arc::new(StaticSurface::new(alice_tool, alice_exec.clone())));
+    let bob = host.open_session(Arc::new(StaticSurface::new(one_tool(), bob_exec.clone())));
+    assert_eq!(host.open_sessions(), 2);
+
+    let a = alice.mcp_servers();
+    let b = bob.mcp_servers();
+    let (a_url, a_bearer) = (url_of(&a), bearer_of(&a));
+    let (b_url, b_bearer) = (url_of(&b), bearer_of(&b));
+
+    // Same listener, different credentials.
+    assert_eq!(a_url, b_url);
+    assert_ne!(a_bearer, b_bearer, "each session mints its own bearer");
+
+    // Each sees only its own surface.
+    let (_, a_list) = post(
+        &a_url,
+        &a_bearer,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(
+        a_list["result"]["tools"][0]["name"].as_str(),
+        Some("alice_only")
+    );
+
+    // Bob's bearer must not reach Alice's tool.
+    let (status, result) = post(&b_url, &b_bearer, call("alice_only")).await;
+    assert_eq!(status, 200);
+    assert!(
+        result["result"]["isError"].as_bool().unwrap_or(false),
+        "Bob must not be able to call Alice's tool: {result}"
+    );
+    assert_eq!(
+        alice_exec.calls.load(Ordering::SeqCst),
+        0,
+        "Alice's executor must never be reached by Bob's session"
+    );
+
+    // Each still works on its own.
+    let (status, _) = post(&a_url, &a_bearer, call("alice_only")).await;
+    assert_eq!(status, 200);
+    let (status, _) = post(&b_url, &b_bearer, call("get_activities")).await;
+    assert_eq!(status, 200);
+    assert_eq!(alice_exec.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(bob_exec.calls.load(Ordering::SeqCst), 1);
+
+    // Revoking one leaves the other serving.
+    drop(alice);
+    assert_eq!(host.open_sessions(), 1);
+    let (status, _) = post(&a_url, &a_bearer, call("alice_only")).await;
+    assert_eq!(status, 401, "Alice's bearer is dead");
+    let (status, _) = post(&b_url, &b_bearer, call("get_activities")).await;
+    assert_eq!(status, 200, "Bob is unaffected by Alice's revocation");
+}
+
+/// `shutdown` actually stops the listener.
+///
+/// It binds a port in a long-lived process, so "does it let go" is not a
+/// question to leave to inspection.
+#[tokio::test]
+async fn shutdown_stops_the_listener() {
+    let host = ToolHost::bind(ToolHostConfig::default())
+        .await
+        .expect("binds");
+    let executor = Arc::new(RecordingExecutor {
+        calls: AtomicUsize::new(0),
+    });
+    let session = host.open_session(Arc::new(StaticSurface::new(one_tool(), executor)));
+    let servers = session.mcp_servers();
+    let (url, bearer) = (url_of(&servers), bearer_of(&servers));
+
+    let (status, _) = post(&url, &bearer, call("get_activities")).await;
+    assert_eq!(status, 200, "serving before shutdown");
+
+    host.shutdown();
+    // Idempotent, and safe to call twice from separate teardown paths.
+    host.shutdown();
+
+    // Give the accept loop a moment to unwind.
+    for _ in 0..40 {
+        if reqwest::Client::new()
+            .post(&url)
+            .header("authorization", &bearer)
+            .json(&call("get_activities"))
+            .send()
+            .await
+            .is_err()
+        {
+            return; // refused — the listener is gone
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the listener was still accepting two seconds after shutdown");
 }

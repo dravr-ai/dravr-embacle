@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, PoisonError, RwLock, Weak};
 
 use async_trait::async_trait;
 use dravr_tronc::mcp::auth::{AuthError, AuthHook};
@@ -220,12 +220,18 @@ struct Inner {
 }
 
 impl Inner {
+    // Every lock here recovers from poisoning rather than propagating it. The
+    // map's invariant is "these sessions are open", which a panic in unrelated
+    // code cannot break — and treating a poisoned lock as failure would take
+    // one caller's panic and turn it into every other session silently
+    // refusing, which is a worse outcome than the panic.
+
     /// Resolve a bearer to its session, in constant time across candidates.
     ///
     /// A revoked session is simply absent, which is the whole revocation
     /// mechanism: the guard's `Drop` removes the entry.
     fn session_for(&self, bearer: &str) -> Option<Arc<SessionState>> {
-        let sessions = self.sessions.read().ok()?;
+        let sessions = self.sessions.read().unwrap_or_else(PoisonError::into_inner);
         sessions
             .values()
             .find(|s| s.bearer.as_bytes().ct_eq(bearer.as_bytes()).into())
@@ -312,9 +318,11 @@ impl ToolHost {
             surface,
             calls_served: AtomicU64::new(0),
         });
-        if let Ok(mut sessions) = self.inner.sessions.write() {
-            sessions.insert(session_id.clone(), Arc::clone(&state));
-        }
+        self.inner
+            .sessions
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&state));
         ToolSession {
             session_id,
             bearer,
@@ -331,15 +339,22 @@ impl ToolHost {
         self.inner
             .sessions
             .read()
-            .map_or(0, |sessions| sessions.len())
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Stop the listener. Idempotent, and safe to call from a signal handler.
     pub fn shutdown(&self) {
-        if let Ok(mut slot) = self.inner.shutdown.write() {
-            if let Some(tx) = slot.take() {
-                let _ = tx.send(());
-            }
+        // Taken and released before sending: holding the lock across the send
+        // would let a concurrent shutdown block on a lock this one still owns.
+        let signal = self
+            .inner
+            .shutdown
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(tx) = signal {
+            let _ = tx.send(());
         }
     }
 }
@@ -408,9 +423,11 @@ impl ToolSession {
 impl Drop for ToolSession {
     fn drop(&mut self) {
         if let Some(inner) = self.host.upgrade() {
-            if let Ok(mut sessions) = inner.sessions.write() {
-                sessions.remove(&self.session_id);
-            }
+            inner
+                .sessions
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.session_id);
         }
     }
 }
@@ -516,6 +533,9 @@ impl ToolDispatcher<Inner> for Forwarding {
 /// Recover the session a request authenticated as.
 fn resolve(state: &Arc<Inner>, ctx: &ToolContext) -> Option<Arc<SessionState>> {
     let id = ctx.request_id.as_ref()?.as_str()?;
-    let sessions = state.sessions.read().ok()?;
+    let sessions = state
+        .sessions
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     sessions.get(id).map(Arc::clone)
 }
