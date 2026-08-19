@@ -153,6 +153,11 @@ name = "test_claude_e2e"
 path = "examples/test_claude_e2e.rs"
 
 [[example]]
+name = "ollama_openai_tools"
+path = "examples/ollama_openai_tools.rs"
+required-features = ["openai-api"]
+
+[[example]]
 name = "web_login"
 path = "examples/web_login.rs"
 required-features = ["web-ui"]

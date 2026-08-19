@@ -14,9 +14,11 @@ use crate::copilot_models::{
 };
 use crate::process::CliOutput;
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, StreamChunk,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
+    McpServerConfig, McpTransport, RunnerError, StreamChunk,
 };
 use async_trait::async_trait;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_stream::wrappers::LinesStream;
@@ -64,6 +66,44 @@ pub struct CopilotRunner {
     base: CliRunnerBase,
 }
 
+/// Render `mcp_servers` in the Copilot CLI's `--additional-mcp-config` shape.
+///
+/// The CLI keys servers by name in an object and takes headers as a map, where
+/// ACP takes an array of `{name, value}`. Same information, different spelling.
+fn mcp_config_json(servers: &[McpServerConfig]) -> String {
+    fn headers_to_map(headers: &[McpHeader]) -> Value {
+        let mut map = serde_json::Map::new();
+        for h in headers {
+            map.insert(h.name.clone(), Value::String(h.value.clone()));
+        }
+        Value::Object(map)
+    }
+
+    let mut entries = serde_json::Map::new();
+    for server in servers {
+        let entry = match &server.transport {
+            McpTransport::Http { url, headers } => json!({
+                "type": "http",
+                "url": url,
+                "headers": headers_to_map(headers),
+            }),
+            McpTransport::Sse { url, headers } => json!({
+                "type": "sse",
+                "url": url,
+                "headers": headers_to_map(headers),
+            }),
+            McpTransport::Stdio { command, args, env } => json!({
+                "type": "local",
+                "command": command,
+                "args": args,
+                "env": headers_to_map(env),
+            }),
+        };
+        entries.insert(server.name.clone(), entry);
+    }
+    json!({ "mcpServers": Value::Object(entries) }).to_string()
+}
+
 impl CopilotRunner {
     /// Create a new Copilot CLI runner with the given configuration.
     ///
@@ -93,7 +133,13 @@ impl CopilotRunner {
     ///
     /// `model` is threaded through as `--model <id>` only when `Some`; a
     /// `None` means "let the CLI pick the account default".
-    fn build_command(&self, prompt: &str, model: Option<&str>, silent: bool) -> Command {
+    fn build_command(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        silent: bool,
+        mcp_servers: &[McpServerConfig],
+    ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
 
         cmd.args(["-p", prompt]);
@@ -108,8 +154,18 @@ impl CopilotRunner {
         // Required for non-interactive mode
         cmd.arg("--allow-all-tools");
 
-        // Disable MCP servers to force text-based tool catalog usage
+        // Copilot's own builtins (GitHub MCP and friends) stay off: a caller's
+        // tools are the point, and the builtins add latency and a surface the
+        // caller did not ask for.
         cmd.arg("--disable-builtin-mcps");
+
+        // A caller's tools must arrive as REAL tools, which means MCP. Handed
+        // to this model as a text catalog in the prompt it declines outright —
+        // "that tool isn't part of my real toolset" — which is why the
+        // text-simulation fallback never worked on this runner.
+        if !mcp_servers.is_empty() {
+            cmd.args(["--additional-mcp-config", &mcp_config_json(mcp_servers)]);
+        }
 
         // Prevent reading project AGENTS.md instructions
         cmd.arg("--no-custom-instructions");
@@ -200,7 +256,12 @@ impl LlmProvider for CopilotRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let pinned = self.resolve_model(request);
-        let mut cmd = self.build_command(&prepared.prompt, pinned.as_deref(), true);
+        let mut cmd = self.build_command(
+            &prepared.prompt,
+            pinned.as_deref(),
+            true,
+            &request.mcp_servers,
+        );
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
 
@@ -217,7 +278,7 @@ impl LlmProvider for CopilotRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let pinned = self.resolve_model(request);
-        let mut cmd = self.build_command(prompt, pinned.as_deref(), true);
+        let mut cmd = self.build_command(prompt, pinned.as_deref(), true, &request.mcp_servers);
 
         // Enable streaming
         cmd.args(["--stream", "on"]);
@@ -316,7 +377,7 @@ mod tests {
 
     #[test]
     fn build_command_omits_model_flag_when_none() {
-        let cmd = runner().build_command("hi", None, true);
+        let cmd = runner().build_command("hi", None, true, &[]);
         let args: Vec<&str> = cmd
             .as_std()
             .get_args()
@@ -328,7 +389,7 @@ mod tests {
 
     #[test]
     fn build_command_includes_model_flag_when_some() {
-        let cmd = runner().build_command("hi", Some("gpt-5.4"), true);
+        let cmd = runner().build_command("hi", Some("gpt-5.4"), true, &[]);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
