@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.21.0] — 2026-08-19
+
+### Added
+
+- feat(tool-host): ask the caller's surface per call, not once per session
+- feat(copilot): give the non-ACP runner real tools, via MCP
+- feat(tool-host): host a caller's tools to an ACP agent over loopback MCP
+
+### Fixed
+
+- fix(tool-host): keep the error kind when adapting an McpToolExecutor
+- fix(tool-host): survive a poisoned lock, and pin isolation and shutdown
+- fix: repair the SessionStart bootstrap guard for an empty .build
+
+### Other
+
+- ci(release): bump and publish embacle-tool-host with the rest
+- test(tool-host): prove streaming carries the caller's tools
+- style(tests): rustfmt and SPDX header for the permission policy test
+
+
+
 ## [0.20.0] — 2026-08-07
 
 ### Fixed
