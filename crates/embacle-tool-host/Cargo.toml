@@ -1,0 +1,40 @@
+# ABOUTME: Loopback MCP endpoint serving a caller-supplied tool surface to an ACP agent
+# ABOUTME: Separate crate so the published root keeps its "no HTTP dependencies in core" rule
+#
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 dravr.ai
+
+[package]
+name = "embacle-tool-host"
+version = "0.20.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Host your own tools to an ACP agent over a loopback MCP endpoint"
+repository = "https://github.com/dravr-ai/dravr-embacle"
+readme = "README.md"
+keywords = ["mcp", "acp", "llm", "tools"]
+categories = ["development-tools"]
+
+[dependencies]
+embacle = { path = "../..", version = "0.20.1" }
+dravr-tronc = "0.7.1"
+async-trait = "0.1"
+axum = "0.8"
+rand = "0.8"
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1.45", features = ["net", "rt", "sync", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.45", features = ["full", "test-util"] }
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+absolute_paths = "deny"
+unwrap_used = "deny"
+expect_used = "deny"

@@ -2,7 +2,7 @@
 # ABOUTME: Wraps CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo) and ACP
 
 [workspace]
-members = [".", "crates/embacle-mcp", "crates/embacle-server"]
+members = [".", "crates/embacle-mcp", "crates/embacle-server", "crates/embacle-tool-host"]
 
 [package]
 name = "embacle"
