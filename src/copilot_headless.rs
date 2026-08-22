@@ -4,12 +4,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio_stream::Stream;
@@ -17,8 +18,8 @@ use tokio_stream::Stream;
 use agent_client_protocol_schema as schema;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -399,8 +400,9 @@ async fn setup_session(
     model: &str,
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
-) -> Result<(AcpTransport, Child, String), RunnerError> {
+) -> Result<(AcpTransport, Child, StderrRing, String), RunnerError> {
     let mut child = spawn_copilot(cli_path, github_token, model)?;
+    let stderr_ring = StderrRing::drain(child.stderr.take());
 
     let stdin = child
         .stdin
@@ -484,22 +486,19 @@ async fn setup_session(
     .await;
 
     match session_result {
-        Ok(Ok((session_id,))) => Ok((transport, child, session_id)),
+        Ok(Ok((session_id,))) => Ok((transport, child, stderr_ring, session_id)),
         Ok(Err(e)) => {
-            // Collect stderr for diagnostics before killing
-            let stderr_output = collect_stderr(&mut child).await;
             warn!(
                 error = %e,
-                stderr = %stderr_output,
+                stderr = %stderr_ring.snapshot(),
                 "ACP session setup failed"
             );
             let _ = child.kill().await;
             Err(e)
         }
         Err(_elapsed) => {
-            let stderr_output = collect_stderr(&mut child).await;
             warn!(
-                stderr = %stderr_output,
+                stderr = %stderr_ring.snapshot(),
                 timeout_secs = acp_session_timeout().as_secs(),
                 "ACP session setup timed out — copilot process may be hung (auth issue?)"
             );
@@ -523,6 +522,9 @@ async fn setup_session(
 struct AcpProcess {
     child: Child,
     transport: AcpTransport,
+    /// Continuously drained stderr tail, sampled on failure paths. The drain
+    /// also keeps the subprocess from ever blocking on a full stderr pipe.
+    stderr_ring: StderrRing,
     /// The model this subprocess was spawned with via `copilot --acp --model`.
     /// Fixed for the subprocess lifetime — a request for a different model
     /// requires respawning (see [`CopilotHeadlessRunner::complete`]).
@@ -541,6 +543,7 @@ impl AcpProcess {
         model: &str,
     ) -> Result<Self, RunnerError> {
         let mut child = spawn_copilot(cli_path, github_token, model)?;
+        let stderr_ring = StderrRing::drain(child.stderr.take());
         let stdin = child
             .stdin
             .take()
@@ -577,18 +580,17 @@ impl AcpProcess {
             Ok(Ok(())) => Ok(Self {
                 child,
                 transport,
+                stderr_ring,
                 model: model.to_owned(),
             }),
             Ok(Err(e)) => {
-                let stderr_output = collect_stderr(&mut child).await;
-                warn!(error = %e, stderr = %stderr_output, "ACP initialize failed");
+                warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP initialize failed");
                 let _ = child.kill().await;
                 Err(e)
             }
             Err(_elapsed) => {
-                let stderr_output = collect_stderr(&mut child).await;
                 warn!(
-                    stderr = %stderr_output,
+                    stderr = %stderr_ring.snapshot(),
                     timeout_secs = acp_session_timeout().as_secs(),
                     "ACP initialize timed out — copilot process may be hung (auth issue?)"
                 );
@@ -676,36 +678,61 @@ impl AcpProcess {
     }
 }
 
-/// Collect any available stderr output from the child process (non-blocking, best-effort).
-async fn collect_stderr(child: &mut Child) -> String {
-    let Some(stderr) = child.stderr.take() else {
-        return "(no stderr captured)".to_owned();
-    };
-    let mut reader = BufReader::new(stderr);
-    let mut output = String::new();
-    // Read up to 4KB of stderr, with a short timeout
-    let result = time::timeout(Duration::from_secs(1), async {
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match reader.read_line(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => output.push_str(&buf),
-            }
-            if output.len() > 4096 {
-                output.push_str("...(truncated)");
-                break;
-            }
+/// Newest stderr bytes kept for failure diagnostics.
+const STDERR_RING_CAP: usize = 8_192;
+
+/// Last-[`STDERR_RING_CAP`]-bytes ring of the subprocess's stderr, drained
+/// continuously by a background task.
+///
+/// The pipe used to sit unread until a failure path sampled it: a subprocess
+/// that writes more than the OS pipe buffer (~64KB) to stderr while healthy
+/// then blocks on the write, and the whole ACP session freezes with no
+/// diagnostic — indistinguishable from a hung model. The drain task consumes
+/// the pipe for the child's entire lifetime and keeps only the newest bytes;
+/// it exits on pipe EOF when the child dies. Snapshots are synchronous and
+/// safe to take at any point, including after the child was killed.
+#[derive(Clone)]
+struct StderrRing {
+    buf: Arc<StdMutex<VecDeque<u8>>>,
+}
+
+impl StderrRing {
+    /// Start draining `stderr`; with `None` (pipe never captured) every
+    /// snapshot reports "(empty)" rather than blocking.
+    fn drain(stderr: Option<ChildStderr>) -> Self {
+        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        if let Some(mut pipe) = stderr {
+            let ring = Arc::clone(&buf);
+            tokio::spawn(async move {
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match pipe.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let mut bytes = ring.lock().unwrap_or_else(PoisonError::into_inner);
+                            bytes.extend(&chunk[..n]);
+                            while bytes.len() > STDERR_RING_CAP {
+                                bytes.pop_front();
+                            }
+                        }
+                    }
+                }
+            });
         }
-    })
-    .await;
-    if result.is_err() && output.is_empty() {
-        return "(stderr read timed out — process may still be running)".to_owned();
+        Self { buf }
     }
-    if output.is_empty() {
-        "(empty)".to_owned()
-    } else {
-        output
+
+    /// The retained stderr tail as lossy UTF-8, for failure log lines.
+    fn snapshot(&self) -> String {
+        let bytes = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
+        if bytes.is_empty() {
+            return "(empty)".to_owned();
+        }
+        let (front, back) = bytes.as_slices();
+        let mut joined = Vec::with_capacity(bytes.len());
+        joined.extend_from_slice(front);
+        joined.extend_from_slice(back);
+        String::from_utf8_lossy(&joined).into_owned()
     }
 }
 
@@ -797,6 +824,21 @@ fn process_notification_inner(
     }
 }
 
+/// Serialize a permission outcome through the schema type, so the wire shape
+/// is the protocol's — internally tagged: `{"outcome": {"outcome":
+/// "cancelled"}}` / `{"outcome": {"outcome": "selected", "optionId": ...}}`.
+///
+/// The previous hand-rolled JSON emitted `{"outcome": "cancelled"}` (a bare
+/// string where the protocol wants a tagged object) and dropped the
+/// `"outcome": "selected"` discriminator on approvals. An agent that parses
+/// strictly treats such a response as unanswered and keeps the permission
+/// request pending — parking the whole session in silence, which under the
+/// production `deny_all` policy means every permission prompt was a stall.
+fn permission_response(outcome: schema::RequestPermissionOutcome) -> Value {
+    serde_json::to_value(schema::RequestPermissionResponse::new(outcome))
+        .unwrap_or_else(|_| json!({ "outcome": { "outcome": "cancelled" } }))
+}
+
 /// Build a permission response based on the configured policy.
 ///
 /// With `AutoApprove`: selects `AllowAlways` over `AllowOnce`. If no allow option
@@ -805,12 +847,12 @@ fn process_notification_inner(
 fn build_permission_response(params: &Value, policy: PermissionPolicy) -> Value {
     if policy == PermissionPolicy::DenyAll {
         debug!("Permission policy is DenyAll, cancelling");
-        return json!({ "outcome": "cancelled" });
+        return permission_response(schema::RequestPermissionOutcome::Cancelled);
     }
 
     let Ok(req) = serde_json::from_value::<schema::RequestPermissionRequest>(params.clone()) else {
         warn!("Failed to parse permission request, cancelling");
-        return json!({ "outcome": "cancelled" });
+        return permission_response(schema::RequestPermissionOutcome::Cancelled);
     };
 
     // Prefer AllowAlways over AllowOnce for fewer repeated prompts
@@ -828,11 +870,13 @@ fn build_permission_response(params: &Value, policy: PermissionPolicy) -> Value 
     option_id.map_or_else(
         || {
             warn!("Permission request had no allow options, cancelling");
-            json!({ "outcome": "cancelled" })
+            permission_response(schema::RequestPermissionOutcome::Cancelled)
         },
         |id| {
             debug!(?id, "Auto-approving permission request");
-            json!({ "outcome": { "optionId": id.0 } })
+            permission_response(schema::RequestPermissionOutcome::Selected(
+                schema::SelectedPermissionOutcome::new(id.clone()),
+            ))
         },
     )
 }
@@ -1371,7 +1415,7 @@ impl CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1408,13 +1452,11 @@ impl CopilotHeadlessRunner {
                 );
             }
             Ok(Err(e)) => {
-                let stderr_output = collect_stderr(&mut child).await;
-                warn!(error = %e, stderr = %stderr_output, "ACP converse failed");
+                warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP converse failed");
             }
             Err(_) => {
-                let stderr_output = collect_stderr(&mut child).await;
                 warn!(
-                    stderr = %stderr_output,
+                    stderr = %stderr_ring.snapshot(),
                     timeout_secs = acp_prompt_timeout().as_secs(),
                     "ACP converse timed out"
                 );
@@ -1480,7 +1522,7 @@ impl CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1529,14 +1571,12 @@ impl CopilotHeadlessRunner {
                     let _ = event_tx.send(Ok(HeadlessStreamEvent::Done(response)));
                 }
                 Ok(Err(e)) => {
-                    let stderr_output = collect_stderr(&mut child).await;
-                    warn!(error = %e, stderr = %stderr_output, "ACP converse_stream failed");
+                    warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP converse_stream failed");
                     let _ = event_tx.send(Err(e));
                 }
                 Err(_) => {
-                    let stderr_output = collect_stderr(&mut child).await;
                     warn!(
-                        stderr = %stderr_output,
+                        stderr = %stderr_ring.snapshot(),
                         timeout_secs = timeout.as_secs(),
                         "ACP converse_stream timed out"
                     );
@@ -1717,8 +1757,7 @@ impl LlmProvider for CopilotHeadlessRunner {
                 Err(e)
             }
             Err(_elapsed) => {
-                let stderr_output = collect_stderr(&mut process.child).await;
-                warn!(stderr = %stderr_output, "ACP complete timed out");
+                warn!(stderr = %process.stderr_ring.snapshot(), "ACP complete timed out");
                 let _ = process.child.kill().await;
                 *guard = None;
                 Err(RunnerError::timeout(format!(
@@ -1735,7 +1774,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1762,9 +1801,15 @@ impl LlmProvider for CopilotHeadlessRunner {
             .await;
             match result {
                 Ok(Err(e)) => {
+                    warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP prompt stream failed");
                     let _ = chunk_tx.send(Err(e));
                 }
                 Err(_) => {
+                    warn!(
+                        stderr = %stderr_ring.snapshot(),
+                        timeout_secs = acp_prompt_timeout().as_secs(),
+                        "ACP prompt stream timed out"
+                    );
                     let _ = chunk_tx.send(Err(RunnerError::timeout(format!(
                         "copilot-acp: prompt timed out after {}s",
                         acp_prompt_timeout().as_secs()
@@ -1792,6 +1837,38 @@ mod tests {
     use super::*;
     use crate::types::ChatMessage;
     use serde_json::json;
+
+    /// The protocol's outcome is internally tagged: a cancel travels as
+    /// `{"outcome": {"outcome": "cancelled"}}`. The old hand-rolled
+    /// `{"outcome": "cancelled"}` put a bare string where the agent expects a
+    /// tagged object — an agent parsing strictly treats that as unanswered and
+    /// keeps the permission request pending, parking the session in silence.
+    /// Under the production `deny_all` policy every permission prompt took
+    /// this path.
+    #[test]
+    fn deny_all_permission_response_is_schema_shaped() {
+        let resp = build_permission_response(&json!({}), PermissionPolicy::DenyAll);
+        assert_eq!(resp, json!({ "outcome": { "outcome": "cancelled" } }));
+    }
+
+    /// An approval must carry the `"outcome": "selected"` discriminator the
+    /// old shape dropped, and still prefer `AllowAlways` over `AllowOnce`.
+    #[test]
+    fn auto_approve_response_carries_the_selected_discriminator() {
+        let params = json!({
+            "sessionId": "s1",
+            "toolCall": { "toolCallId": "tc1" },
+            "options": [
+                { "optionId": "opt-once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "opt-always", "name": "Always allow", "kind": "allow_always" },
+            ],
+        });
+        let resp = build_permission_response(&params, PermissionPolicy::AutoApprove);
+        assert_eq!(
+            resp,
+            json!({ "outcome": { "outcome": "selected", "optionId": "opt-always" } })
+        );
+    }
 
     #[test]
     fn write_settings_model_creates_file_when_absent() {
@@ -1864,7 +1941,7 @@ mod tests {
     fn permission_only_reject_options_cancels() {
         let params = make_permission_params(&["reject_once", "reject_always"]);
         let result = build_permission_response(&params, PermissionPolicy::AutoApprove);
-        assert_eq!(result["outcome"], "cancelled");
+        assert_eq!(result["outcome"]["outcome"], "cancelled");
     }
 
     #[test]
@@ -1894,14 +1971,14 @@ mod tests {
             "options": []
         });
         let result = build_permission_response(&params, PermissionPolicy::AutoApprove);
-        assert_eq!(result["outcome"], "cancelled");
+        assert_eq!(result["outcome"]["outcome"], "cancelled");
     }
 
     #[test]
     fn permission_deny_all_policy_always_cancels() {
         let params = make_permission_params(&["allow_once", "allow_always"]);
         let result = build_permission_response(&params, PermissionPolicy::DenyAll);
-        assert_eq!(result["outcome"], "cancelled");
+        assert_eq!(result["outcome"]["outcome"], "cancelled");
     }
 
     /// Create a test runner with configurable `max_history_turns`.
