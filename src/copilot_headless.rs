@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio_stream::Stream;
@@ -58,6 +58,38 @@ fn build_prompt_params(session_id: &str, prompt: &[Value], max_tokens: Option<u3
         params["maxTokens"] = Value::from(mt);
     }
     params
+}
+
+/// Pull the enabled model ids out of a `session/new` result.
+///
+/// ACP returns `models.availableModels[]` with `{modelId, name, description}`
+/// and a `_meta` carrying `copilotEnablement` / `copilotUsage` /
+/// `copilotPriceCategory`. Only ids the account may actually use are kept: a
+/// list that includes disabled models is no better than the hardcoded one for
+/// deciding whether a configured model will work.
+///
+/// `auto` is dropped — it is a selection strategy, not a model, and a caller
+/// checking "is my configured model available" gets a false positive from it.
+///
+/// Returns `None` when the field is absent (older CLI) or holds nothing usable,
+/// so the caller keeps the catalog rather than replacing it with emptiness.
+fn models_from_session(result: &Value) -> Option<Vec<String>> {
+    let listed = result.get("models")?.get("availableModels")?.as_array()?;
+    let ids: Vec<String> = listed
+        .iter()
+        .filter(|m| {
+            m.get("_meta")
+                .and_then(|meta| meta.get("copilotEnablement"))
+                .and_then(Value::as_str)
+                // Absent enablement means the CLI did not say; treat as usable
+                // rather than silently dropping a model that works.
+                .is_none_or(|state| state == "enabled")
+        })
+        .filter_map(|m| m.get("modelId").and_then(Value::as_str))
+        .filter(|id| *id != "auto")
+        .map(ToOwned::to_owned)
+        .collect();
+    (!ids.is_empty()).then_some(ids)
 }
 
 /// Serialize embacle MCP server configs into the ACP `session/new`
@@ -400,7 +432,7 @@ async fn setup_session(
     model: &str,
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
-) -> Result<(AcpTransport, Child, StderrRing, String), RunnerError> {
+) -> Result<(AcpTransport, Child, StderrRing, String, Option<Vec<String>>), RunnerError> {
     let mut child = spawn_copilot(cli_path, github_token, model)?;
     let stderr_ring = StderrRing::drain(child.stderr.take());
 
@@ -467,7 +499,16 @@ async fn setup_session(
             })?
             .to_owned();
 
-        info!(session_id = %session_id, model = %model, "ACP session created");
+        // The CLI tells us which models this account may use. Read it here
+        // rather than trusting the compiled-in catalog, which cannot know.
+        let observed = models_from_session(&session_result);
+
+        info!(
+            session_id = %session_id,
+            model = %model,
+            reported_models = observed.as_ref().map_or(0, Vec::len),
+            "ACP session created"
+        );
 
         // With MCP tools available, run the loop to completion (see
         // `set_autopilot_mode`). Best-effort: on failure we log and continue
@@ -481,12 +522,12 @@ async fn setup_session(
             }
         }
 
-        Ok::<_, RunnerError>((session_id,))
+        Ok::<_, RunnerError>((session_id, observed))
     })
     .await;
 
     match session_result {
-        Ok(Ok((session_id,))) => Ok((transport, child, stderr_ring, session_id)),
+        Ok(Ok((session_id, observed))) => Ok((transport, child, stderr_ring, session_id, observed)),
         Ok(Err(e)) => {
             warn!(
                 error = %e,
@@ -1231,7 +1272,22 @@ pub type HeadlessEventStream =
 /// For custom tools, callers should use text-based tool calling (CLI tool loop).
 pub struct CopilotHeadlessRunner {
     config: CopilotHeadlessConfig,
+    /// Ranked catalog from [`crate::copilot_models`], used until the CLI tells
+    /// us otherwise. A constant cannot track what the vendor ships, and cannot
+    /// express per-account entitlement at all.
     available_models: Vec<String>,
+    /// What `session/new` actually reported, once we have seen it.
+    ///
+    /// The catalog listed 21 models on 2026-08-24 while the CLI reported 28 for
+    /// the account in front of it — `claude-sonnet-5` among the missing, which
+    /// is the model every coaching turn runs on. A platform-side check against
+    /// the stale list duly paged on a working model.
+    ///
+    /// `OnceLock` rather than a lock around a mutable field because
+    /// [`EmbacleLlmProvider::available_models`] hands back a `&[String]` tied to
+    /// `&self`, which a guard cannot outlive. First session wins: an account's
+    /// entitlements do not change mid-process, and a restart re-reads them.
+    observed_models: OnceLock<Vec<String>>,
     /// Long-lived `copilot --acp` subprocess + initialized transport.
     ///
     /// Lazily spawned on the first `complete()` call and kept warm across
@@ -1258,6 +1314,7 @@ impl CopilotHeadlessRunner {
         Self {
             config: CopilotHeadlessConfig::from_env(),
             available_models: catalog_ids(),
+            observed_models: OnceLock::new(),
             process: Arc::new(TokioMutex::new(None)),
         }
     }
@@ -1268,7 +1325,27 @@ impl CopilotHeadlessRunner {
         Self {
             config,
             available_models: catalog_ids(),
+            observed_models: OnceLock::new(),
             process: Arc::new(TokioMutex::new(None)),
+        }
+    }
+
+    /// Remember the model list the CLI reported, the first time it reports one.
+    ///
+    /// Later sessions are ignored rather than overwriting: an account's
+    /// entitlements do not change mid-process, and `available_models()` hands
+    /// out a slice borrowed from `&self`, which a value that can be swapped
+    /// underneath it could not safely provide.
+    fn record_observed_models(&self, observed: Option<Vec<String>>) {
+        let Some(models) = observed else {
+            return;
+        };
+        if self.observed_models.set(models).is_ok() {
+            debug!(
+                count = self.observed_models.get().map_or(0, Vec::len),
+                catalog = self.available_models.len(),
+                "ACP reported the account's model list; superseding the catalog"
+            );
         }
     }
 
@@ -1415,7 +1492,7 @@ impl CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1423,6 +1500,7 @@ impl CopilotHeadlessRunner {
             &request.mcp_servers,
         )
         .await?;
+        self.record_observed_models(observed);
 
         info!(session_id = %session_id, "ACP: sending prompt");
         let prompt_id = transport
@@ -1522,7 +1600,7 @@ impl CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1530,6 +1608,7 @@ impl CopilotHeadlessRunner {
             &request.mcp_servers,
         )
         .await?;
+        self.record_observed_models(observed);
 
         info!(session_id = %session_id, "ACP: sending streaming prompt");
         let prompt_id = transport
@@ -1626,7 +1705,9 @@ impl LlmProvider for CopilotHeadlessRunner {
     }
 
     fn available_models(&self) -> &[String] {
-        &self.available_models
+        self.observed_models
+            .get()
+            .map_or(self.available_models.as_slice(), Vec::as_slice)
     }
 
     #[instrument(skip_all, fields(runner = "copilot_headless", model = field::Empty))]
@@ -1774,7 +1855,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, stderr_ring, session_id) = setup_session(
+        let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
@@ -1782,6 +1863,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             &request.mcp_servers,
         )
         .await?;
+        self.record_observed_models(observed);
 
         let prompt_id = transport
             .send_request(
@@ -1837,6 +1919,93 @@ mod tests {
     use super::*;
     use crate::types::ChatMessage;
     use serde_json::json;
+
+    /// A real `session/new` result, trimmed to the fields the parser reads.
+    ///
+    /// Shape captured from CLI 1.0.80 on 2026-08-24, including the disabled
+    /// entry — the wire format carries entitlement, and dropping that would
+    /// make this fixture agree with a parser that ignored it.
+    fn session_result() -> Value {
+        json!({
+            "sessionId": "bc4841f4-88f8-4b46-9320-72dc509c48e0",
+            "models": {
+                "currentModelId": "gpt-5.6-sol",
+                "availableModels": [
+                    {"modelId": "auto", "name": "Auto"},
+                    {"modelId": "claude-sonnet-5", "name": "Claude Sonnet 5",
+                     "_meta": {"copilotEnablement": "enabled"}},
+                    {"modelId": "gpt-5.6-sol", "name": "GPT-5.6 Sol",
+                     "_meta": {"copilotEnablement": "enabled"}},
+                    {"modelId": "some-locked-model", "name": "Locked",
+                     "_meta": {"copilotEnablement": "disabled"}},
+                    {"modelId": "no-meta-model", "name": "No meta"}
+                ]
+            }
+        })
+    }
+
+    /// The account's real list comes off the wire, not out of the catalog.
+    #[test]
+    fn models_are_read_from_the_session_result() {
+        let ids = models_from_session(&session_result()).expect("models present");
+        assert!(
+            ids.contains(&"claude-sonnet-5".to_owned()),
+            "claude-sonnet-5 is enabled on this account and is the model coaching \
+             turns run on; the compiled-in catalog does not list it, which is the \
+             whole reason to read the wire — got {ids:?}"
+        );
+        assert!(ids.contains(&"gpt-5.6-sol".to_owned()));
+    }
+
+    /// A model the account may not use is not "available".
+    #[test]
+    fn disabled_models_are_excluded() {
+        let ids = models_from_session(&session_result()).expect("models present");
+        assert!(
+            !ids.contains(&"some-locked-model".to_owned()),
+            "a disabled model must not be reported available — a list that \
+             includes them is no better than the hardcoded one for deciding \
+             whether a configured model will work"
+        );
+    }
+
+    /// `auto` is a strategy, not a model.
+    #[test]
+    fn auto_is_not_reported_as_a_model() {
+        let ids = models_from_session(&session_result()).expect("models present");
+        assert!(
+            !ids.contains(&"auto".to_owned()),
+            "`auto` would make any configured-model check pass by accident"
+        );
+    }
+
+    /// Absent entitlement means the CLI did not say, not that it is denied.
+    #[test]
+    fn a_model_without_meta_is_kept() {
+        let ids = models_from_session(&session_result()).expect("models present");
+        assert!(
+            ids.contains(&"no-meta-model".to_owned()),
+            "dropping models the CLI said nothing about would silently shrink \
+             the list on any CLI that omits _meta"
+        );
+    }
+
+    /// An older CLI omits the field; the caller must keep its catalog.
+    #[test]
+    fn a_response_without_models_yields_none() {
+        let bare = json!({ "sessionId": "abc" });
+        assert!(
+            models_from_session(&bare).is_none(),
+            "None keeps the catalog; Some(vec![]) would replace it with nothing \
+             and report every model as unavailable"
+        );
+        let empty = json!({ "sessionId": "abc", "models": { "availableModels": [] } });
+        assert!(
+            models_from_session(&empty).is_none(),
+            "an empty list is indistinguishable from 'not reported' and must not \
+             supersede the catalog either"
+        );
+    }
 
     /// The protocol's outcome is internally tagged: a cancel travels as
     /// `{"outcome": {"outcome": "cancelled"}}`. The old hand-rolled
@@ -1989,6 +2158,7 @@ mod tests {
                 ..CopilotHeadlessConfig::default()
             },
             available_models: vec![],
+            observed_models: OnceLock::new(),
             process: Arc::new(TokioMutex::new(None)),
         }
     }
