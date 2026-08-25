@@ -1998,7 +1998,11 @@ mod tests {
     /// The account's real list comes off the wire, not out of the catalog.
     #[test]
     fn models_are_read_from_the_session_result() {
-        let ids = models_from_session(&session_result()).expect("models present");
+        let ids = models_from_session(&session_result()).unwrap_or_default();
+        assert!(
+            !ids.is_empty(),
+            "the fixture carries models; parser returned none"
+        );
         assert!(
             ids.contains(&"claude-sonnet-5".to_owned()),
             "claude-sonnet-5 is enabled on this account and is the model coaching \
@@ -2011,7 +2015,11 @@ mod tests {
     /// A model the account may not use is not "available".
     #[test]
     fn disabled_models_are_excluded() {
-        let ids = models_from_session(&session_result()).expect("models present");
+        let ids = models_from_session(&session_result()).unwrap_or_default();
+        assert!(
+            !ids.is_empty(),
+            "the fixture carries models; parser returned none"
+        );
         assert!(
             !ids.contains(&"some-locked-model".to_owned()),
             "a disabled model must not be reported available — a list that \
@@ -2023,7 +2031,11 @@ mod tests {
     /// `auto` is a strategy, not a model.
     #[test]
     fn auto_is_not_reported_as_a_model() {
-        let ids = models_from_session(&session_result()).expect("models present");
+        let ids = models_from_session(&session_result()).unwrap_or_default();
+        assert!(
+            !ids.is_empty(),
+            "the fixture carries models; parser returned none"
+        );
         assert!(
             !ids.contains(&"auto".to_owned()),
             "`auto` would make any configured-model check pass by accident"
@@ -2033,7 +2045,11 @@ mod tests {
     /// Absent entitlement means the CLI did not say, not that it is denied.
     #[test]
     fn a_model_without_meta_is_kept() {
-        let ids = models_from_session(&session_result()).expect("models present");
+        let ids = models_from_session(&session_result()).unwrap_or_default();
+        assert!(
+            !ids.is_empty(),
+            "the fixture carries models; parser returned none"
+        );
         assert!(
             ids.contains(&"no-meta-model".to_owned()),
             "dropping models the CLI said nothing about would silently shrink \
