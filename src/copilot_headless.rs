@@ -92,6 +92,12 @@ fn models_from_session(result: &Value) -> Option<Vec<String>> {
     (!ids.is_empty()).then_some(ids)
 }
 
+/// Extra attempts when a turn comes back with no content at all.
+///
+/// One. A second empty turn is an answer about this prompt rather than a flake,
+/// and every attempt is a full inference against a metered provider.
+const DEGENERATE_TURN_RETRIES: u32 = 1;
+
 /// Serialize embacle MCP server configs into the ACP `session/new`
 /// `mcpServers` wire format.
 ///
@@ -1725,126 +1731,171 @@ impl LlmProvider for CopilotHeadlessRunner {
         // sequential per chat turn, so contention is in practice low.
         let mut guard = self.process.lock().await;
 
-        // Detect a subprocess that exited between calls (crash, OOM kill,
-        // upstream disconnect) and drop it so we respawn below. Also respawn
-        // when the requested model differs from the one the warm subprocess
-        // was spawned with: `--model` is fixed at spawn time, so a live
-        // process locked to model A cannot serve a request for model B.
-        if let Some(p) = guard.as_mut() {
-            if !p.is_alive() {
-                warn!("ACP subprocess exited between calls; respawning");
-                *guard = None;
-            } else if p.model != model {
-                info!(
-                    warm_model = %p.model,
-                    requested_model = %model,
-                    "ACP requested model changed; respawning warm subprocess to re-pin --model"
-                );
-                *guard = None;
-            }
-        }
-
-        let process = if let Some(existing) = guard.as_mut() {
-            existing
-        } else {
-            let fresh = AcpProcess::spawn_and_initialize(
-                &cli_path,
-                self.config.github_token.as_deref(),
-                &model,
-            )
-            .await?;
-            guard.insert(fresh)
-        };
-
-        let session_id = match process
-            .new_session(&model, system_prompt, &request.mcp_servers)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                // session/new failed on a previously-healthy subprocess.
-                // Could be the cached Copilot OAuth token expired and the
-                // CLI didn't auto-refresh, or the process is wedged. Kill
-                // and clear so the next call respawns and re-authenticates.
-                let _ = process.child.kill().await;
-                *guard = None;
-                return Err(e);
-            }
-        };
-
-        info!(
-            session_id = %session_id,
-            message_count = request.messages.len(),
-            prompt_blocks = prompt_blocks.len(),
-            "ACP complete: sending prompt"
-        );
-        if tracing::enabled!(tracing::Level::TRACE) {
-            match serde_json::to_string(&prompt_blocks) {
-                Ok(blocks_json) => trace!(prompt_blocks = %blocks_json, "ACP prompt blocks"),
-                Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
-            }
-        }
-        let prompt_id = match process
-            .transport
-            .send_request(
-                "session/prompt",
-                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
-            )
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                // Writing to stdin failed — pipe is broken. Discard.
-                let _ = process.child.kill().await;
-                *guard = None;
-                return Err(e);
-            }
-        };
-
-        let started = Instant::now();
-        let result = time::timeout(
-            acp_prompt_timeout(),
-            collect_complete(
-                &mut process.transport,
-                prompt_id,
-                model,
-                self.config.permission_policy,
-            ),
-        )
-        .await;
-
-        match result {
-            Ok(Ok((response, _tool_calls))) => {
-                info!(
-                    latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    content_len = response.content.len(),
-                    tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
-                    finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
-                    "ACP complete: response received"
-                );
-                if tracing::enabled!(tracing::Level::TRACE) {
-                    trace!(content = %response.content, "ACP response body");
+        // Copilot ends a turn with zero agent-message chunks often enough to
+        // matter: 2 of 11 turns in a controlled corpus run (2026-08-24). The
+        // subprocess is healthy and the protocol is satisfied — `finish_reason`
+        // is `stop`, latency is a normal ~20s — there is simply no content. The
+        // shape of the prompt appears to route the agentic wrapper into
+        // task-completion behaviour rather than chat output.
+        //
+        // A caller cannot distinguish that from a model that legitimately had
+        // nothing to say, so it surfaces as a lost turn: the platform's repair,
+        // identity re-ask and verifier all ride this path, and an empty answer
+        // there reaches an athlete as "je n'ai pas réussi à formuler une
+        // réponse". Retrying once on a FRESH session recovers it without the
+        // caller ever seeing the gap.
+        //
+        // Bounded at one extra attempt: a second empty turn is a real answer
+        // about this prompt, not a flake, and every retry is a full inference.
+        let mut attempt: u32 = 0;
+        loop {
+            // Detect a subprocess that exited between calls (crash, OOM kill,
+            // upstream disconnect) and drop it so we respawn below. Also respawn
+            // when the requested model differs from the one the warm subprocess
+            // was spawned with: `--model` is fixed at spawn time, so a live
+            // process locked to model A cannot serve a request for model B.
+            if let Some(p) = guard.as_mut() {
+                if !p.is_alive() {
+                    warn!("ACP subprocess exited between calls; respawning");
+                    *guard = None;
+                } else if p.model != model {
+                    info!(
+                        warm_model = %p.model,
+                        requested_model = %model,
+                        "ACP requested model changed; respawning warm subprocess to re-pin --model"
+                    );
+                    *guard = None;
                 }
-                // SUCCESS path: leave the subprocess alive so the next call
-                // reuses it. This is the whole point of the pool.
-                Ok(response)
             }
-            Ok(Err(e)) => {
-                // Prompt failed mid-stream. Transport may be desynced; the
-                // conservative choice is to kill and respawn rather than
-                // risk a corrupt session bleeding into the next call.
-                let _ = process.child.kill().await;
-                *guard = None;
-                Err(e)
+
+            let process = if let Some(existing) = guard.as_mut() {
+                existing
+            } else {
+                let fresh = AcpProcess::spawn_and_initialize(
+                    &cli_path,
+                    self.config.github_token.as_deref(),
+                    &model,
+                )
+                .await?;
+                guard.insert(fresh)
+            };
+
+            let session_id = match process
+                .new_session(&model, system_prompt, &request.mcp_servers)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    // session/new failed on a previously-healthy subprocess.
+                    // Could be the cached Copilot OAuth token expired and the
+                    // CLI didn't auto-refresh, or the process is wedged. Kill
+                    // and clear so the next call respawns and re-authenticates.
+                    let _ = process.child.kill().await;
+                    *guard = None;
+                    return Err(e);
+                }
+            };
+
+            info!(
+                session_id = %session_id,
+                message_count = request.messages.len(),
+                prompt_blocks = prompt_blocks.len(),
+                "ACP complete: sending prompt"
+            );
+            if tracing::enabled!(tracing::Level::TRACE) {
+                match serde_json::to_string(&prompt_blocks) {
+                    Ok(blocks_json) => trace!(prompt_blocks = %blocks_json, "ACP prompt blocks"),
+                    Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
+                }
             }
-            Err(_elapsed) => {
-                warn!(stderr = %process.stderr_ring.snapshot(), "ACP complete timed out");
-                let _ = process.child.kill().await;
-                *guard = None;
-                Err(RunnerError::timeout(format!(
-                    "copilot-acp: prompt timed out after {}s",
-                    acp_prompt_timeout().as_secs()
-                )))
+            let prompt_id = match process
+                .transport
+                .send_request(
+                    "session/prompt",
+                    build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    // Writing to stdin failed — pipe is broken. Discard.
+                    let _ = process.child.kill().await;
+                    *guard = None;
+                    return Err(e);
+                }
+            };
+
+            let started = Instant::now();
+            let result = time::timeout(
+                acp_prompt_timeout(),
+                collect_complete(
+                    &mut process.transport,
+                    prompt_id,
+                    // Cloned per attempt: the response carries the model name,
+                    // and a retry needs it again.
+                    model.clone(),
+                    self.config.permission_policy,
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok((response, _tool_calls))) => {
+                    info!(
+                        latency_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        content_len = response.content.len(),
+                        tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
+                        finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                        attempt,
+                        "ACP complete: response received"
+                    );
+
+                    // An empty turn, retried once on a fresh session. Logged
+                    // under a stable message either way so the rate is
+                    // greppable — the defect was diagnosed 2026-08-23 and could
+                    // not be measured, only noticed.
+                    if response.content.trim().is_empty() {
+                        if attempt < DEGENERATE_TURN_RETRIES {
+                            warn!(
+                                attempt,
+                                latency_ms = u64::try_from(started.elapsed().as_millis())
+                                    .unwrap_or(u64::MAX),
+                                finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                                "ACP complete: empty turn, retrying on a fresh session"
+                            );
+                            attempt += 1;
+                            continue;
+                        }
+                        warn!(
+                            attempt,
+                            "ACP complete: empty turn survived retry, returning it"
+                        );
+                    }
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        trace!(content = %response.content, "ACP response body");
+                    }
+                    // SUCCESS path: leave the subprocess alive so the next call
+                    // reuses it. This is the whole point of the pool.
+                    return Ok(response);
+                }
+                Ok(Err(e)) => {
+                    // Prompt failed mid-stream. Transport may be desynced; the
+                    // conservative choice is to kill and respawn rather than
+                    // risk a corrupt session bleeding into the next call.
+                    let _ = process.child.kill().await;
+                    *guard = None;
+                    return Err(e);
+                }
+                Err(_elapsed) => {
+                    warn!(stderr = %process.stderr_ring.snapshot(), "ACP complete timed out");
+                    let _ = process.child.kill().await;
+                    *guard = None;
+                    return Err(RunnerError::timeout(format!(
+                        "copilot-acp: prompt timed out after {}s",
+                        acp_prompt_timeout().as_secs()
+                    )));
+                }
             }
         }
     }
