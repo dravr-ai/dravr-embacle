@@ -435,3 +435,24 @@ jobs:
     uses: ./.github/workflows/homebrew.yml
     with:
       version: ${{ needs.version.outputs.version }}
+
+  # ---------------------------------------------------------------------------
+  # Tell dravr-platform this release exists, so its six pins stop drifting.
+  # ---------------------------------------------------------------------------
+  #
+  # Gated on `publish`, not on the homebrew jobs: the platform consumes embacle from
+  # crates.io, so `publish` is the moment the release becomes reachable for it. The
+  # tap is orthogonal, and making the platform integration wait behind it would park
+  # a coaching fix behind a brew formula.
+  #
+  # `publish` is also the honest gate for a different reason — it is where a partial
+  # publish shows up. The platform verifies the registry itself before bumping, but
+  # not announcing a release whose crates never uploaded keeps that check a backstop
+  # rather than the primary signal.
+  notify-platform:
+    name: Announce the release to dravr-platform
+    needs: [version, publish]
+    uses: ./.github/workflows/notify-platform-release.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}

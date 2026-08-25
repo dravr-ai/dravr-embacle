@@ -1,0 +1,77 @@
+# ABOUTME: Tells dravr-platform an embacle release exists so its six pinned versions stop drifting
+# ABOUTME: The platform's embacle-bump.yml takes it from there — bump, CI gate, merge, deploy
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 dravr.ai
+#
+# One end of the wire; dravr-platform's embacle-bump.yml is the other. embacle was the
+# last satellite without one: photograveur, contremaitre and sciotte each notify the
+# platform on release, while embacle's six version pins across four manifests were
+# moved by whoever remembered. v0.21.3 was landed that way on 2026-08-24.
+#
+# Announces the version rather than the SHA because the platform consumes embacle from
+# crates.io, so the version IS the address. The platform verifies it against the
+# registry before acting on it — this dispatch is a prompt, not an authority.
+
+name: "Notify Platform of Release"
+
+# Called by release.yml rather than triggered by `on: release`. The release is created
+# with the default GITHUB_TOKEN, and GitHub does not start workflow runs from events a
+# GITHUB_TOKEN produced — so an `on: release` trigger here could never fire. That is
+# exactly how sciotte's notifier logged zero runs across five releases while looking
+# perfectly wired. A trigger that cannot fire is worse than no trigger.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to announce (no v prefix)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to announce (defaults to the latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Dispatch embacle-released to dravr-platform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the version being announced
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve a release version to announce"
+            exit 1
+          fi
+          # release.yml passes a bare version, `gh release view` returns a v-prefixed
+          # tag, and a human running this by hand may type either. Normalise so the
+          # platform always receives the manifest's own vocabulary.
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "announcing $VERSION"
+
+      - name: Fire repository_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh api -X POST repos/dravr-ai/dravr-platform/dispatches \
+            -f event_type=embacle-released \
+            -F client_payload[version]="$VERSION" \
+            -F client_payload[sha]=${GITHUB_SHA}
+          echo "dispatched embacle-released ${VERSION} to dravr-platform"
