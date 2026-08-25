@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.21.3] — 2026-08-25
+
+### Fixed
+
+- fix(tests): assert the parser's output without .expect()
+- fix(copilot-headless): an empty turn is retried, not returned
+
+
+
 ## [0.21.2] — 2026-08-22
 
 

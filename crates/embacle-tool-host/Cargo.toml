@@ -6,7 +6,7 @@
 
 [package]
 name = "embacle-tool-host"
-version = "0.21.2"
+version = "0.21.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Host your own tools to an ACP agent over a loopback MCP endpoint"
@@ -16,7 +16,7 @@ keywords = ["mcp", "acp", "llm", "tools"]
 categories = ["development-tools"]
 
 [dependencies]
-embacle = { path = "../..", version = "0.21.2" }
+embacle = { path = "../..", version = "0.21.3" }
 dravr-tronc = "0.7.1"
 async-trait = "0.1"
 axum = "0.8"
@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # The live example drives a real `copilot --acp`; the unit tests do not need it.
-embacle = { path = "../..", version = "0.21.2", features = ["copilot-headless"] }
+embacle = { path = "../..", version = "0.21.3", features = ["copilot-headless"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1.45", features = ["full", "test-util"] }
