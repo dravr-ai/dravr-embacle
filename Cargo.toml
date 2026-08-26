@@ -172,5 +172,10 @@ name = "acp_model_smoke"
 path = "examples/acp_model_smoke.rs"
 required-features = ["copilot-headless"]
 
+[[example]]
+name = "copilot_tool_disowning"
+path = "examples/copilot_tool_disowning.rs"
+required-features = ["copilot-headless"]
+
 [lints]
 workspace = true
