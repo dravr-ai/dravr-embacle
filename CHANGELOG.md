@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.22.0] — 2026-08-27
+
+### Added
+
+- feat(usage): TokenUsage carries the cache counts providers already send
+- feat(examples): a probe that asks the model whether it owns a host tool
+
+
+
 ## [0.21.3] — 2026-08-25
 
 ### Fixed
