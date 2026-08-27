@@ -124,10 +124,12 @@ impl CursorAgentRunner {
         }
 
         let content = parsed.result.unwrap_or_default();
-        let usage = parsed.usage.map(|u| TokenUsage {
-            prompt_tokens: u.input_tokens.unwrap_or(0),
-            completion_tokens: u.output_tokens.unwrap_or(0),
-            total_tokens: u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0),
+        let usage = parsed.usage.map(|u| {
+            TokenUsage::new(
+                u.input_tokens.unwrap_or(0),
+                u.output_tokens.unwrap_or(0),
+                u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0),
+            )
         });
 
         let response = ChatResponse {

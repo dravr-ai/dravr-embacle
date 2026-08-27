@@ -179,11 +179,7 @@ impl<'a> AgentExecutor<'a> {
         );
 
         let mut all_tool_calls: Vec<FunctionCall> = Vec::new();
-        let mut total_usage = TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        };
+        let mut total_usage = TokenUsage::default();
         let mut turn: u32 = 0;
 
         loop {
@@ -371,11 +367,7 @@ mod tests {
     async fn single_turn_no_tool_calls() {
         let provider = TestProvider::new(vec![Ok(make_response(
             "Here is a direct answer without tool calls.",
-            Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 8,
-                total_tokens: 18,
-            }),
+            Some(TokenUsage::new(10, 8, 18)),
         ))]);
 
         let declarations = vec![FunctionDeclaration {
@@ -404,12 +396,12 @@ mod tests {
             // Turn 1: LLM calls a tool
             Ok(make_response(
                 "Let me search for that.\n<tool_call>\n{\"name\": \"search\", \"arguments\": {\"q\": \"rust\"}}\n</tool_call>",
-                Some(TokenUsage { prompt_tokens: 10, completion_tokens: 15, total_tokens: 25 }),
+                Some(TokenUsage::new(10, 15, 25)),
             )),
             // Turn 2: LLM responds with the result
             Ok(make_response(
                 "Based on the search results, Rust is a systems programming language.",
-                Some(TokenUsage { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42 }),
+                Some(TokenUsage::new(30, 12, 42)),
             )),
         ]);
 
@@ -560,20 +552,9 @@ mod tests {
         let provider = TestProvider::new(vec![
             Ok(make_response(
                 "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n</tool_call>",
-                Some(TokenUsage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
+                Some(TokenUsage::new(10, 5, 15)),
             )),
-            Ok(make_response(
-                "final",
-                Some(TokenUsage {
-                    prompt_tokens: 20,
-                    completion_tokens: 3,
-                    total_tokens: 23,
-                }),
-            )),
+            Ok(make_response("final", Some(TokenUsage::new(20, 3, 23)))),
         ]);
 
         let declarations = vec![FunctionDeclaration {

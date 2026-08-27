@@ -121,11 +121,7 @@ impl GeminiCliRunner {
                 let input = s.input.unwrap_or(0);
                 let output = s.output.unwrap_or(0);
                 let total = s.total.unwrap_or(input + output);
-                TokenUsage {
-                    prompt_tokens: input,
-                    completion_tokens: output,
-                    total_tokens: total,
-                }
+                TokenUsage::new(input, output, total)
             });
             return Ok((
                 ChatResponse {
@@ -186,11 +182,8 @@ impl GeminiCliRunner {
                             .unwrap_or(input + output);
                         #[allow(clippy::cast_possible_truncation)]
                         {
-                            usage = Some(TokenUsage {
-                                prompt_tokens: input as u32,
-                                completion_tokens: output as u32,
-                                total_tokens: total as u32,
-                            });
+                            usage =
+                                Some(TokenUsage::new(input as u32, output as u32, total as u32));
                         }
                     }
                 }

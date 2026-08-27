@@ -730,8 +730,18 @@ pub struct ChatResponse {
     pub tool_calls: Option<Vec<ToolCallRequest>>,
 }
 
-/// Token usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Token usage statistics.
+///
+/// The three optional fields are reported by some providers and not others, and
+/// `None` means "this provider told us nothing" — which is deliberately distinct
+/// from `Some(0)`, "the provider measured zero". Collapsing those two is what let
+/// a downstream project read a hardcoded zero as a cache measurement for a month.
+///
+/// `#[non_exhaustive]`: providers keep inventing token categories (reasoning,
+/// cache tiers, tool-use prompts), and every past addition here was a breaking
+/// change for consumers. Construct with [`TokenUsage::new`] and the setters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TokenUsage {
     /// Number of tokens in the prompt
     pub prompt_tokens: u32,
@@ -739,6 +749,55 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     /// Total tokens used
     pub total_tokens: u32,
+    /// Prompt tokens served from the provider's context cache, when reported.
+    ///
+    /// Billed at a steep discount by every provider that offers it, so this is
+    /// the field that makes a long stable prefix worth keeping stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_read_tokens: Option<u32>,
+    /// Prompt tokens written INTO the cache this turn, when reported.
+    ///
+    /// Usually billed at a premium. A turn with a large write and no read is a
+    /// cold prefix; the same shape on every turn means the prefix is churning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_write_tokens: Option<u32>,
+    /// Reasoning / "thought" tokens, when reported separately from completion.
+    ///
+    /// Billed as output by most providers but excluded from `completion_tokens`,
+    /// so dropping it under-reports cost on reasoning models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+}
+
+impl TokenUsage {
+    /// The three counts every provider reports. Optional categories default to
+    /// `None` — absent, not zero.
+    #[must_use]
+    pub const fn new(prompt_tokens: u32, completion_tokens: u32, total_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_read_tokens: None,
+            cached_write_tokens: None,
+            reasoning_tokens: None,
+        }
+    }
+
+    /// Attach cache counts. Pass `None` for a category the provider did not report.
+    #[must_use]
+    pub const fn with_cache(mut self, read: Option<u32>, write: Option<u32>) -> Self {
+        self.cached_read_tokens = read;
+        self.cached_write_tokens = write;
+        self
+    }
+
+    /// Attach a separately-reported reasoning-token count.
+    #[must_use]
+    pub const fn with_reasoning(mut self, reasoning: Option<u32>) -> Self {
+        self.reasoning_tokens = reasoning;
+        self
+    }
 }
 
 /// A chunk of a streaming response

@@ -511,11 +511,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "hello world".to_owned(),
                 model: "test-model".to_owned(),
-                usage: Some(TokenUsage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
+                usage: Some(TokenUsage::new(10, 5, 15)),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
                 tool_calls: None,
@@ -523,11 +519,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "second".to_owned(),
                 model: "test-model".to_owned(),
-                usage: Some(TokenUsage {
-                    prompt_tokens: 8,
-                    completion_tokens: 3,
-                    total_tokens: 11,
-                }),
+                usage: Some(TokenUsage::new(8, 3, 11)),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
                 tool_calls: None,
@@ -596,11 +588,7 @@ mod tests {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
             content: "hello".to_owned(),
             model: "test-model".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 5,
-                completion_tokens: 2,
-                total_tokens: 7,
-            }),
+            usage: Some(TokenUsage::new(5, 2, 7)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,
@@ -628,11 +616,7 @@ mod tests {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
             content: "response".to_owned(),
             model: "opus".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 1000,
-                completion_tokens: 500,
-                total_tokens: 1500,
-            }),
+            usage: Some(TokenUsage::new(1000, 500, 1500)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,
@@ -652,11 +636,7 @@ mod tests {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
             content: "response".to_owned(),
             model: "some-unknown-model".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 1000,
-                completion_tokens: 500,
-                total_tokens: 1500,
-            }),
+            usage: Some(TokenUsage::new(1000, 500, 1500)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,
@@ -675,11 +655,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "r1".to_owned(),
                 model: "opus".to_owned(),
-                usage: Some(TokenUsage {
-                    prompt_tokens: 1000,
-                    completion_tokens: 500,
-                    total_tokens: 1500,
-                }),
+                usage: Some(TokenUsage::new(1000, 500, 1500)),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
                 tool_calls: None,
@@ -687,11 +663,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "r2".to_owned(),
                 model: "opus".to_owned(),
-                usage: Some(TokenUsage {
-                    prompt_tokens: 2000,
-                    completion_tokens: 1000,
-                    total_tokens: 3000,
-                }),
+                usage: Some(TokenUsage::new(2000, 1000, 3000)),
                 finish_reason: Some("stop".to_owned()),
                 warnings: None,
                 tool_calls: None,
@@ -714,11 +686,7 @@ mod tests {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
             content: "response".to_owned(),
             model: "opus".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 1000,
-                completion_tokens: 500,
-                total_tokens: 1500,
-            }),
+            usage: Some(TokenUsage::new(1000, 500, 1500)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,
@@ -769,11 +737,7 @@ mod tests {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
             content: "response".to_owned(),
             model: "opus".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 1000,
-                completion_tokens: 500,
-                total_tokens: 1500,
-            }),
+            usage: Some(TokenUsage::new(1000, 500, 1500)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,

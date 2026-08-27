@@ -153,11 +153,10 @@ impl KiloCliRunner {
                                 let output = t.output.unwrap_or(0);
                                 let reasoning = t.reasoning.unwrap_or(0);
                                 let total = t.total.unwrap_or(input + output + reasoning);
-                                usage = Some(TokenUsage {
-                                    prompt_tokens: input as u32,
-                                    completion_tokens: output as u32,
-                                    total_tokens: total as u32,
-                                });
+                                usage = Some(
+                                    TokenUsage::new(input as u32, output as u32, total as u32)
+                                        .with_reasoning(t.reasoning.map(|r| r as u32)),
+                                );
                             }
                         }
                     }

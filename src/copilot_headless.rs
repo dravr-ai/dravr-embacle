@@ -930,12 +930,38 @@ fn build_permission_response(params: &Value, policy: PermissionPolicy) -> Value 
 
 /// Extract token usage from the prompt response JSON.
 ///
-/// ACP returns usage at `/result/usage` with camelCase fields:
-/// `totalTokens`, `inputTokens`, `outputTokens`.
+/// ACP returns usage at `/result/usage` with camelCase fields: `totalTokens`,
+/// `inputTokens`, `outputTokens`, and — on agents that implement the unstable
+/// session-usage capability — `cachedReadTokens`, `cachedWriteTokens` and
+/// `thoughtTokens`.
+///
+/// Those last three were read past for a long time, and because a dropped field
+/// is indistinguishable from an absent one, a downstream project concluded the
+/// transport did not carry them and registered it as a limitation. It does.
+/// Two consecutive live Copilot turns (2026-08-27, claude-opus-4.8):
+///
+/// ```text
+/// {"cachedReadTokens":15320,"cachedWriteTokens":12540,"inputTokens":27862,
+///  "outputTokens":4,"thoughtTokens":0,"totalTokens":27866}
+/// ```
+///
+/// 55% of the prompt served from cache, reported on every call, discarded here.
+/// Note the shape of a COLD turn — a large `cachedWriteTokens` with
+/// `cachedReadTokens: 0` — which looks exactly like an agent that does not report
+/// reads. Only the second, warm turn distinguishes them; see
+/// `examples/acp_usage_probe.rs`, which is deliberately two-turn for that reason.
 fn extract_usage(result: &Value) -> Option<TokenUsage> {
     let usage = result
         .pointer("/result/usage")
         .or_else(|| result.get("usage"))?;
+
+    // The whole object, before we pick fields off it. ACP's `Usage` also defines
+    // `cachedReadTokens`, `cachedWriteTokens` and `thoughtTokens`
+    // (agent-client-protocol-schema, `Usage`), all optional on an unstable
+    // capability — so whether an agent populates them is an empirical question,
+    // not a schema one. Logging the raw object is how that gets answered without
+    // guessing.
+    debug!(usage = %usage, "ACP usage payload");
 
     let input = usage.get("inputTokens").and_then(Value::as_u64)?;
     let output = usage.get("outputTokens").and_then(Value::as_u64)?;
@@ -944,12 +970,22 @@ fn extract_usage(result: &Value) -> Option<TokenUsage> {
         .and_then(Value::as_u64)
         .unwrap_or(input + output);
 
+    // Optional per the schema, so `None` means the agent said nothing — which
+    // must stay distinct from `Some(0)`, "the agent measured zero". Collapsing
+    // those is what made a hardcoded zero read as a measurement.
+    let cached_read = usage.get("cachedReadTokens").and_then(Value::as_u64);
+    let cached_write = usage.get("cachedWriteTokens").and_then(Value::as_u64);
+    let thoughts = usage.get("thoughtTokens").and_then(Value::as_u64);
+
     #[allow(clippy::cast_possible_truncation)]
-    Some(TokenUsage {
-        prompt_tokens: input as u32,
-        completion_tokens: output as u32,
-        total_tokens: total as u32,
-    })
+    Some(
+        TokenUsage::new(input as u32, output as u32, total as u32)
+            .with_cache(
+                cached_read.map(|v| v as u32),
+                cached_write.map(|v| v as u32),
+            )
+            .with_reasoning(thoughts.map(|v| v as u32)),
+    )
 }
 
 fn map_stop_reason(reason: &str) -> &'static str {
@@ -2785,5 +2821,64 @@ mod tests {
             acc_plain.tool_calls[0].title,
             acc_stream.tool_calls[0].title
         );
+    }
+
+    /// A real Copilot ACP usage object, captured 2026-08-27 from claude-opus-4.8.
+    ///
+    /// Verbatim from the wire — see `examples/acp_usage_probe.rs`. Pinned as a
+    /// fixture because the question this answers ("does the agent populate the
+    /// optional cache fields?") is empirical, and the previous answer was a guess
+    /// that hardened into a registered limitation.
+    const REAL_WARM_TURN_USAGE: &str = r#"{
+        "result": {
+            "usage": {
+                "cachedReadTokens": 15320,
+                "cachedWriteTokens": 12540,
+                "inputTokens": 27862,
+                "outputTokens": 4,
+                "thoughtTokens": 0,
+                "totalTokens": 27866
+            }
+        }
+    }"#;
+
+    #[test]
+    fn extract_usage_keeps_the_cache_counts_copilot_actually_sends() {
+        let value: Value = serde_json::from_str(REAL_WARM_TURN_USAGE).expect("fixture parses");
+        let usage = extract_usage(&value).expect("usage is present");
+
+        assert_eq!(usage.prompt_tokens, 27862);
+        assert_eq!(usage.completion_tokens, 4);
+        assert_eq!(usage.total_tokens, 27866);
+
+        // The point of the test: these were on the wire and thrown away.
+        assert_eq!(
+            usage.cached_read_tokens,
+            Some(15320),
+            "cachedReadTokens is reported on every turn and must survive parsing"
+        );
+        assert_eq!(usage.cached_write_tokens, Some(12540));
+
+        // Zero REPORTED, not absent. The distinction is the whole point of the
+        // Option: `None` would mean the agent said nothing about reasoning.
+        assert_eq!(usage.reasoning_tokens, Some(0));
+    }
+
+    #[test]
+    fn extract_usage_reports_absent_cache_fields_as_none_not_zero() {
+        // An agent implementing only the stable subset of the usage capability.
+        let value = json!({
+            "result": { "usage": { "inputTokens": 100, "outputTokens": 10, "totalTokens": 110 } }
+        });
+        let usage = extract_usage(&value).expect("usage is present");
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(
+            usage.cached_read_tokens, None,
+            "an agent that reports nothing must not be recorded as measuring zero — \
+             collapsing those is how a hardcoded 0 passed for a measurement"
+        );
+        assert_eq!(usage.cached_write_tokens, None);
+        assert_eq!(usage.reasoning_tokens, None);
     }
 }

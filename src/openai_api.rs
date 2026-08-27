@@ -283,6 +283,30 @@ struct ApiUsage {
     completion: u32,
     #[serde(rename = "total_tokens")]
     total: u32,
+    /// OpenAI-compatible breakdown of `prompt_tokens`. Carries the cache-read
+    /// share, which was previously undeclared and so deserialized away.
+    #[serde(default)]
+    prompt_tokens_details: Option<ApiPromptTokensDetails>,
+    /// Breakdown of `completion_tokens`; carries reasoning tokens on o-series
+    /// and other reasoning models.
+    #[serde(default)]
+    completion_tokens_details: Option<ApiCompletionTokensDetails>,
+}
+
+/// The `prompt_tokens_details` sub-object of an OpenAI-compatible usage block.
+#[derive(Debug, Deserialize)]
+struct ApiPromptTokensDetails {
+    /// Prompt tokens served from the provider's cache.
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+/// The `completion_tokens_details` sub-object of an OpenAI-compatible usage block.
+#[derive(Debug, Deserialize)]
+struct ApiCompletionTokensDetails {
+    /// Reasoning tokens, billed as output but excluded from `completion_tokens`.
+    #[serde(default)]
+    reasoning_tokens: Option<u32>,
 }
 
 // ============================================================================
@@ -576,10 +600,12 @@ impl LlmProvider for OpenAiApiRunner {
                 .collect()
         });
 
-        let usage = api_response.usage.map(|u| TokenUsage {
-            prompt_tokens: u.prompt,
-            completion_tokens: u.completion,
-            total_tokens: u.total,
+        let usage = api_response.usage.map(|u| {
+            // OpenAI reports no cache-WRITE count: writes are implicit and
+            // unbilled, so `None` here is accurate rather than unmeasured.
+            TokenUsage::new(u.prompt, u.completion, u.total)
+                .with_cache(u.prompt_tokens_details.and_then(|d| d.cached_tokens), None)
+                .with_reasoning(u.completion_tokens_details.and_then(|d| d.reasoning_tokens))
         });
 
         Ok(ChatResponse {

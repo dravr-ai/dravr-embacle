@@ -141,11 +141,11 @@ impl OpenCodeRunner {
                                 let input = t.input.unwrap_or(0);
                                 let output = t.output.unwrap_or(0);
                                 let total = t.total.unwrap_or(input + output);
-                                usage = Some(TokenUsage {
-                                    prompt_tokens: input as u32,
-                                    completion_tokens: output as u32,
-                                    total_tokens: total as u32,
-                                });
+                                usage = Some(TokenUsage::new(
+                                    input as u32,
+                                    output as u32,
+                                    total as u32,
+                                ));
                             }
                         }
                     }

@@ -574,11 +574,7 @@ mod tests {
         let response = ChatResponse {
             content: "Hello world".to_owned(),
             model: "test-model".to_owned(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
+            usage: Some(TokenUsage::new(10, 5, 15)),
             finish_reason: Some("stop".to_owned()),
             warnings: None,
             tool_calls: None,

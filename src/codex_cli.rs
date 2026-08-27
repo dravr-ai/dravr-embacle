@@ -126,13 +126,21 @@ impl CodexCliRunner {
                             .get("output_tokens")
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0);
+                        // Codex reports the cache-read share of `input_tokens`
+                        // separately; it was previously read past.
+                        let cached = u
+                            .get("cached_input_tokens")
+                            .and_then(serde_json::Value::as_u64);
                         #[allow(clippy::cast_possible_truncation)]
                         {
-                            usage = Some(TokenUsage {
-                                prompt_tokens: input as u32,
-                                completion_tokens: output as u32,
-                                total_tokens: (input + output) as u32,
-                            });
+                            usage = Some(
+                                TokenUsage::new(
+                                    input as u32,
+                                    output as u32,
+                                    (input + output) as u32,
+                                )
+                                .with_cache(cached.map(|c| c as u32), None),
+                            );
                         }
                     }
                 }

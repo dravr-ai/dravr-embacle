@@ -51,8 +51,17 @@ struct ClaudeResponse {
 /// Token usage from Claude Code CLI
 #[derive(Debug, Deserialize)]
 struct ClaudeUsage {
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
+    #[serde(rename = "input_tokens")]
+    input: Option<u32>,
+    #[serde(rename = "output_tokens")]
+    output: Option<u32>,
+    /// Prompt tokens served from Anthropic's prompt cache. Present on every
+    /// Claude Code turn and previously undeclared, so it deserialized away.
+    #[serde(rename = "cache_read_input_tokens", default)]
+    cache_read: Option<u32>,
+    /// Prompt tokens written into the cache this turn.
+    #[serde(rename = "cache_creation_input_tokens", default)]
+    cache_creation: Option<u32>,
 }
 
 /// Claude Code CLI runner
@@ -175,10 +184,13 @@ impl ClaudeCodeRunner {
         }
 
         let content = parsed.result.unwrap_or_default();
-        let usage = parsed.usage.map(|u| TokenUsage {
-            prompt_tokens: u.input_tokens.unwrap_or(0),
-            completion_tokens: u.output_tokens.unwrap_or(0),
-            total_tokens: u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0),
+        let usage = parsed.usage.map(|u| {
+            TokenUsage::new(
+                u.input.unwrap_or(0),
+                u.output.unwrap_or(0),
+                u.input.unwrap_or(0) + u.output.unwrap_or(0),
+            )
+            .with_cache(u.cache_read, u.cache_creation)
         });
 
         let response = ChatResponse {
