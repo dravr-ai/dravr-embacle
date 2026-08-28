@@ -1800,6 +1800,15 @@ impl LlmProvider for CopilotHeadlessRunner {
                         requested_model = %model,
                         "ACP requested model changed; respawning warm subprocess to re-pin --model"
                     );
+                    // Kill before dropping. This child is LIVE -- it just passed
+                    // `is_alive()` on the branch above -- and tokio's `Child`
+                    // does not kill on drop unless `kill_on_drop(true)` was set
+                    // at spawn, which it is not. So `*guard = None` alone
+                    // orphans a `copilot --acp` subprocess for the lifetime of
+                    // the server, one per model switch, each holding its own
+                    // stdio pipes. Every other teardown in this file kills
+                    // first; this branch was the one that did not.
+                    let _ = p.child.kill().await;
                     *guard = None;
                 }
             }
