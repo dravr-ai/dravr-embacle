@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::{mpsc, Mutex as TokioMutex, OwnedMutexGuard};
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, info, instrument, trace, warn, Span};
@@ -36,6 +37,44 @@ use crate::types::{
 const DEFAULT_ACP_PROMPT_TIMEOUT_SECS: u64 = 300;
 
 /// Read prompt timeout from env, falling back to [`DEFAULT_ACP_PROMPT_TIMEOUT_SECS`].
+/// Default number of warm `copilot --acp` subprocesses kept in the pool.
+///
+/// One slot serves one completion at a time, because the ACP transport is
+/// request/response by JSON-RPC id and cannot route two concurrent prompts.
+/// The pool buys concurrency by holding N independent transports, never by
+/// interleaving on one.
+///
+/// Two rather than one: the deployed backend accepts 80 concurrent requests
+/// per instance (`backend_max_instance_request_concurrency`) inside a 2Gi
+/// container, and every slot is a full `copilot` CLI subprocess competing for
+/// that budget. Two lifts the hard serialization of a single slot while
+/// leaving the memory envelope intact; raise it with the env var once the
+/// per-slot resident cost is measured against real traffic.
+const DEFAULT_ACP_POOL_SIZE: usize = 2;
+
+/// Upper bound on `EMBACLE_ACP_POOL_SIZE`, so a typo cannot fork the container
+/// into an unbounded number of CLI subprocesses.
+const MAX_ACP_POOL_SIZE: usize = 8;
+
+/// Sessions a warm subprocess serves before it is recycled.
+///
+/// See [`AcpProcess::sessions_served`] — nothing closes an ACP session, so this
+/// is the only bound on their accumulation.
+const MAX_SESSIONS_PER_PROCESS: u32 = 100;
+
+/// Number of warm subprocesses to pool, from `EMBACLE_ACP_POOL_SIZE`.
+///
+/// Clamped to `1..=MAX_ACP_POOL_SIZE`; an unparseable or zero value falls back
+/// to the default rather than disabling the pool.
+fn acp_pool_size() -> usize {
+    env::var("EMBACLE_ACP_POOL_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_ACP_POOL_SIZE)
+        .min(MAX_ACP_POOL_SIZE)
+}
+
 fn acp_prompt_timeout() -> Duration {
     let secs = env::var("EMBACLE_ACP_PROMPT_TIMEOUT_SECS")
         .ok()
@@ -576,6 +615,15 @@ struct AcpProcess {
     /// Fixed for the subprocess lifetime — a request for a different model
     /// requires respawning (see [`CopilotHeadlessRunner::complete`]).
     model: String,
+    /// How many `session/new` calls this subprocess has served.
+    ///
+    /// Nothing ever closes an ACP session: the protocol call is never sent
+    /// (`session/close` appears nowhere in this crate) and the CLI holds each
+    /// session for the subprocess lifetime. A warm subprocess therefore
+    /// accumulates one dead session per completion, forever. Recycling on this
+    /// count bounds that without depending on a protocol call the CLI may not
+    /// implement.
+    sessions_served: u32,
 }
 
 impl AcpProcess {
@@ -629,6 +677,7 @@ impl AcpProcess {
                 transport,
                 stderr_ring,
                 model: model.to_owned(),
+                sessions_served: 0,
             }),
             Ok(Err(e)) => {
                 warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP initialize failed");
@@ -1298,6 +1347,52 @@ pub enum HeadlessStreamEvent {
 pub type HeadlessEventStream =
     Pin<Box<dyn Stream<Item = Result<HeadlessStreamEvent, RunnerError>> + Send>>;
 
+/// A fixed set of warm `copilot --acp` subprocesses, each behind its own lock.
+///
+/// The ACP wire format carries no response routing, so two prompts must never
+/// share one transport. The pool respects that by never multiplexing a slot:
+/// concurrency comes from holding several independent subprocesses, each
+/// serving one completion at a time.
+///
+/// A slot holds `None` until first use and returns to `None` whenever its
+/// subprocess is discarded, so every slot self-heals on the next checkout.
+struct AcpPool {
+    slots: Vec<Arc<TokioMutex<Option<AcpProcess>>>>,
+    /// Round-robin cursor, so a burst of concurrent turns spreads across slots
+    /// instead of contending on slot 0 and queueing behind it.
+    next: AtomicUsize,
+}
+
+impl AcpPool {
+    fn new(size: usize) -> Self {
+        Self {
+            slots: (0..size.max(1))
+                .map(|_| Arc::new(TokioMutex::new(None)))
+                .collect(),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// Take exclusive use of one slot for the duration of a completion.
+    ///
+    /// Tries every slot once without blocking, so an idle subprocess is always
+    /// preferred over waiting. When all slots are busy it queues on one rather
+    /// than spinning or spawning past the configured size — the pool is a
+    /// bound, and saturation degrades to the single-slot behaviour it replaced
+    /// rather than to unbounded subprocess growth.
+    async fn checkout(&self) -> OwnedMutexGuard<Option<AcpProcess>> {
+        let len = self.slots.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..len {
+            let slot = &self.slots[(start.wrapping_add(offset)) % len];
+            if let Ok(guard) = Arc::clone(slot).try_lock_owned() {
+                return guard;
+            }
+        }
+        Arc::clone(&self.slots[start % len]).lock_owned().await
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public runner
 // ---------------------------------------------------------------------------
@@ -1338,11 +1433,12 @@ pub struct CopilotHeadlessRunner {
     /// respawned on subprocess death or any complete()-path error so the
     /// next call always starts from a known-good state.
     ///
-    /// Wrapped in `tokio::sync::Mutex` because the NDJSON transport is
-    /// request/response per JSON-RPC id and cannot interleave concurrent
-    /// prompts without response routing — which the ACP wire format does
-    /// not support.
-    process: Arc<TokioMutex<Option<AcpProcess>>>,
+    /// Each slot is wrapped in `tokio::sync::Mutex` because the NDJSON
+    /// transport is request/response per JSON-RPC id and cannot interleave
+    /// concurrent prompts without response routing — which the ACP wire
+    /// format does not support. Concurrency comes from the number of slots,
+    /// never from sharing one.
+    pool: AcpPool,
 }
 
 impl CopilotHeadlessRunner {
@@ -1357,7 +1453,7 @@ impl CopilotHeadlessRunner {
             config: CopilotHeadlessConfig::from_env(),
             available_models: catalog_ids(),
             observed_models: OnceLock::new(),
-            process: Arc::new(TokioMutex::new(None)),
+            pool: AcpPool::new(acp_pool_size()),
         }
     }
 
@@ -1368,7 +1464,7 @@ impl CopilotHeadlessRunner {
             config,
             available_models: catalog_ids(),
             observed_models: OnceLock::new(),
-            process: Arc::new(TokioMutex::new(None)),
+            pool: AcpPool::new(acp_pool_size()),
         }
     }
 
@@ -1760,12 +1856,19 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        // Hold the process lock for the full RPC round-trip. ACP transport
-        // is request/response by JSON-RPC id with no response-routing in
-        // the wire format, so concurrent prompts would interleave reads
-        // unsafely. The probe is every 5 minutes and chat traffic is
-        // sequential per chat turn, so contention is in practice low.
-        let mut guard = self.process.lock().await;
+        // Hold ONE POOL SLOT for the full RPC round-trip. ACP transport is
+        // request/response by JSON-RPC id with no response-routing in the wire
+        // format, so concurrent prompts would interleave reads unsafely — this
+        // lock is what prevents that, and it is per subprocess.
+        //
+        // It is not a server-wide lock. The runner is a process-wide singleton
+        // on `ServerContext`, the deployed backend accepts 80 concurrent
+        // requests per instance, and a chat turn calls `complete()` several
+        // times (tool loop, plan, synth, re-ask). A single slot therefore
+        // serialized every athlete on the instance behind one another for the
+        // full inference; the pool holds several independent transports so
+        // they do not.
+        let mut guard = self.pool.checkout().await;
 
         // Copilot ends a turn with zero agent-message chunks often enough to
         // matter: 2 of 11 turns in a controlled corpus run (2026-08-24). The
@@ -1810,6 +1913,18 @@ impl LlmProvider for CopilotHeadlessRunner {
                     // first; this branch was the one that did not.
                     let _ = p.child.kill().await;
                     *guard = None;
+                } else if p.sessions_served >= MAX_SESSIONS_PER_PROCESS {
+                    info!(
+                        sessions_served = p.sessions_served,
+                        "ACP subprocess reached its session ceiling; recycling"
+                    );
+                    // Nothing ever closes an ACP session, so a warm subprocess
+                    // holds every session it has served for its whole life.
+                    // Recycling is what bounds that. Kill first, for the same
+                    // reason as the branch above: this child is live and tokio
+                    // does not kill on drop.
+                    let _ = p.child.kill().await;
+                    *guard = None;
                 }
             }
 
@@ -1829,7 +1944,10 @@ impl LlmProvider for CopilotHeadlessRunner {
                 .new_session(&model, system_prompt, &request.mcp_servers)
                 .await
             {
-                Ok(id) => id,
+                Ok(id) => {
+                    process.sessions_served = process.sessions_served.saturating_add(1);
+                    id
+                }
                 Err(e) => {
                     // session/new failed on a previously-healthy subprocess.
                     // Could be the cached Copilot OAuth token expired and the
@@ -2015,6 +2133,88 @@ mod tests {
     use super::*;
     use crate::types::ChatMessage;
     use serde_json::json;
+
+    /// A pool of two serves two completions at once.
+    ///
+    /// This is the whole point of the change: the runner is a process-wide
+    /// singleton and the deployed backend accepts 80 concurrent requests per
+    /// instance, so a single slot made every athlete on the instance wait out
+    /// every other athlete's full inference.
+    #[tokio::test]
+    async fn pool_of_two_hands_out_two_slots_concurrently() {
+        let pool = AcpPool::new(2);
+
+        let first = pool.checkout().await;
+        let second = time::timeout(Duration::from_millis(250), pool.checkout())
+            .await
+            .expect("a second slot must be available while the first is held");
+
+        // Both guards are alive here — that is the concurrency being asserted.
+        drop(second);
+        drop(first);
+    }
+
+    /// The per-slot lock really does exclude, so the pool is not handing out
+    /// shared access to one transport.
+    ///
+    /// The ACP wire format has no response routing: two prompts on one
+    /// subprocess would interleave reads unsafely. A pool that failed to
+    /// exclude would be worse than the single slot it replaced, and would look
+    /// identical to a working one until it corrupted a turn under load — so
+    /// the exclusion is asserted by making it fire.
+    #[tokio::test]
+    async fn a_single_slot_still_excludes() {
+        let pool = AcpPool::new(1);
+
+        let held = pool.checkout().await;
+        let blocked = time::timeout(Duration::from_millis(250), pool.checkout()).await;
+        assert!(
+            blocked.is_err(),
+            "one slot must serialize: a second checkout cannot succeed while the slot is held"
+        );
+
+        drop(held);
+        time::timeout(Duration::from_millis(250), pool.checkout())
+            .await
+            .expect("the slot must be reusable once released");
+    }
+
+    /// Concurrent checkouts land on distinct slots rather than queueing on
+    /// slot 0, which is what the round-robin cursor buys.
+    #[tokio::test]
+    async fn checkout_spreads_across_every_slot() {
+        let pool = AcpPool::new(4);
+
+        let mut held = Vec::new();
+        for slot in 0..4 {
+            held.push(
+                time::timeout(Duration::from_millis(250), pool.checkout())
+                    .await
+                    .unwrap_or_else(|_| panic!("slot {slot} of 4 must be reachable")),
+            );
+        }
+
+        assert_eq!(held.len(), 4, "every slot must have been reachable");
+
+        // All four are held simultaneously; the fifth has nowhere to go.
+        let exhausted = time::timeout(Duration::from_millis(250), pool.checkout()).await;
+        assert!(
+            exhausted.is_err(),
+            "a 4-slot pool must not hand out a 5th slot — the pool is a bound"
+        );
+    }
+
+    #[test]
+    fn pool_size_is_clamped_and_never_zero() {
+        assert_eq!(AcpPool::new(0).slots.len(), 1, "a pool must have a slot");
+        assert_eq!(AcpPool::new(3).slots.len(), 3);
+        const {
+            assert!(
+                DEFAULT_ACP_POOL_SIZE >= 1 && DEFAULT_ACP_POOL_SIZE <= MAX_ACP_POOL_SIZE,
+                "the default must sit inside the allowed range"
+            );
+        }
+    }
 
     /// A real `session/new` result, trimmed to the fields the parser reads.
     ///
@@ -2271,7 +2471,7 @@ mod tests {
             },
             available_models: vec![],
             observed_models: OnceLock::new(),
-            process: Arc::new(TokioMutex::new(None)),
+            pool: AcpPool::new(acp_pool_size()),
         }
     }
 
