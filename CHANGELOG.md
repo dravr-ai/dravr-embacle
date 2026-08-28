@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.22.2] — 2026-08-28
+
+### Fixed
+
+- fix(ci): clear the expect/panic gate, red on main since db6de60
+- fix(acp): derive the session ceiling from measured memory, not a guess
+
+
+
 ## [0.22.1] — 2026-08-28
 
 
