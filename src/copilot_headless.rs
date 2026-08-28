@@ -54,13 +54,58 @@ const DEFAULT_ACP_POOL_SIZE: usize = 2;
 
 /// Upper bound on `EMBACLE_ACP_POOL_SIZE`, so a typo cannot fork the container
 /// into an unbounded number of CLI subprocesses.
-const MAX_ACP_POOL_SIZE: usize = 8;
-
-/// Sessions a warm subprocess serves before it is recycled.
 ///
-/// See [`AcpProcess::sessions_served`] — nothing closes an ACP session, so this
-/// is the only bound on their accumulation.
-const MAX_SESSIONS_PER_PROCESS: u32 = 100;
+/// Four, because [`ACP_PROCESS_BASE_MB`] alone is the binding constraint:
+/// eight idle subprocesses would hold 1,704 MB before serving one session,
+/// well past [`ACP_POOL_BUDGET_MB`]. The derived session ceiling keeps memory
+/// safe above this too, but it does so by recycling almost every completion —
+/// past about three slots the respawn cost eats the concurrency it bought.
+const MAX_ACP_POOL_SIZE: usize = 4;
+
+/// Resident memory a `copilot --acp` subprocess holds once `initialize`
+/// completes, before it has served a single session.
+///
+/// Measured against CLI 1.0.81 on 2026-08-28: 213 MB.
+const ACP_PROCESS_BASE_MB: usize = 213;
+
+/// Resident memory one ACP session adds, and never gives back.
+///
+/// Measured against CLI 1.0.81 on 2026-08-28: ~26 MB per `session/new`, and
+/// **independent of system-prompt size** — 0 B, 16 B and 27 KB prompts all cost
+/// the same, so this is fixed per-session overhead inside the CLI rather than
+/// anything we send.
+///
+/// It cannot be given back through the protocol. The agent advertises
+/// `sessionCapabilities.close`, and `session/close` returns a result rather
+/// than an error, but 20 new+close pairs grew resident memory by 515.8 MB
+/// against 522.5 MB for 20 sessions never closed — the call is accepted and
+/// frees nothing. Recycling the subprocess is the only remedy.
+const ACP_SESSION_COST_MB: usize = 26;
+
+/// Total resident memory every pooled subprocess may occupy between them.
+///
+/// Half of the deployed backend's 2Gi container, leaving the other half to the
+/// server itself. The pool is sized and recycled against this, not against a
+/// number that felt right.
+const ACP_POOL_BUDGET_MB: usize = 1024;
+
+/// Sessions a warm subprocess may serve before it is recycled.
+///
+/// Derived, not chosen: each slot gets an equal share of
+/// [`ACP_POOL_BUDGET_MB`], spends [`ACP_PROCESS_BASE_MB`] of it on existing,
+/// and buys sessions with the rest at [`ACP_SESSION_COST_MB`] each. Deriving it
+/// is what makes `EMBACLE_ACP_POOL_SIZE` safe to raise: a fixed ceiling that
+/// suited one slot would OOM the container at eight.
+///
+/// Floored at 1 so a pool sized past its own budget still makes progress,
+/// recycling after every completion rather than deadlocking.
+fn max_sessions_per_process(pool_size: usize) -> u32 {
+    let per_slot = ACP_POOL_BUDGET_MB / pool_size.max(1);
+    let headroom = per_slot.saturating_sub(ACP_PROCESS_BASE_MB);
+    u32::try_from(headroom / ACP_SESSION_COST_MB)
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
 
 /// Number of warm subprocesses to pool, from `EMBACLE_ACP_POOL_SIZE`.
 ///
@@ -1358,6 +1403,9 @@ pub type HeadlessEventStream =
 /// subprocess is discarded, so every slot self-heals on the next checkout.
 struct AcpPool {
     slots: Vec<Arc<TokioMutex<Option<AcpProcess>>>>,
+    /// Sessions a slot may serve before recycling, derived from the pool size
+    /// so the whole pool stays inside [`ACP_POOL_BUDGET_MB`].
+    max_sessions: u32,
     /// Round-robin cursor, so a burst of concurrent turns spreads across slots
     /// instead of contending on slot 0 and queueing behind it.
     next: AtomicUsize,
@@ -1365,11 +1413,11 @@ struct AcpPool {
 
 impl AcpPool {
     fn new(size: usize) -> Self {
+        let size = size.max(1);
         Self {
-            slots: (0..size.max(1))
-                .map(|_| Arc::new(TokioMutex::new(None)))
-                .collect(),
+            slots: (0..size).map(|_| Arc::new(TokioMutex::new(None))).collect(),
             next: AtomicUsize::new(0),
+            max_sessions: max_sessions_per_process(size),
         }
     }
 
@@ -1913,16 +1961,20 @@ impl LlmProvider for CopilotHeadlessRunner {
                     // first; this branch was the one that did not.
                     let _ = p.child.kill().await;
                     *guard = None;
-                } else if p.sessions_served >= MAX_SESSIONS_PER_PROCESS {
+                } else if p.sessions_served >= self.pool.max_sessions {
                     info!(
                         sessions_served = p.sessions_served,
                         "ACP subprocess reached its session ceiling; recycling"
                     );
-                    // Nothing ever closes an ACP session, so a warm subprocess
-                    // holds every session it has served for its whole life.
-                    // Recycling is what bounds that. Kill first, for the same
-                    // reason as the branch above: this child is live and tokio
-                    // does not kill on drop.
+                    // An ACP session cannot be closed — `session/close` is
+                    // advertised and accepted but frees nothing (measured) — so
+                    // a warm subprocess holds ~26 MB for every session it has
+                    // ever served, for its whole life. Left unbounded that
+                    // walks a 2Gi container into an OOM in well under a hundred
+                    // completions. Recycling is the only bound available.
+                    //
+                    // Kill first, for the same reason as the branch above: this
+                    // child is live and tokio does not kill on drop.
                     let _ = p.child.kill().await;
                     *guard = None;
                 }
@@ -2201,6 +2253,47 @@ mod tests {
         assert!(
             exhausted.is_err(),
             "a 4-slot pool must not hand out a 5th slot — the pool is a bound"
+        );
+    }
+
+    /// Every pool the env var can produce stays inside the memory budget.
+    ///
+    /// This is the assertion that makes `EMBACLE_ACP_POOL_SIZE` safe to turn
+    /// up. The ceiling is derived rather than chosen precisely so that raising
+    /// the pool lowers the per-slot session count instead of walking the
+    /// container into an OOM — if that derivation is ever replaced by a fixed
+    /// number, this fails.
+    #[test]
+    fn every_allowed_pool_size_fits_the_memory_budget() {
+        for size in 1..=MAX_ACP_POOL_SIZE {
+            let sessions = max_sessions_per_process(size) as usize;
+            let peak = size * (ACP_PROCESS_BASE_MB + sessions * ACP_SESSION_COST_MB);
+            assert!(
+                peak <= ACP_POOL_BUDGET_MB,
+                "pool of {size} peaks at {peak} MB, over the {ACP_POOL_BUDGET_MB} MB budget \
+                 ({sessions} sessions/slot)"
+            );
+            assert!(
+                sessions >= 1,
+                "a slot must serve at least one session, else no completion can finish"
+            );
+        }
+    }
+
+    /// A bigger pool must recycle sooner, never later.
+    #[test]
+    fn a_larger_pool_recycles_sooner() {
+        let one = max_sessions_per_process(1);
+        let two = max_sessions_per_process(2);
+        let four = max_sessions_per_process(4);
+        assert!(
+            one > two && two >= four,
+            "session ceiling must fall as the pool grows: {one} / {two} / {four}"
+        );
+        assert_eq!(
+            AcpPool::new(2).max_sessions,
+            two,
+            "the pool carries its ceiling"
         );
     }
 
