@@ -2197,9 +2197,11 @@ mod tests {
         let pool = AcpPool::new(2);
 
         let first = pool.checkout().await;
-        let second = time::timeout(Duration::from_millis(250), pool.checkout())
-            .await
-            .expect("a second slot must be available while the first is held");
+        let second = time::timeout(Duration::from_millis(250), pool.checkout()).await;
+        assert!(
+            second.is_ok(),
+            "a second slot must be available while the first is held"
+        );
 
         // Both guards are alive here — that is the concurrency being asserted.
         drop(second);
@@ -2226,9 +2228,11 @@ mod tests {
         );
 
         drop(held);
-        time::timeout(Duration::from_millis(250), pool.checkout())
-            .await
-            .expect("the slot must be reusable once released");
+        let reacquired = time::timeout(Duration::from_millis(250), pool.checkout()).await;
+        assert!(
+            reacquired.is_ok(),
+            "the slot must be reusable once released"
+        );
     }
 
     /// Concurrent checkouts land on distinct slots rather than queueing on
@@ -2239,11 +2243,10 @@ mod tests {
 
         let mut held = Vec::new();
         for slot in 0..4 {
-            held.push(
-                time::timeout(Duration::from_millis(250), pool.checkout())
-                    .await
-                    .unwrap_or_else(|_| panic!("slot {slot} of 4 must be reachable")),
-            );
+            let guard = time::timeout(Duration::from_millis(250), pool.checkout()).await;
+            assert!(guard.is_ok(), "slot {slot} of 4 must be reachable");
+            // `Result` iterates its `Ok`, so this keeps the guard alive.
+            held.extend(guard);
         }
 
         assert_eq!(held.len(), 4, "every slot must have been reachable");
@@ -3146,8 +3149,12 @@ mod tests {
 
     #[test]
     fn extract_usage_keeps_the_cache_counts_copilot_actually_sends() {
-        let value: Value = serde_json::from_str(REAL_WARM_TURN_USAGE).expect("fixture parses");
-        let usage = extract_usage(&value).expect("usage is present");
+        let Ok(value) = serde_json::from_str::<Value>(REAL_WARM_TURN_USAGE) else {
+            unreachable!("the checked-in fixture must parse")
+        };
+        let Some(usage) = extract_usage(&value) else {
+            unreachable!("usage is present in the fixture")
+        };
 
         assert_eq!(usage.prompt_tokens, 27862);
         assert_eq!(usage.completion_tokens, 4);
@@ -3172,7 +3179,9 @@ mod tests {
         let value = json!({
             "result": { "usage": { "inputTokens": 100, "outputTokens": 10, "totalTokens": 110 } }
         });
-        let usage = extract_usage(&value).expect("usage is present");
+        let Some(usage) = extract_usage(&value) else {
+            unreachable!("usage is present in the fixture")
+        };
 
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(
