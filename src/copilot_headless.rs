@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, Mutex as TokioMutex, OwnedMutexGuard};
+use tokio::sync::{mpsc, Mutex as TokioMutex, OwnedMutexGuard, Semaphore};
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, info, instrument, trace, warn, Span};
@@ -88,6 +88,32 @@ const ACP_SESSION_COST_MB: usize = 26;
 /// server itself. The pool is sized and recycled against this, not against a
 /// number that felt right.
 const ACP_POOL_BUDGET_MB: usize = 1024;
+
+/// Resident memory the STREAMING paths may occupy between them.
+///
+/// Separate from [`ACP_POOL_BUDGET_MB`] because a streamed turn does not use
+/// the pool: its subprocess outlives the call inside a background task, so
+/// borrowing a warm slot would hold it for the whole turn — up to the prompt
+/// timeout — and make `checkout().await` block the first token, which is the
+/// latency streaming exists to protect. A dedicated bound caps the memory
+/// without that trade.
+///
+/// The two budgets are spent from the same container, so raising either eats
+/// headroom the server itself needs. Deployed dev peaked at 45% of 2Gi
+/// (~920 MB) on 2026-08-30, subprocesses included.
+const ACP_STREAM_BUDGET_MB: usize = 512;
+
+/// How many streamed turns may run at once.
+///
+/// Each holds a dedicated subprocess for the turn: [`ACP_PROCESS_BASE_MB`] to
+/// exist plus one session at [`ACP_SESSION_COST_MB`], since a stream opens
+/// exactly one and the child dies with the turn. Derived rather than chosen so
+/// the bound moves with the measurements it rests on, and floored at 1 so a
+/// budget smaller than one subprocess still serves turns one at a time rather
+/// than deadlocking.
+fn max_concurrent_streams() -> usize {
+    (ACP_STREAM_BUDGET_MB / (ACP_PROCESS_BASE_MB + ACP_SESSION_COST_MB)).max(1)
+}
 
 /// Sessions a warm subprocess may serve before it is recycled.
 ///
@@ -1616,6 +1642,14 @@ pub struct CopilotHeadlessRunner {
     /// format does not support. Concurrency comes from the number of slots,
     /// never from sharing one.
     pool: AcpPool,
+    /// Admission control for the streaming paths, which spawn a dedicated
+    /// subprocess per call rather than borrowing a pool slot.
+    ///
+    /// Without it nothing bounds how many `copilot --acp` children exist at
+    /// once — 213 MB each, on an instance that accepts 80 concurrent requests
+    /// inside 2Gi. A permit is held for the whole streamed turn and released
+    /// when the background task ends, however it ends.
+    stream_permits: Arc<Semaphore>,
 }
 
 impl CopilotHeadlessRunner {
@@ -1631,6 +1665,7 @@ impl CopilotHeadlessRunner {
             available_models: catalog_ids(),
             observed_models: OnceLock::new(),
             pool: AcpPool::new(acp_pool_size()),
+            stream_permits: Arc::new(Semaphore::new(max_concurrent_streams())),
         }
     }
 
@@ -1642,6 +1677,7 @@ impl CopilotHeadlessRunner {
             available_models: catalog_ids(),
             observed_models: OnceLock::new(),
             pool: AcpPool::new(acp_pool_size()),
+            stream_permits: Arc::new(Semaphore::new(max_concurrent_streams())),
         }
     }
 
@@ -2060,14 +2096,18 @@ impl CopilotHeadlessRunner {
     /// task will still drain the session and the child will be cleaned up
     /// when the turn finishes.
     ///
-    /// LIMITATION(registre#135): this path spawns per call and is NOT pooled,
-    /// so nothing bounds how many children exist at once — 213 MB each, in a
-    /// 2Gi container that accepts 80 concurrent requests. Pooling it means
-    /// holding a slot for the whole streamed turn (up to the prompt timeout)
-    /// against a default pool of two, and making `checkout().await` block the
-    /// first token, which is the latency streaming exists to protect. A
-    /// dedicated semaphore would bound the memory without that trade and is
-    /// the likelier fix.
+    /// This path spawns per call rather than borrowing a pool slot, and that is
+    /// deliberate: pooling would hold a warm slot for the whole streamed turn —
+    /// up to the prompt timeout, against a default pool of two — and make
+    /// `checkout().await` block the first token, which is the latency streaming
+    /// exists to protect. It pays the handshake per stream in exchange.
+    ///
+    /// What it does NOT do any more is spawn without limit. Admission is taken
+    /// from [`CopilotHeadlessRunner::stream_permits`] before the spawn, so the
+    /// number of concurrent children is bounded by
+    /// [`max_concurrent_streams()`] rather than by how many athletes happen to
+    /// be typing — 213 MB each, in a 2Gi container that accepts 80 concurrent
+    /// requests.
     ///
     /// # Errors
     ///
@@ -2087,6 +2127,17 @@ impl CopilotHeadlessRunner {
         Span::current().record("model", field::display(&model));
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
+
+        // Admission BEFORE the spawn, not after: the point of the bound is to
+        // stop the subprocess existing, and a permit taken after
+        // `setup_session` would have already paid the 213 MB it exists to cap.
+        // The permit rides into the background task below and is released when
+        // that task ends, however it ends — done, error, timeout, or an
+        // abandoned stream that still drains.
+        let stream_permit = Arc::clone(&self.stream_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| RunnerError::internal("copilot-acp: stream admission semaphore closed"))?;
 
         let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
@@ -2157,6 +2208,12 @@ impl CopilotHeadlessRunner {
             }
 
             let _ = child.kill().await;
+
+            // Release admission only now, with the child reaped. Dropping it
+            // any earlier would let the next streamed turn spawn while this
+            // subprocess is still resident, which is the overcommit the bound
+            // exists to prevent.
+            drop(stream_permit);
         });
 
         let stream = UnboundedReceiverStream::new(event_rx);
@@ -2265,6 +2322,17 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
         let prompt_blocks = self.build_prompt_blocks(request);
 
+        // Admission BEFORE the spawn, not after: the point of the bound is to
+        // stop the subprocess existing, and a permit taken after
+        // `setup_session` would have already paid the 213 MB it exists to cap.
+        // The permit rides into the background task below and is released when
+        // that task ends, however it ends — done, error, timeout, or an
+        // abandoned stream that still drains.
+        let stream_permit = Arc::clone(&self.stream_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| RunnerError::internal("copilot-acp: stream admission semaphore closed"))?;
+
         let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
             self.config.github_token.as_deref(),
@@ -2317,6 +2385,12 @@ impl LlmProvider for CopilotHeadlessRunner {
                 Ok(Ok(())) => {}
             }
             let _ = child.kill().await;
+
+            // Release admission only now, with the child reaped. Dropping it
+            // any earlier would let the next streamed turn spawn while this
+            // subprocess is still resident, which is the overcommit the bound
+            // exists to prevent.
+            drop(stream_permit);
         });
 
         let stream = UnboundedReceiverStream::new(chunk_rx);
@@ -2485,6 +2559,43 @@ mod tests {
         assert!(
             notification_is_for_session(&wrong_type, "s-1"),
             "a non-string id is unreadable, not a mismatch"
+        );
+    }
+
+    /// The streaming bound is derived from the same measurements as the pool's.
+    #[test]
+    fn concurrent_streams_are_derived_from_the_budget() {
+        let per_stream = ACP_PROCESS_BASE_MB + ACP_SESSION_COST_MB;
+        assert_eq!(max_concurrent_streams(), ACP_STREAM_BUDGET_MB / per_stream);
+        assert!(
+            max_concurrent_streams() >= 1,
+            "a budget below one subprocess must still serve turns one at a time, not deadlock"
+        );
+    }
+
+    /// The pool and the streaming paths spend from ONE container, and together
+    /// they must leave the server room to run.
+    ///
+    /// This is the assertion that makes either budget safe to edit. They were
+    /// derived separately — the pool against recycling, the streams against
+    /// admission — and nothing else notices when their sum grows past what the
+    /// 2Gi container can hold. Deployed dev peaked at 45% (~920 MB) with
+    /// subprocesses included, so the server's own share is real and not
+    /// negligible.
+    #[test]
+    fn both_acp_budgets_together_leave_the_server_room() {
+        const CONTAINER_MB: usize = 2048;
+        const SERVER_HEADROOM_MB: usize = 384;
+
+        let pool_peak = acp_pool_size()
+            * (ACP_PROCESS_BASE_MB
+                + max_sessions_per_process(acp_pool_size()) as usize * ACP_SESSION_COST_MB);
+        let stream_peak = max_concurrent_streams() * (ACP_PROCESS_BASE_MB + ACP_SESSION_COST_MB);
+
+        assert!(
+            pool_peak + stream_peak + SERVER_HEADROOM_MB <= CONTAINER_MB,
+            "pool {pool_peak} MB + streams {stream_peak} MB leaves under {SERVER_HEADROOM_MB} MB \
+             of the {CONTAINER_MB} MB container for the server itself"
         );
     }
 
@@ -2811,6 +2922,7 @@ mod tests {
             available_models: vec![],
             observed_models: OnceLock::new(),
             pool: AcpPool::new(acp_pool_size()),
+            stream_permits: Arc::new(Semaphore::new(max_concurrent_streams())),
         }
     }
 
