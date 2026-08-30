@@ -377,6 +377,17 @@ impl AcpTransport {
 ///
 /// Errors are the caller's to downgrade to a warning: a config write failure must
 /// never abort a turn — it just leaves the previous/default model in effect.
+///
+/// LIMITATION(registre#134): settings.json is process-global and this write is
+/// unsynchronized, while the child reads it asynchronously AFTER exec. Two
+/// spawns for different models can interleave — A writes X, B writes Y, A's
+/// child reads Y — and A's turn then runs on the wrong model with nothing
+/// downstream able to notice, since the response reports the model we asked
+/// for rather than the one that served it. Serializing write-and-spawn narrows
+/// the window without closing it; the real fix is a per-child config location,
+/// which is entangled with credential storage under the same directory. The
+/// pool reduces the exposure — spawns now happen only on discard rather than
+/// once per call — but does not remove it.
 fn ensure_copilot_settings_model(model: &str) -> Result<PathBuf, RunnerError> {
     let home = env::var_os("HOME").ok_or_else(|| {
         RunnerError::internal("HOME is not set; cannot locate copilot settings.json")
@@ -749,12 +760,27 @@ impl AcpProcess {
     /// Cheap relative to [`Self::spawn_and_initialize`]: no new subprocess,
     /// no new GitHub→Copilot token exchange — copilot reuses the in-process
     /// token cache it built during `initialize`.
+    /// Open a session on this subprocess.
+    ///
+    /// `mcpServers` is declared per session, and the agent honours that: a warm
+    /// subprocess reconnects to the declared servers on every `session/new`
+    /// rather than caching a connection by name and url. Measured against CLI
+    /// 1.0.81 on 2026-08-30 with a stub MCP server recording Authorization
+    /// headers — two sessions on ONE subprocess, same server name and url,
+    /// different bearers: session 2 issued three fresh requests carrying the
+    /// SECOND bearer.
+    ///
+    /// That is what makes pooling safe for `converse()`, which carries a real
+    /// per-turn tool surface whose credential rotates. Had the agent reused the
+    /// first session's connection, a reused subprocess would have called tools
+    /// with a revoked token, or worse, against the previous turn's
+    /// tenant-scoped surface. Re-measure before assuming it still holds.
     async fn new_session(
         &mut self,
         model: &str,
         system_prompt: Option<&str>,
         mcp_servers: &[McpServerConfig],
-    ) -> Result<String, RunnerError> {
+    ) -> Result<(String, Option<Vec<String>>), RunnerError> {
         let outcome = time::timeout(acp_session_timeout(), async {
             let mut session_params = json!({
                 "model": model,
@@ -783,7 +809,20 @@ impl AcpProcess {
                     RunnerError::external_service("copilot-acp", "Missing sessionId in response")
                 })?
                 .to_owned();
-            info!(session_id = %session_id, model = %model, "ACP session created");
+
+            // The CLI reports which models this account may actually use, on
+            // every session/new. The pooled path dropped it, so a runner that
+            // only ever went through `complete()` answered `available_models()`
+            // from the compiled-in catalog forever — the same staleness that
+            // once paged on a model that worked.
+            let observed = models_from_session(&resp);
+
+            info!(
+                session_id = %session_id,
+                model = %model,
+                reported_models = observed.as_ref().map_or(0, Vec::len),
+                "ACP session created"
+            );
 
             // Run the tool loop to completion when MCP tools are available
             // (see `set_autopilot_mode`); best-effort.
@@ -796,12 +835,12 @@ impl AcpProcess {
                 }
             }
 
-            Ok::<_, RunnerError>(session_id)
+            Ok::<_, RunnerError>((session_id, observed))
         })
         .await;
 
         match outcome {
-            Ok(Ok(session_id)) => Ok(session_id),
+            Ok(Ok(pair)) => Ok(pair),
             Ok(Err(e)) => Err(e),
             Err(_elapsed) => Err(RunnerError::timeout(format!(
                 "copilot-acp: session/new timed out after {}s",
@@ -1102,6 +1141,7 @@ async fn collect_complete(
     prompt_id: i64,
     model: String,
     policy: PermissionPolicy,
+    session_id: &str,
 ) -> Result<(ChatResponse, Vec<ObservedToolCall>), RunnerError> {
     let mut acc = TurnAccumulator::new();
     let mut message_count: u32 = 0;
@@ -1157,7 +1197,7 @@ async fn collect_complete(
         }
 
         // Server requests and notifications
-        handle_server_message(&msg, transport, &mut acc, policy).await?;
+        handle_server_message(&msg, transport, &mut acc, policy, session_id).await?;
     }
 }
 
@@ -1167,6 +1207,7 @@ async fn collect_streaming(
     prompt_id: i64,
     chunk_tx: &mpsc::UnboundedSender<Result<StreamChunk, RunnerError>>,
     policy: PermissionPolicy,
+    session_id: &str,
 ) -> Result<(), RunnerError> {
     let mut acc = TurnAccumulator::new();
 
@@ -1201,6 +1242,10 @@ async fn collect_streaming(
             match method {
                 "session/update" => {
                     if let Some(params) = msg.get("params") {
+                        if !notification_is_for_session(params, session_id) {
+                            debug!("ACP: dropped a session/update from another session");
+                            continue;
+                        }
                         // Try to extract text delta for streaming
                         if let Ok(notif) =
                             serde_json::from_value::<schema::SessionNotification>(params.clone())
@@ -1232,17 +1277,44 @@ async fn collect_streaming(
 }
 
 /// Handle a server-to-client message (notification or request).
+/// Whether a `session/update` notification belongs to the turn being read.
+///
+/// A pooled subprocess serves many sessions over its life, one athlete after
+/// another, and nothing in the transport separates their notifications: the
+/// read loop folds every `session/update` it sees into the accumulator until
+/// the prompt response arrives. A notification left in the pipe by an earlier
+/// session would therefore be appended to a later athlete's reply — a silent
+/// wrong answer, and the more dangerous half of it is that `converse()` output
+/// is what the athlete actually reads.
+///
+/// Copilot tags every notification (verified on the wire, CLI 1.0.81:
+/// `session/update` params are `["sessionId", "update"]`). An UNTAGGED
+/// notification is accepted rather than dropped — an agent that does not tag
+/// cannot be filtered, and silently discarding its content would be a worse
+/// failure than the one this prevents.
+fn notification_is_for_session(params: &Value, session_id: &str) -> bool {
+    params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_none_or(|id| id == session_id)
+}
+
 async fn handle_server_message(
     msg: &Value,
     transport: &mut AcpTransport,
     acc: &mut TurnAccumulator,
     policy: PermissionPolicy,
+    session_id: &str,
 ) -> Result<(), RunnerError> {
     if let Some(method) = msg.get("method").and_then(Value::as_str) {
         match method {
             "session/update" => {
                 if let Some(params) = msg.get("params") {
-                    process_notification(params, acc);
+                    if notification_is_for_session(params, session_id) {
+                        process_notification(params, acc);
+                    } else {
+                        debug!("ACP: dropped a session/update from another session");
+                    }
                 }
             }
             "session/request_permission" => {
@@ -1268,12 +1340,17 @@ async fn handle_server_message_streaming(
     acc: &mut TurnAccumulator,
     policy: PermissionPolicy,
     event_tx: &mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>,
+    session_id: &str,
 ) -> Result<(), RunnerError> {
     if let Some(method) = msg.get("method").and_then(Value::as_str) {
         match method {
             "session/update" => {
                 if let Some(params) = msg.get("params") {
-                    process_notification_streaming(params, acc, event_tx);
+                    if notification_is_for_session(params, session_id) {
+                        process_notification_streaming(params, acc, event_tx);
+                    } else {
+                        debug!("ACP: dropped a session/update from another session");
+                    }
                 }
             }
             "session/request_permission" => {
@@ -1300,6 +1377,7 @@ async fn collect_streaming_with_tools(
     model: String,
     policy: PermissionPolicy,
     event_tx: &mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>,
+    session_id: &str,
 ) -> Result<HeadlessToolResponse, RunnerError> {
     let mut acc = TurnAccumulator::new();
 
@@ -1330,7 +1408,8 @@ async fn collect_streaming_with_tools(
             });
         }
 
-        handle_server_message_streaming(&msg, transport, &mut acc, policy, event_tx).await?;
+        handle_server_message_streaming(&msg, transport, &mut acc, policy, event_tx, session_id)
+            .await?;
     }
 }
 
@@ -1391,6 +1470,56 @@ pub enum HeadlessStreamEvent {
 /// Stream of [`HeadlessStreamEvent`]s for a single converse turn.
 pub type HeadlessEventStream =
     Pin<Box<dyn Stream<Item = Result<HeadlessStreamEvent, RunnerError>> + Send>>;
+
+/// Why a warm subprocess must not serve the turn in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscardReason {
+    /// The child exited between calls — crash, OOM kill, upstream disconnect.
+    Exited,
+    /// `--model` is fixed at spawn, so a process pinned to model A cannot
+    /// serve a request for model B.
+    ModelChanged,
+    /// It has served its share of the memory budget. Nothing frees an ACP
+    /// session, so this is the only bound on their accumulation.
+    SessionCeiling,
+}
+
+/// Decide whether a warm subprocess may serve the next turn.
+///
+/// Pure, so the rule can be tested without a subprocess: every caller of the
+/// pool asks this one question, and the answer is what separates "reuse the
+/// warm process" from "kill it and spawn a fresh one".
+const fn discard_reason(
+    alive: bool,
+    model_matches: bool,
+    sessions_served: u32,
+    max_sessions: u32,
+) -> Option<DiscardReason> {
+    if !alive {
+        return Some(DiscardReason::Exited);
+    }
+    if !model_matches {
+        return Some(DiscardReason::ModelChanged);
+    }
+    if sessions_served >= max_sessions {
+        return Some(DiscardReason::SessionCeiling);
+    }
+    None
+}
+
+/// Everything one pooled turn needs, so the two entry points hand it over as a
+/// single value rather than a seven-argument call.
+struct TurnRequest<'a> {
+    cli_path: &'a PathBuf,
+    model: &'a str,
+    system_prompt: Option<&'a str>,
+    prompt_blocks: &'a [Value],
+    max_tokens: Option<u32>,
+    mcp_servers: &'a [McpServerConfig],
+    /// Which entry point is running, so a log line says which path a warm
+    /// subprocess was recycled or killed on.
+    caller: &'static str,
+}
 
 /// A fixed set of warm `copilot --acp` subprocesses, each behind its own lock.
 ///
@@ -1664,6 +1793,211 @@ impl CopilotHeadlessRunner {
             .find(|m| m.role == MessageRole::System)
             .map(|m| m.content.as_str())
     }
+    /// Run one turn on a pooled subprocess.
+    ///
+    /// Checks out a slot, makes sure the process in it is fit to serve this
+    /// request, opens a session, sends the prompt and collects the answer.
+    /// On success the subprocess is left alive for the next turn; on ANY
+    /// failure it is killed and its slot cleared, so the next caller starts
+    /// from a known-good state rather than inheriting a desynced transport.
+    ///
+    /// Both entry points run through here. `complete()` adds the empty-turn
+    /// retry and discards the tool calls; `converse()` keeps them. Duplicating
+    /// the checkout/discard/kill logic into each was the alternative, and it is
+    /// exactly the shape that lets one path quietly stop killing a child.
+    /// Leave the slot holding a subprocess fit to serve this turn.
+    ///
+    /// Discards whatever is there when it has exited, is pinned to a different
+    /// model, or has spent its share of the memory budget, then spawns a
+    /// replacement if the slot ended up empty.
+    async fn ensure_fit_process(
+        &self,
+        guard: &mut OwnedMutexGuard<Option<AcpProcess>>,
+        cli_path: &PathBuf,
+        model: &str,
+        caller: &'static str,
+    ) -> Result<(), RunnerError> {
+        if let Some(p) = guard.as_mut() {
+            if let Some(reason) = discard_reason(
+                p.is_alive(),
+                p.model == model,
+                p.sessions_served,
+                self.pool.max_sessions,
+            ) {
+                match reason {
+                    DiscardReason::Exited => {
+                        warn!(caller, "ACP subprocess exited between calls; respawning");
+                    }
+                    DiscardReason::ModelChanged => info!(
+                        caller,
+                        warm_model = %p.model,
+                        requested_model = %model,
+                        "ACP requested model changed; respawning warm subprocess to re-pin --model"
+                    ),
+                    DiscardReason::SessionCeiling => info!(
+                        caller,
+                        sessions_served = p.sessions_served,
+                        "ACP subprocess reached its session ceiling; recycling"
+                    ),
+                }
+                // Kill before dropping, for every reason except a child that has
+                // already exited. Tokio's `Child` does not kill on drop unless
+                // `kill_on_drop(true)` was set at spawn, which it is not, so
+                // `**guard = None` alone orphans a live `copilot --acp`
+                // subprocess for the lifetime of the server.
+                //
+                // The ceiling exists because an ACP session cannot be closed —
+                // `session/close` is advertised and accepted but frees nothing
+                // (measured) — so a warm subprocess holds ~26 MB for every
+                // session it has ever served. Unbounded, that walks a 2Gi
+                // container into an OOM.
+                if reason != DiscardReason::Exited {
+                    let _ = p.child.kill().await;
+                }
+                **guard = None;
+            }
+        }
+
+        if guard.is_none() {
+            let fresh = AcpProcess::spawn_and_initialize(
+                cli_path,
+                self.config.github_token.as_deref(),
+                model,
+            )
+            .await?;
+            **guard = Some(fresh);
+        }
+        Ok(())
+    }
+
+    /// Run one turn on a pooled subprocess.
+    ///
+    /// On success the subprocess is left alive for the next turn; on ANY
+    /// failure it is killed and its slot cleared, so the next caller starts
+    /// from a known-good state rather than inheriting a desynced transport.
+    ///
+    /// Both entry points run through here. `complete()` adds the empty-turn
+    /// retry and discards the tool calls; `converse()` keeps them. Duplicating
+    /// the checkout/discard/kill logic into each was the alternative, and it is
+    /// exactly the shape that lets one path quietly stop killing a child.
+    async fn run_pooled_turn(
+        &self,
+        turn: &TurnRequest<'_>,
+    ) -> Result<(ChatResponse, Vec<ObservedToolCall>), RunnerError> {
+        // Hold ONE POOL SLOT for the full RPC round-trip. ACP transport is
+        // request/response by JSON-RPC id with no response-routing in the wire
+        // format, so concurrent prompts would interleave reads unsafely — this
+        // lock is what prevents that, and it is per subprocess, not server-wide.
+        let mut guard = self.pool.checkout().await;
+        self.ensure_fit_process(&mut guard, turn.cli_path, turn.model, turn.caller)
+            .await?;
+
+        let Some(process) = guard.as_mut() else {
+            return Err(RunnerError::internal(
+                "copilot-acp: pool slot empty after ensuring a process",
+            ));
+        };
+
+        let session_id = match process
+            .new_session(turn.model, turn.system_prompt, turn.mcp_servers)
+            .await
+        {
+            Ok((id, observed)) => {
+                process.sessions_served = process.sessions_served.saturating_add(1);
+                self.record_observed_models(observed);
+                id
+            }
+            Err(e) => {
+                // session/new failed on a previously-healthy subprocess. Could
+                // be the cached Copilot OAuth token expired and the CLI didn't
+                // auto-refresh, or the process is wedged. Kill and clear so the
+                // next call respawns and re-authenticates.
+                let _ = process.child.kill().await;
+                *guard = None;
+                return Err(e);
+            }
+        };
+
+        info!(
+            caller = turn.caller,
+            session_id = %session_id,
+            prompt_blocks = turn.prompt_blocks.len(),
+            "ACP: sending prompt"
+        );
+        if tracing::enabled!(tracing::Level::TRACE) {
+            match serde_json::to_string(turn.prompt_blocks) {
+                Ok(blocks_json) => trace!(prompt_blocks = %blocks_json, "ACP prompt blocks"),
+                Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
+            }
+        }
+
+        let prompt_id = match process
+            .transport
+            .send_request(
+                "session/prompt",
+                build_prompt_params(&session_id, turn.prompt_blocks, turn.max_tokens),
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                // Writing to stdin failed — pipe is broken. Discard.
+                let _ = process.child.kill().await;
+                *guard = None;
+                return Err(e);
+            }
+        };
+
+        let started = Instant::now();
+        let result = time::timeout(
+            acp_prompt_timeout(),
+            collect_complete(
+                &mut process.transport,
+                prompt_id,
+                turn.model.to_owned(),
+                self.config.permission_policy,
+                &session_id,
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok((response, tool_calls))) => {
+                info!(
+                    caller = turn.caller,
+                    latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    content_len = response.content.len(),
+                    tool_calls = tool_calls.len(),
+                    finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                    "ACP: response received"
+                );
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(content = %response.content, "ACP response body");
+                }
+                // SUCCESS: leave the subprocess alive so the next turn reuses
+                // it. This is the whole point of the pool.
+                Ok((response, tool_calls))
+            }
+            Ok(Err(e)) => {
+                // Prompt failed mid-stream. Transport may be desynced; the
+                // conservative choice is to kill and respawn rather than risk a
+                // corrupt session bleeding into the next call.
+                warn!(caller = turn.caller, error = %e, stderr = %process.stderr_ring.snapshot(), "ACP turn failed");
+                let _ = process.child.kill().await;
+                *guard = None;
+                Err(e)
+            }
+            Err(_elapsed) => {
+                warn!(caller = turn.caller, stderr = %process.stderr_ring.snapshot(), "ACP turn timed out");
+                let _ = process.child.kill().await;
+                *guard = None;
+                Err(RunnerError::timeout(format!(
+                    "copilot-acp: prompt timed out after {}s",
+                    acp_prompt_timeout().as_secs()
+                )))
+            }
+        }
+    }
 
     /// Run a conversation turn and return detailed results including tool call metadata.
     ///
@@ -1678,65 +2012,24 @@ impl CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
-            &cli_path,
-            self.config.github_token.as_deref(),
-            &model,
-            system_prompt,
-            &request.mcp_servers,
-        )
-        .await?;
-        self.record_observed_models(observed);
-
-        info!(session_id = %session_id, "ACP: sending prompt");
-        let prompt_id = transport
-            .send_request(
-                "session/prompt",
-                build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
-            )
+        // Pooled, like `complete()`. This path used to spawn a dedicated
+        // `copilot --acp` child per call and kill it at the end, which paid the
+        // full handshake every turn (~3.2s cold against ~1.7s warm) and put no
+        // bound at all on how many children could exist at once — on an
+        // instance that accepts 80 concurrent requests inside 2Gi, with each
+        // child holding 213 MB before serving a single session.
+        let (response, tool_calls) = self
+            .run_pooled_turn(&TurnRequest {
+                cli_path: &cli_path,
+                model: &model,
+                system_prompt,
+                prompt_blocks: &prompt_blocks,
+                max_tokens: request.max_tokens,
+                mcp_servers: &request.mcp_servers,
+                caller: "converse",
+            })
             .await?;
 
-        let result = time::timeout(
-            acp_prompt_timeout(),
-            collect_complete(
-                &mut transport,
-                prompt_id,
-                model,
-                self.config.permission_policy,
-            ),
-        )
-        .await;
-
-        match &result {
-            Ok(Ok((response, tool_calls))) => {
-                info!(
-                    content_len = response.content.len(),
-                    tool_calls = tool_calls.len(),
-                    "ACP converse completed successfully"
-                );
-            }
-            Ok(Err(e)) => {
-                warn!(error = %e, stderr = %stderr_ring.snapshot(), "ACP converse failed");
-            }
-            Err(_) => {
-                warn!(
-                    stderr = %stderr_ring.snapshot(),
-                    timeout_secs = acp_prompt_timeout().as_secs(),
-                    "ACP converse timed out"
-                );
-            }
-        }
-
-        let _ = child.kill().await;
-
-        let result = result.map_err(|_| {
-            RunnerError::timeout(format!(
-                "copilot-acp: prompt timed out after {}s",
-                acp_prompt_timeout().as_secs()
-            ))
-        })?;
-
-        let (response, tool_calls) = result?;
         Ok(HeadlessToolResponse {
             content: response.content,
             model: response.model,
@@ -1766,6 +2059,15 @@ impl CopilotHeadlessRunner {
     /// returned stream early does **not** abort the in-flight turn — the
     /// task will still drain the session and the child will be cleaned up
     /// when the turn finishes.
+    ///
+    /// LIMITATION(registre#135): this path spawns per call and is NOT pooled,
+    /// so nothing bounds how many children exist at once — 213 MB each, in a
+    /// 2Gi container that accepts 80 concurrent requests. Pooling it means
+    /// holding a slot for the whole streamed turn (up to the prompt timeout)
+    /// against a default pool of two, and making `checkout().await` block the
+    /// first token, which is the latency streaming exists to protect. A
+    /// dedicated semaphore would bound the memory without that trade and is
+    /// the likelier fix.
     ///
     /// # Errors
     ///
@@ -1808,6 +2110,7 @@ impl CopilotHeadlessRunner {
         let policy = self.config.permission_policy;
         let timeout = acp_prompt_timeout();
         let model_for_task = model.clone();
+        let session_for_task = session_id.clone();
 
         // Drive the ACP session and emit events on a background task so
         // the caller can consume the stream incrementally. The task owns
@@ -1822,6 +2125,7 @@ impl CopilotHeadlessRunner {
                     model_for_task,
                     policy,
                     &event_tx,
+                    &session_for_task,
                 ),
             )
             .await;
@@ -1904,214 +2208,54 @@ impl LlmProvider for CopilotHeadlessRunner {
         let system_prompt = Self::extract_system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
-        // Hold ONE POOL SLOT for the full RPC round-trip. ACP transport is
-        // request/response by JSON-RPC id with no response-routing in the wire
-        // format, so concurrent prompts would interleave reads unsafely — this
-        // lock is what prevents that, and it is per subprocess.
-        //
-        // It is not a server-wide lock. The runner is a process-wide singleton
-        // on `ServerContext`, the deployed backend accepts 80 concurrent
-        // requests per instance, and a chat turn calls `complete()` several
-        // times (tool loop, plan, synth, re-ask). A single slot therefore
-        // serialized every athlete on the instance behind one another for the
-        // full inference; the pool holds several independent transports so
-        // they do not.
-        let mut guard = self.pool.checkout().await;
-
         // Copilot ends a turn with zero agent-message chunks often enough to
         // matter: 2 of 11 turns in a controlled corpus run (2026-08-24). The
         // subprocess is healthy and the protocol is satisfied — `finish_reason`
-        // is `stop`, latency is a normal ~20s — there is simply no content. The
-        // shape of the prompt appears to route the agentic wrapper into
-        // task-completion behaviour rather than chat output.
+        // is `stop`, latency is a normal ~20s — there is simply no content.
         //
         // A caller cannot distinguish that from a model that legitimately had
         // nothing to say, so it surfaces as a lost turn: the platform's repair,
         // identity re-ask and verifier all ride this path, and an empty answer
         // there reaches an athlete as "je n'ai pas réussi à formuler une
-        // réponse". Retrying once on a FRESH session recovers it without the
+        // réponse". Retrying once on a fresh session recovers it without the
         // caller ever seeing the gap.
         //
         // Bounded at one extra attempt: a second empty turn is a real answer
         // about this prompt, not a flake, and every retry is a full inference.
         let mut attempt: u32 = 0;
         loop {
-            // Detect a subprocess that exited between calls (crash, OOM kill,
-            // upstream disconnect) and drop it so we respawn below. Also respawn
-            // when the requested model differs from the one the warm subprocess
-            // was spawned with: `--model` is fixed at spawn time, so a live
-            // process locked to model A cannot serve a request for model B.
-            if let Some(p) = guard.as_mut() {
-                if !p.is_alive() {
-                    warn!("ACP subprocess exited between calls; respawning");
-                    *guard = None;
-                } else if p.model != model {
-                    info!(
-                        warm_model = %p.model,
-                        requested_model = %model,
-                        "ACP requested model changed; respawning warm subprocess to re-pin --model"
-                    );
-                    // Kill before dropping. This child is LIVE -- it just passed
-                    // `is_alive()` on the branch above -- and tokio's `Child`
-                    // does not kill on drop unless `kill_on_drop(true)` was set
-                    // at spawn, which it is not. So `*guard = None` alone
-                    // orphans a `copilot --acp` subprocess for the lifetime of
-                    // the server, one per model switch, each holding its own
-                    // stdio pipes. Every other teardown in this file kills
-                    // first; this branch was the one that did not.
-                    let _ = p.child.kill().await;
-                    *guard = None;
-                } else if p.sessions_served >= self.pool.max_sessions {
-                    info!(
-                        sessions_served = p.sessions_served,
-                        "ACP subprocess reached its session ceiling; recycling"
-                    );
-                    // An ACP session cannot be closed — `session/close` is
-                    // advertised and accepted but frees nothing (measured) — so
-                    // a warm subprocess holds ~26 MB for every session it has
-                    // ever served, for its whole life. Left unbounded that
-                    // walks a 2Gi container into an OOM in well under a hundred
-                    // completions. Recycling is the only bound available.
-                    //
-                    // Kill first, for the same reason as the branch above: this
-                    // child is live and tokio does not kill on drop.
-                    let _ = p.child.kill().await;
-                    *guard = None;
-                }
-            }
-
-            let process = if let Some(existing) = guard.as_mut() {
-                existing
-            } else {
-                let fresh = AcpProcess::spawn_and_initialize(
-                    &cli_path,
-                    self.config.github_token.as_deref(),
-                    &model,
-                )
+            let (response, _tool_calls) = self
+                .run_pooled_turn(&TurnRequest {
+                    cli_path: &cli_path,
+                    model: &model,
+                    system_prompt,
+                    prompt_blocks: &prompt_blocks,
+                    max_tokens: request.max_tokens,
+                    mcp_servers: &request.mcp_servers,
+                    caller: "complete",
+                })
                 .await?;
-                guard.insert(fresh)
-            };
 
-            let session_id = match process
-                .new_session(&model, system_prompt, &request.mcp_servers)
-                .await
-            {
-                Ok(id) => {
-                    process.sessions_served = process.sessions_served.saturating_add(1);
-                    id
-                }
-                Err(e) => {
-                    // session/new failed on a previously-healthy subprocess.
-                    // Could be the cached Copilot OAuth token expired and the
-                    // CLI didn't auto-refresh, or the process is wedged. Kill
-                    // and clear so the next call respawns and re-authenticates.
-                    let _ = process.child.kill().await;
-                    *guard = None;
-                    return Err(e);
-                }
-            };
-
-            info!(
-                session_id = %session_id,
-                message_count = request.messages.len(),
-                prompt_blocks = prompt_blocks.len(),
-                "ACP complete: sending prompt"
-            );
-            if tracing::enabled!(tracing::Level::TRACE) {
-                match serde_json::to_string(&prompt_blocks) {
-                    Ok(blocks_json) => trace!(prompt_blocks = %blocks_json, "ACP prompt blocks"),
-                    Err(e) => trace!(error = %e, "ACP prompt blocks serialization failed"),
-                }
-            }
-            let prompt_id = match process
-                .transport
-                .send_request(
-                    "session/prompt",
-                    build_prompt_params(&session_id, &prompt_blocks, request.max_tokens),
-                )
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    // Writing to stdin failed — pipe is broken. Discard.
-                    let _ = process.child.kill().await;
-                    *guard = None;
-                    return Err(e);
-                }
-            };
-
-            let started = Instant::now();
-            let result = time::timeout(
-                acp_prompt_timeout(),
-                collect_complete(
-                    &mut process.transport,
-                    prompt_id,
-                    // Cloned per attempt: the response carries the model name,
-                    // and a retry needs it again.
-                    model.clone(),
-                    self.config.permission_policy,
-                ),
-            )
-            .await;
-
-            match result {
-                Ok(Ok((response, _tool_calls))) => {
-                    info!(
-                        latency_ms =
-                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        content_len = response.content.len(),
-                        tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
-                        finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+            if response.content.trim().is_empty() {
+                if attempt < DEGENERATE_TURN_RETRIES {
+                    // Logged under a stable message so the rate is greppable —
+                    // the defect was diagnosed 2026-08-23 and could not be
+                    // measured, only noticed.
+                    warn!(
                         attempt,
-                        "ACP complete: response received"
+                        finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
+                        "ACP complete: empty turn, retrying on a fresh session"
                     );
-
-                    // An empty turn, retried once on a fresh session. Logged
-                    // under a stable message either way so the rate is
-                    // greppable — the defect was diagnosed 2026-08-23 and could
-                    // not be measured, only noticed.
-                    if response.content.trim().is_empty() {
-                        if attempt < DEGENERATE_TURN_RETRIES {
-                            warn!(
-                                attempt,
-                                latency_ms = u64::try_from(started.elapsed().as_millis())
-                                    .unwrap_or(u64::MAX),
-                                finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
-                                "ACP complete: empty turn, retrying on a fresh session"
-                            );
-                            attempt += 1;
-                            continue;
-                        }
-                        warn!(
-                            attempt,
-                            "ACP complete: empty turn survived retry, returning it"
-                        );
-                    }
-                    if tracing::enabled!(tracing::Level::TRACE) {
-                        trace!(content = %response.content, "ACP response body");
-                    }
-                    // SUCCESS path: leave the subprocess alive so the next call
-                    // reuses it. This is the whole point of the pool.
-                    return Ok(response);
+                    attempt += 1;
+                    continue;
                 }
-                Ok(Err(e)) => {
-                    // Prompt failed mid-stream. Transport may be desynced; the
-                    // conservative choice is to kill and respawn rather than
-                    // risk a corrupt session bleeding into the next call.
-                    let _ = process.child.kill().await;
-                    *guard = None;
-                    return Err(e);
-                }
-                Err(_elapsed) => {
-                    warn!(stderr = %process.stderr_ring.snapshot(), "ACP complete timed out");
-                    let _ = process.child.kill().await;
-                    *guard = None;
-                    return Err(RunnerError::timeout(format!(
-                        "copilot-acp: prompt timed out after {}s",
-                        acp_prompt_timeout().as_secs()
-                    )));
-                }
+                warn!(
+                    attempt,
+                    "ACP complete: empty turn survived retry, returning it"
+                );
             }
+
+            return Ok(response);
         }
     }
 
@@ -2140,11 +2284,18 @@ impl LlmProvider for CopilotHeadlessRunner {
 
         let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
         let policy = self.config.permission_policy;
+        let session_for_task = session_id.clone();
 
         tokio::spawn(async move {
             let result = time::timeout(
                 acp_prompt_timeout(),
-                collect_streaming(&mut transport, prompt_id, &chunk_tx, policy),
+                collect_streaming(
+                    &mut transport,
+                    prompt_id,
+                    &chunk_tx,
+                    policy,
+                    &session_for_task,
+                ),
             )
             .await;
             match result {
@@ -2297,6 +2448,98 @@ mod tests {
             AcpPool::new(2).max_sessions,
             two,
             "the pool carries its ceiling"
+        );
+    }
+
+    /// A notification tagged with another session is not this turn's content.
+    ///
+    /// This is the cross-athlete case. A pooled subprocess serves one athlete
+    /// after another, and the read loop folds every `session/update` it sees
+    /// into the accumulator until the prompt response arrives — so a straggler
+    /// left in the pipe by an earlier session would be appended to a later
+    /// athlete's reply. On the `converse()` path that reply is what the athlete
+    /// reads.
+    #[test]
+    fn a_notification_from_another_session_is_rejected() {
+        let mine = json!({"sessionId": "s-1", "update": {}});
+        let theirs = json!({"sessionId": "s-2", "update": {}});
+
+        assert!(notification_is_for_session(&mine, "s-1"));
+        assert!(
+            !notification_is_for_session(&theirs, "s-1"),
+            "another session's notification must never reach this turn's accumulator"
+        );
+    }
+
+    /// An agent that does not tag its notifications is still heard.
+    ///
+    /// Copilot 1.0.81 always tags, but dropping content from an agent that does
+    /// not would be a worse failure than the one the filter prevents: the turn
+    /// would come back empty with nothing to explain it.
+    #[test]
+    fn an_untagged_notification_is_accepted() {
+        let untagged = json!({"update": {}});
+        assert!(notification_is_for_session(&untagged, "s-1"));
+
+        let wrong_type = json!({"sessionId": 42, "update": {}});
+        assert!(
+            notification_is_for_session(&wrong_type, "s-1"),
+            "a non-string id is unreadable, not a mismatch"
+        );
+    }
+
+    /// A healthy, correctly-pinned, under-ceiling process is reused.
+    ///
+    /// The reuse case is the one worth pinning hardest: a rule that discarded
+    /// too eagerly would still be correct, just slow, and would look identical
+    /// to a working pool from the outside while paying a ~3.2s cold spawn on
+    /// every turn.
+    #[test]
+    fn a_healthy_process_within_its_ceiling_is_reused() {
+        assert_eq!(discard_reason(true, true, 0, 11), None);
+        assert_eq!(discard_reason(true, true, 10, 11), None);
+    }
+
+    #[test]
+    fn each_discard_condition_is_recognised() {
+        assert_eq!(
+            discard_reason(false, true, 0, 11),
+            Some(DiscardReason::Exited)
+        );
+        assert_eq!(
+            discard_reason(true, false, 0, 11),
+            Some(DiscardReason::ModelChanged)
+        );
+        assert_eq!(
+            discard_reason(true, true, 11, 11),
+            Some(DiscardReason::SessionCeiling)
+        );
+    }
+
+    /// The ceiling fires AT the limit, not one session past it.
+    ///
+    /// Off by one here is 26 MB of resident memory per slot per turn, which is
+    /// the whole reason the ceiling is derived from a budget.
+    #[test]
+    fn the_session_ceiling_is_inclusive() {
+        assert_eq!(discard_reason(true, true, 10, 11), None);
+        assert_eq!(
+            discard_reason(true, true, 11, 11),
+            Some(DiscardReason::SessionCeiling)
+        );
+        assert_eq!(
+            discard_reason(true, true, 12, 11),
+            Some(DiscardReason::SessionCeiling)
+        );
+    }
+
+    /// A dead child is reported as dead even when it also changed model and
+    /// blew its ceiling — the caller must not try to kill it again.
+    #[test]
+    fn an_exited_child_outranks_every_other_reason() {
+        assert_eq!(
+            discard_reason(false, false, 99, 11),
+            Some(DiscardReason::Exited)
         );
     }
 
