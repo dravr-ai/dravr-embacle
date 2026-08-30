@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -88,6 +89,34 @@ const ACP_SESSION_COST_MB: usize = 26;
 /// server itself. The pool is sized and recycled against this, not against a
 /// number that felt right.
 const ACP_POOL_BUDGET_MB: usize = 1024;
+
+/// Serializes `settings.json` write → spawn → `initialize` for every ACP child.
+///
+/// `copilot --acp` selects the served model from the `model` field of
+/// `$HOME/.copilot/settings.json` and nothing else — measured 2026-08-30 by
+/// asking the model to name itself under conflicting configuration:
+///
+/// | settings.json    | `--model`        | model answered   |
+/// |------------------|------------------|------------------|
+/// | `claude-sonnet-5`| `gpt-5.6-sol`    | "Claude Sonnet 5"|
+/// | `gpt-5.6-sol`    | `claude-sonnet-5`| "GPT-5.6 Sol"    |
+///
+/// `--model` moves only the cosmetic `currentModelId` label. So the routing
+/// input is a PROCESS-GLOBAL file, and the child reads it after exec — two
+/// concurrent spawns for different models could interleave (A writes X, B
+/// writes Y, A's child reads Y) and A's turn would silently run on the wrong
+/// model. Nothing downstream can detect that: a `session/prompt` result carries
+/// only `stopReason` and `usage`, with no model field, and the response model
+/// is synthesized from what the caller asked for.
+///
+/// Holding this across the handshake — not merely across the write — is what
+/// closes it. Once `initialize` has returned, the child has read its
+/// configuration, so a later writer cannot change the model under it.
+///
+/// Spawns are rare (only on discard: exit, model change, session ceiling), so
+/// serializing them costs little; a turn that reuses a warm subprocess never
+/// touches this.
+static MODEL_ROUTING_GATE: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
 /// Resident memory the STREAMING paths may occupy between them.
 ///
@@ -719,6 +748,8 @@ impl AcpProcess {
         github_token: Option<&str>,
         model: &str,
     ) -> Result<Self, RunnerError> {
+        // Held until the handshake completes: see MODEL_ROUTING_GATE.
+        let routing_gate = MODEL_ROUTING_GATE.lock().await;
         let mut child = spawn_copilot(cli_path, github_token, model)?;
         let stderr_ring = StderrRing::drain(child.stderr.take());
         let stdin = child
@@ -752,6 +783,11 @@ impl AcpProcess {
             Ok::<_, RunnerError>(())
         })
         .await;
+
+        // The child has read its configuration by now, so a later writer can no
+        // longer change the model under it. Released here rather than at scope
+        // exit so the point it stops mattering is stated, not inferred.
+        drop(routing_gate);
 
         match init_outcome {
             Ok(Ok(())) => Ok(Self {
