@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.3] — 2026-08-30
+
+### Other
+
+- perf(acp): the production chat path runs on the pool, and only reads its own session
+
+
+
 ## [0.22.2] — 2026-08-28
 
 ### Fixed
