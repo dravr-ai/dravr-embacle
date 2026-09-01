@@ -2330,12 +2330,25 @@ impl LlmProvider for CopilotHeadlessRunner {
                 .await?;
 
             if response.content.trim().is_empty() {
+                // Size the prompt so the NEXT question is answerable from the
+                // logs. The rate is now known — 18 of 99 turn-attempts on
+                // 2026-09-01, matching the 2 of 11 measured when this was first
+                // diagnosed, so it is stable rather than drifting — but nothing
+                // recorded WHICH prompts do it. The retry recovering only 2 of
+                // 18 says it is a property of the prompt, not a flake, and
+                // these fields are what let that be tested against a hypothesis
+                // (size, model, block count) instead of guessed at.
+                let prompt_bytes: usize = prompt_blocks.iter().map(|b| b.to_string().len()).sum();
                 if attempt < DEGENERATE_TURN_RETRIES {
                     // Logged under a stable message so the rate is greppable —
                     // the defect was diagnosed 2026-08-23 and could not be
                     // measured, only noticed.
                     warn!(
                         attempt,
+                        model = %model,
+                        blocks = prompt_blocks.len(),
+                        prompt_bytes,
+                        system_prompt_bytes = system_prompt.map_or(0, str::len),
                         finish_reason = response.finish_reason.as_deref().unwrap_or("none"),
                         "ACP complete: empty turn, retrying on a fresh session"
                     );
@@ -2344,6 +2357,10 @@ impl LlmProvider for CopilotHeadlessRunner {
                 }
                 warn!(
                     attempt,
+                    model = %model,
+                    blocks = prompt_blocks.len(),
+                    prompt_bytes,
+                    system_prompt_bytes = system_prompt.map_or(0, str::len),
                     "ACP complete: empty turn survived retry, returning it"
                 );
             }
