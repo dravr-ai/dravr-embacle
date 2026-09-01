@@ -27,6 +27,7 @@ impl McpTool<ServerState> for GetModel {
                 "properties": {}
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 
@@ -90,6 +91,7 @@ impl McpTool<ServerState> for SetModel {
                 "required": ["model"]
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 

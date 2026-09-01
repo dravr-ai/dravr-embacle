@@ -17,7 +17,7 @@ categories = ["development-tools"]
 
 [dependencies]
 embacle = { path = "../..", version = "0.22.4" }
-dravr-tronc = "0.7.1"
+dravr-tronc = "0.8.0"
 async-trait = "0.1"
 axum = "0.8"
 rand = "0.8"

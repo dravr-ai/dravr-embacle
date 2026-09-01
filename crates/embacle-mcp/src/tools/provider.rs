@@ -27,6 +27,7 @@ impl McpTool<ServerState> for GetProvider {
                 "properties": {}
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 
@@ -72,6 +73,7 @@ impl McpTool<ServerState> for SetProvider {
                 "required": ["provider"]
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 

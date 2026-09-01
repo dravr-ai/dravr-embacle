@@ -28,6 +28,7 @@ impl McpTool<ServerState> for GetMultiplexProvider {
                 "properties": {}
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 
@@ -83,6 +84,7 @@ impl McpTool<ServerState> for SetMultiplexProvider {
                 "required": ["providers"]
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 

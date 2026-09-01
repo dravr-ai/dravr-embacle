@@ -74,6 +74,7 @@ impl McpTool<ServerState> for Prompt {
                 "required": ["messages"]
             }),
             annotations: None,
+            output_schema: None,
         }
     }
 
