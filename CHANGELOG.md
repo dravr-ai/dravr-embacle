@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.5] — 2026-09-01
+
+### Fixed
+
+- fix(acp): the model a turn runs on cannot be changed by a concurrent spawn
+
+### Other
+
+- chore(tronc): move to dravr-tronc 0.8.0
+
+
+
 ## [0.22.4] — 2026-08-30
 
 
