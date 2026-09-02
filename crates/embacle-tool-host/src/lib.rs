@@ -521,6 +521,7 @@ impl ToolDispatcher<Inner> for Forwarding {
                 input_schema: t.input_schema,
                 annotations: None,
                 output_schema: None,
+                execution: None,
             })
             .collect()
     }

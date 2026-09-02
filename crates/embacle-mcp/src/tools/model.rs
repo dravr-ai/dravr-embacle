@@ -28,6 +28,7 @@ impl McpTool<ServerState> for GetModel {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 
@@ -92,6 +93,7 @@ impl McpTool<ServerState> for SetModel {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 

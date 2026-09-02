@@ -28,6 +28,7 @@ impl McpTool<ServerState> for GetProvider {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 
@@ -74,6 +75,7 @@ impl McpTool<ServerState> for SetProvider {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 

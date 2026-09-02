@@ -29,6 +29,7 @@ impl McpTool<ServerState> for GetMultiplexProvider {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 
@@ -85,6 +86,7 @@ impl McpTool<ServerState> for SetMultiplexProvider {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 

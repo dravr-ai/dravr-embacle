@@ -75,6 +75,7 @@ impl McpTool<ServerState> for Prompt {
             }),
             annotations: None,
             output_schema: None,
+            execution: None,
         }
     }
 
