@@ -1,0 +1,54 @@
+# ABOUTME: Moves this repo onto a new dravr-tronc release — bump, CI gate, squash merge on green
+# ABOUTME: Ten lines of wiring; the chain itself lives in dravr-tronc/.github/workflows/consumer-bump.yml
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 dravr.ai
+#
+# The consumer half of the tronc release wire. dravr-tronc's notify-consumers.yml
+# fires `tronc-released` at every live repo in the org; this file is what makes this
+# repo answer, and adding it is the whole enrolment step.
+#
+# The logic is a reusable workflow in dravr-tronc so a fix lands once instead of
+# eleven times. It runs HERE, in this repo's context, with this repo's GITHUB_TOKEN —
+# which is the only reason it can push at all. No token in the org can push across
+# repo boundaries; contremaitre-bump.yml records that finding at its line 155.
+#
+# The schedule is a safety net, not the main path: it catches a dispatch that never
+# arrived because of token scope. Offset off the top of the hour because GitHub drops
+# crons scheduled at :00 under load, and staggered against the other consumers so
+# eleven repos do not all wake at once.
+#
+# Filed under carnet#330.
+
+name: "Tronc: Bump"
+
+on:
+  repository_dispatch:
+    types: [tronc-released]
+  schedule:
+    - cron: "11 14 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "tronc version to move onto (defaults to tronc's latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write # push the bump branch and the squash merge
+  actions: write # dispatch the CI gates onto that branch
+
+concurrency:
+  # Two releases integrating at once would race on main, and the second would push a
+  # lockfile resolved against the first one's manifests.
+  group: tronc-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    uses: dravr-ai/dravr-tronc/.github/workflows/consumer-bump.yml@main
+    with:
+      version: ${{ github.event.client_payload.version || inputs.version || '' }}
+      ci_workflows: "ci.yml"
+      gate_timeout_minutes: 45
+    secrets: inherit
