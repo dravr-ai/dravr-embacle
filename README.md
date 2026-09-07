@@ -411,6 +411,7 @@ Configuration via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COPILOT_CLI_PATH` | auto-detect | Override path to copilot binary |
+| `COPILOT_HEADLESS_WORKING_DIR` | scratch dir under the system temp dir | Directory the subprocess runs in and the `cwd` of every session; copilot loads `.mcp.json`, agent files and custom instructions from it. Unset, a scratch directory rather than the host's cwd |
 | `COPILOT_HEADLESS_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
 | `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |

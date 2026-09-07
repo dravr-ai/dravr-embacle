@@ -7,9 +7,9 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{self, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
@@ -195,6 +195,60 @@ fn build_prompt_params(session_id: &str, prompt: &[Value], max_tokens: Option<u3
     });
     if let Some(mt) = max_tokens {
         params["maxTokens"] = Value::from(mt);
+    }
+    params
+}
+
+/// The directory every `copilot --acp` subprocess runs in and the `cwd` of
+/// every session it serves.
+///
+/// Copilot treats the session `cwd` as the project it is working on: it reads
+/// `.mcp.json` / `.github/mcp.json` from it and spawns every MCP server listed
+/// there for each session, and folds `AGENTS.md` and
+/// `.github/copilot-instructions.md` into the model's instructions. A coaching
+/// turn has no project, so nothing in whatever directory the host happens to
+/// run from — a git checkout, on a developer's machine — may reach the model's
+/// tool surface. Handing copilot the host's cwd does exactly that: every
+/// session spawns the checkout's stdio MCP servers, and a warm subprocess holds
+/// them until it is recycled — measured at two 11-hour subprocesses holding 140
+/// orphaned `node` processes and 20 GB of swap.
+///
+/// The host's choice wins when it made one, made absolute against the host's
+/// cwd because the ACP schema requires an absolute session path. Otherwise the
+/// directory is a scratch directory under the system temp dir, keyed by process
+/// id so two servers on one machine cannot see what the other's subprocess
+/// wrote there. The directory is created at spawn, not here: the runner
+/// constructors are infallible, and the spawn path is where a filesystem error
+/// already propagates. `path::absolute` fails only for an empty path or an
+/// unreadable cwd; the configured path is then kept as given and the spawn's
+/// `create_dir_all` reports the real error.
+fn session_cwd(configured: Option<&Path>) -> PathBuf {
+    configured.map_or_else(
+        || env::temp_dir().join(format!("embacle-copilot-{}", process::id())),
+        |dir| path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()),
+    )
+}
+
+/// Build the JSON params for an ACP `session/new` request.
+///
+/// `cwd` is the session working directory from [`session_cwd`]; it is sent as
+/// a string because the ACP schema requires an absolute path there and a
+/// non-UTF-8 path has no JSON form. `systemPrompt` is present only when the
+/// caller supplied one, so an absent prompt is an absent key rather than an
+/// empty string copilot would treat as an instruction.
+fn build_session_params(
+    model: &str,
+    cwd: &Path,
+    system_prompt: Option<&str>,
+    mcp_servers: &[McpServerConfig],
+) -> Value {
+    let mut params = json!({
+        "model": model,
+        "cwd": cwd.to_string_lossy(),
+        "mcpServers": mcp_servers_to_acp_json(mcp_servers),
+    });
+    if let Some(sys) = system_prompt {
+        params["systemPrompt"] = Value::String(sys.to_owned());
     }
     params
 }
@@ -485,10 +539,14 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
 ///
 /// The model is fixed for the lifetime of the spawned subprocess — callers
 /// reusing a warm process must respawn to change it.
+///
+/// The subprocess runs in `session_cwd` (see [`session_cwd`]), created here if
+/// it does not exist; unset, that is a scratch directory, not the host's cwd.
 fn spawn_copilot(
     cli_path: &PathBuf,
     github_token: Option<&str>,
     model: &str,
+    session_cwd: &Path,
 ) -> Result<Child, RunnerError> {
     // The route-determining step. Non-fatal: on failure copilot keeps whatever
     // model its settings.json already selects rather than aborting the spawn.
@@ -514,11 +572,21 @@ fn spawn_copilot(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    fs::create_dir_all(session_cwd).map_err(|e| {
+        RunnerError::internal(format!("create session cwd {}: {e}", session_cwd.display()))
+    })?;
+    cmd.current_dir(session_cwd);
+
     if let Some(token) = github_token {
         cmd.env("COPILOT_GITHUB_TOKEN", token);
     }
 
-    info!(cli_path = %cli_path.display(), model = %model, "Spawning copilot --acp subprocess");
+    info!(
+        cli_path = %cli_path.display(),
+        model = %model,
+        cwd = %session_cwd.display(),
+        "Spawning copilot --acp subprocess"
+    );
 
     let child = cmd
         .spawn()
@@ -586,10 +654,11 @@ async fn setup_session(
     cli_path: &PathBuf,
     github_token: Option<&str>,
     model: &str,
+    session_cwd: &Path,
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
 ) -> Result<(AcpTransport, Child, StderrRing, String, Option<Vec<String>>), RunnerError> {
-    let mut child = spawn_copilot(cli_path, github_token, model)?;
+    let mut child = spawn_copilot(cli_path, github_token, model, session_cwd)?;
     let stderr_ring = StderrRing::drain(child.stderr.take());
 
     let stdin = child
@@ -624,20 +693,13 @@ async fn setup_session(
         info!("ACP: initialize handshake complete");
         debug!(response = %init_resp, "ACP initialize response");
 
-        // Create session with model, optional system prompt, and any MCP
-        // servers the model should call tools from.
-        let mut session_params = json!({
-            "model": model,
-            "cwd": env::current_dir()
-                .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
-            "mcpServers": mcp_servers_to_acp_json(mcp_servers),
-        });
-        if let Some(sys) = system_prompt {
-            session_params["systemPrompt"] = Value::String(sys.to_owned());
-        }
+        // Create session with model, working directory, optional system
+        // prompt, and any MCP servers the model should call tools from.
+        let session_params = build_session_params(model, session_cwd, system_prompt, mcp_servers);
 
         info!(
             model = %model,
+            cwd = %session_cwd.display(),
             has_system_prompt = system_prompt.is_some(),
             mcp_servers = mcp_servers.len(),
             "ACP: creating session"
@@ -747,10 +809,11 @@ impl AcpProcess {
         cli_path: &PathBuf,
         github_token: Option<&str>,
         model: &str,
+        session_cwd: &Path,
     ) -> Result<Self, RunnerError> {
         // Held until the handshake completes: see MODEL_ROUTING_GATE.
         let routing_gate = MODEL_ROUTING_GATE.lock().await;
-        let mut child = spawn_copilot(cli_path, github_token, model)?;
+        let mut child = spawn_copilot(cli_path, github_token, model, session_cwd)?;
         let stderr_ring = StderrRing::drain(child.stderr.take());
         let stdin = child
             .stdin
@@ -840,21 +903,16 @@ impl AcpProcess {
     async fn new_session(
         &mut self,
         model: &str,
+        session_cwd: &Path,
         system_prompt: Option<&str>,
         mcp_servers: &[McpServerConfig],
     ) -> Result<(String, Option<Vec<String>>), RunnerError> {
         let outcome = time::timeout(acp_session_timeout(), async {
-            let mut session_params = json!({
-                "model": model,
-                "cwd": env::current_dir()
-                    .map_err(|e| RunnerError::internal(format!("Failed to get cwd: {e}")))?,
-                "mcpServers": mcp_servers_to_acp_json(mcp_servers),
-            });
-            if let Some(sys) = system_prompt {
-                session_params["systemPrompt"] = Value::String(sys.to_owned());
-            }
+            let session_params =
+                build_session_params(model, session_cwd, system_prompt, mcp_servers);
             info!(
                 model = %model,
+                cwd = %session_cwd.display(),
                 has_system_prompt = system_prompt.is_some(),
                 mcp_servers = mcp_servers.len(),
                 "ACP: creating session"
@@ -1648,6 +1706,10 @@ impl AcpPool {
 /// For custom tools, callers should use text-based tool calling (CLI tool loop).
 pub struct CopilotHeadlessRunner {
     config: CopilotHeadlessConfig,
+    /// Working directory of every subprocess this runner spawns and `cwd` of
+    /// every session they serve, resolved once from `config.working_directory`
+    /// by [`session_cwd`] so the pooled and the streamed paths agree.
+    session_cwd: PathBuf,
     /// Ranked catalog from [`crate::copilot_models`], used until the CLI tells
     /// us otherwise. A constant cannot track what the vendor ships, and cannot
     /// express per-account entitlement at all.
@@ -1696,20 +1758,17 @@ impl CopilotHeadlessRunner {
     /// by the Copilot CLI runner's self-heal loop, not at construction time.
     #[must_use]
     pub fn from_env() -> Self {
-        Self {
-            config: CopilotHeadlessConfig::from_env(),
-            available_models: catalog_ids(),
-            observed_models: OnceLock::new(),
-            pool: AcpPool::new(acp_pool_size()),
-            stream_permits: Arc::new(Semaphore::new(max_concurrent_streams())),
-        }
+        Self::with_config(CopilotHeadlessConfig::from_env())
     }
 
     /// Create a new provider with explicit configuration.
     #[must_use]
     pub fn with_config(config: CopilotHeadlessConfig) -> Self {
+        let session_cwd = session_cwd(config.working_directory.as_deref());
+        info!(cwd = %session_cwd.display(), "copilot --acp subprocesses run in this directory");
         Self {
             config,
+            session_cwd,
             available_models: catalog_ids(),
             observed_models: OnceLock::new(),
             pool: AcpPool::new(acp_pool_size()),
@@ -1737,11 +1796,22 @@ impl CopilotHeadlessRunner {
     }
 
     /// Resolve the copilot CLI binary path.
+    ///
+    /// A configured override is made absolute against the host's cwd: the
+    /// subprocess runs in [`Self::session_cwd`], and `Command` leaves a relative
+    /// program path with a changed `current_dir` platform-specific.
     fn resolve_cli_path(&self) -> Result<PathBuf, RunnerError> {
-        if let Some(ref path) = self.config.cli_path {
-            return Ok(path.clone());
-        }
-        which::which("copilot").map_err(|_| RunnerError::binary_not_found("copilot"))
+        // `which` resolves every form the override can take — a bare name
+        // through PATH, a relative path against the host's cwd, an absolute
+        // path as is — and returns an absolute path, which matters because the
+        // subprocess runs in `session_cwd`, not where the host was started.
+        let requested = self
+            .config
+            .cli_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("copilot"));
+        which::which(requested)
+            .map_err(|_| RunnerError::binary_not_found(requested.display().to_string()))
     }
 
     /// Resolve the model to use for a request.
@@ -1935,6 +2005,7 @@ impl CopilotHeadlessRunner {
                 cli_path,
                 self.config.github_token.as_deref(),
                 model,
+                &self.session_cwd,
             )
             .await?;
             **guard = Some(fresh);
@@ -1971,7 +2042,12 @@ impl CopilotHeadlessRunner {
         };
 
         let session_id = match process
-            .new_session(turn.model, turn.system_prompt, turn.mcp_servers)
+            .new_session(
+                turn.model,
+                &self.session_cwd,
+                turn.system_prompt,
+                turn.mcp_servers,
+            )
             .await
         {
             Ok((id, observed)) => {
@@ -2179,6 +2255,7 @@ impl CopilotHeadlessRunner {
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
+            &self.session_cwd,
             system_prompt,
             &request.mcp_servers,
         )
@@ -2390,6 +2467,7 @@ impl LlmProvider for CopilotHeadlessRunner {
             &cli_path,
             self.config.github_token.as_deref(),
             &model,
+            &self.session_cwd,
             system_prompt.as_deref(),
             &request.mcp_servers,
         )
@@ -2972,6 +3050,7 @@ mod tests {
                 max_history_turns,
                 ..CopilotHeadlessConfig::default()
             },
+            session_cwd: session_cwd(None),
             available_models: vec![],
             observed_models: OnceLock::new(),
             pool: AcpPool::new(acp_pool_size()),
@@ -3340,6 +3419,133 @@ mod tests {
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt[0]["type"], "text");
         assert_eq!(prompt[1]["type"], "image");
+    }
+
+    /// The names copilot reads from a session cwd. None of them may exist in
+    /// the scratch directory, or the model would inherit a project.
+    const PROJECT_FILES: [&str; 3] = [".mcp.json", ".github/mcp.json", "AGENTS.md"];
+
+    #[test]
+    fn an_unconfigured_runner_gets_a_scratch_cwd_not_the_host_cwd() {
+        let host_cwd = env::current_dir().unwrap(); // Safe: test setup
+        let dir = session_cwd(None);
+
+        assert_ne!(
+            dir, host_cwd,
+            "the host's cwd is the directory being isolated from"
+        );
+        assert!(dir.is_absolute(), "ACP requires an absolute session cwd");
+        assert!(
+            dir.starts_with(env::temp_dir()),
+            "{} is not under the system temp dir",
+            dir.display()
+        );
+        assert!(
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == format!("embacle-copilot-{}", process::id())),
+            "scratch dir is keyed by process id: {}",
+            dir.display()
+        );
+
+        // What spawn_copilot does before handing the directory to the CLI.
+        fs::create_dir_all(&dir).unwrap(); // Safe: test assertion on the resolved path being creatable
+        assert!(dir.is_dir());
+        for name in PROJECT_FILES {
+            assert!(
+                !dir.join(name).exists(),
+                "{name} in the scratch dir would reach the model"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap(); // Safe: test cleanup of the directory this test created
+    }
+
+    #[test]
+    fn a_configured_working_directory_is_used_verbatim() {
+        let tmp = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+        let dir = session_cwd(Some(tmp.path()));
+        assert_eq!(dir, tmp.path());
+        assert_ne!(dir, env::current_dir().unwrap()); // Safe: test setup
+    }
+
+    #[test]
+    fn a_relative_working_directory_is_anchored_to_the_host_cwd() {
+        let dir = session_cwd(Some(Path::new("scratch/copilot")));
+        assert!(dir.is_absolute(), "ACP requires an absolute session cwd");
+        assert_eq!(
+            dir,
+            env::current_dir().unwrap().join("scratch/copilot") // Safe: test setup
+        );
+    }
+
+    #[test]
+    fn a_bare_cli_name_is_found_on_path_and_a_missing_one_is_named() {
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
+            cli_path: Some(PathBuf::from("sh")),
+            ..CopilotHeadlessConfig::default()
+        });
+        let found = runner.resolve_cli_path().unwrap(); // Safe: test assertion, sh is on every PATH
+        assert!(found.is_absolute(), "{} must be absolute", found.display());
+        assert!(found.ends_with("sh"));
+
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
+            cli_path: Some(PathBuf::from("embacle-no-such-binary")),
+            ..CopilotHeadlessConfig::default()
+        });
+        let err = runner.resolve_cli_path().unwrap_err();
+        assert!(
+            err.to_string().contains("embacle-no-such-binary"),
+            "the error names the override: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_resolves_session_cwd_from_config() {
+        let tmp = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+        let configured = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
+            working_directory: Some(tmp.path().to_path_buf()),
+            ..CopilotHeadlessConfig::default()
+        });
+        assert_eq!(configured.session_cwd, tmp.path());
+
+        let unconfigured = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig::default());
+        assert_ne!(
+            unconfigured.session_cwd,
+            env::current_dir().unwrap(), // Safe: test setup
+            "a default config must not run copilot in the host's cwd"
+        );
+        assert!(unconfigured.session_cwd.starts_with(env::temp_dir()));
+    }
+
+    #[test]
+    fn session_params_carry_the_session_cwd() {
+        let dir = session_cwd(None);
+        let host_cwd = env::current_dir().unwrap(); // Safe: test setup
+        let params = build_session_params("claude-sonnet-4.6", &dir, Some("be brief"), &[]);
+
+        assert_eq!(params["cwd"], json!(dir.to_string_lossy()));
+        assert_ne!(params["cwd"], json!(host_cwd.to_string_lossy()));
+        assert_eq!(params["model"], "claude-sonnet-4.6");
+        assert_eq!(params["systemPrompt"], "be brief");
+        assert_eq!(params["mcpServers"], json!([]));
+    }
+
+    #[test]
+    fn session_params_without_system_prompt_omit_the_key() {
+        let tmp = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+        let servers = vec![McpServerConfig {
+            name: "dravr".to_owned(),
+            transport: McpTransport::Http {
+                url: "http://localhost:8081/mcp".to_owned(),
+                headers: vec![],
+            },
+        }];
+        let params = build_session_params("gpt-4.1", tmp.path(), None, &servers);
+
+        assert_eq!(params["cwd"], json!(tmp.path().to_string_lossy()));
+        assert!(params.get("systemPrompt").is_none());
+        assert_eq!(params["mcpServers"][0]["name"], "dravr");
+        assert_eq!(params["mcpServers"][0]["url"], "http://localhost:8081/mcp");
     }
 
     #[test]

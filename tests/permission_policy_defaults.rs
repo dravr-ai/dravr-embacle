@@ -4,10 +4,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-//! The copilot subprocess's own tools (shell, git, file editing) run in the
-//! host process's working directory. A host that assembles its prompt from
-//! untrusted input therefore turns an auto-approval into arbitrary execution
-//! beside its environment and credentials.
+//! The copilot subprocess's own tools (shell, git, file editing) run with the
+//! host's environment and credentials, in the session working directory — a
+//! scratch directory unless the host configures one. A host that assembles its
+//! prompt from untrusted input therefore turns an auto-approval into arbitrary
+//! execution beside its secrets.
 //!
 //! These tests pin the safe side: denial is what you get unless approval is
 //! spelled out, and a misspelled value degrades to denial rather than silently
