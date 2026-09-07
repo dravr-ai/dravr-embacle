@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.25.1] — 2026-09-07
+
+### Fixed
+
+- fix(examples): acp_cache_boundary_probe declares the feature it imports
+- fix(copilot): the headless runner works in a directory of its own
+
+### Other
+
+- test(copilot): the PATH-search assertion compares the stem
+- chore(deps): bump dravr-tronc 1.0.0 -> 1.0.1
+- chore(build): .build 87f8c6d -> 660d542
+
+
+
 ## [0.25.0] — 2026-09-04
 
 ### Other
