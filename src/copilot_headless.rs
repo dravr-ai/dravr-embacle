@@ -3486,7 +3486,13 @@ mod tests {
         });
         let found = runner.resolve_cli_path().unwrap(); // Safe: test assertion, sh is on every PATH
         assert!(found.is_absolute(), "{} must be absolute", found.display());
-        assert!(found.ends_with("sh"));
+        // The stem, not the last component: a Windows PATH search finds `sh.exe`.
+        assert_eq!(
+            found.file_stem().and_then(|stem| stem.to_str()),
+            Some("sh"),
+            "{} is not the sh that PATH names",
+            found.display()
+        );
 
         let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
             cli_path: Some(PathBuf::from("embacle-no-such-binary")),
