@@ -177,6 +177,10 @@ name = "acp_usage_probe"
 required-features = ["copilot-headless"]
 
 [[example]]
+name = "acp_cache_boundary_probe"
+required-features = ["copilot-headless"]
+
+[[example]]
 name = "copilot_tool_disowning"
 path = "examples/copilot_tool_disowning.rs"
 required-features = ["copilot-headless"]
