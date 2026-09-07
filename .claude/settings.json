@@ -9,10 +9,6 @@
           },
           {
             "type": "command",
-            "command": "git config core.hooksPath .githooks"
-          },
-          {
-            "type": "command",
             "command": "echo '\u2705 embacle workspace ready - git hooks configured'"
           },
           {
