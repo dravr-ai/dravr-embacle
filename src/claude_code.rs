@@ -10,11 +10,12 @@ use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, StreamChunk,
-    TokenUsage,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpServerConfig,
+    McpTransport, RunnerError, StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_stream::wrappers::LinesStream;
@@ -26,6 +27,54 @@ use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::{extract_system_message, prepare_user_prompt};
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
+
+/// Serialize embacle MCP server configs into Claude Code's `--mcp-config` JSON.
+///
+/// Claude Code reads the same `{"mcpServers": {name: {...}}}` shape as a
+/// `.mcp.json` file: HTTP and SSE entries are `type`-tagged and carry
+/// `{url, headers}` as an object, stdio entries carry `{command, args, env}`.
+/// embacle models headers and env as `Vec<McpHeader>`, so both collapse to a
+/// map here.
+fn mcp_servers_to_claude_json(servers: &[McpServerConfig]) -> String {
+    let entries: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|s| {
+            let cfg = match &s.transport {
+                McpTransport::Http { url, headers } => json!({
+                    "type": "http",
+                    "url": url,
+                    "headers": headers.iter().map(|h| (h.name.clone(), Value::String(h.value.clone()))).collect::<serde_json::Map<_, _>>(),
+                }),
+                McpTransport::Sse { url, headers } => json!({
+                    "type": "sse",
+                    "url": url,
+                    "headers": headers.iter().map(|h| (h.name.clone(), Value::String(h.value.clone()))).collect::<serde_json::Map<_, _>>(),
+                }),
+                McpTransport::Stdio { command, args, env } => json!({
+                    "command": command,
+                    "args": args,
+                    "env": env.iter().map(|e| (e.name.clone(), Value::String(e.value.clone()))).collect::<serde_json::Map<_, _>>(),
+                }),
+            };
+            (s.name.clone(), cfg)
+        })
+        .collect();
+    json!({ "mcpServers": entries }).to_string()
+}
+
+/// The `--allowed-tools` selector that admits every tool a server publishes.
+///
+/// Claude Code namespaces MCP tools `mcp__<server>__<tool>`, and accepts the
+/// server-level prefix on its own. The caller does not know the tool names
+/// ahead of the session, so naming the servers is the only selector that can
+/// be built up front — and it is still narrower than allowing everything.
+fn allowed_tools_for(servers: &[McpServerConfig]) -> String {
+    servers
+        .iter()
+        .map(|s| format!("mcp__{}", s.name))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// Default model for Claude Code
 const DEFAULT_MODEL: &str = "opus";
@@ -97,6 +146,7 @@ impl ClaudeCodeRunner {
         system_prompt: Option<&str>,
         output_format: &str,
         max_tokens: Option<u32>,
+        mcp_servers: &[McpServerConfig],
     ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
         cmd.args(["-p", prompt, "--output-format", output_format]);
@@ -118,9 +168,27 @@ impl ClaudeCodeRunner {
             .unwrap_or_else(|| self.base.default_model());
         cmd.args(["--model", model]);
 
-        // Disable Claude Code's native MCP servers so it uses our text-based
-        // tool catalog injected via the system prompt instead.
-        cmd.args(["--strict-mcp-config", "{}"]);
+        // `--strict-mcp-config` is a boolean flag: it confines the session to
+        // the servers named on this command line, so a developer's own
+        // ~/.claude.json can never leak tools into a served turn. It is passed
+        // whether or not we hand over servers of our own.
+        //
+        // With servers on the request, Claude Code connects and calls them
+        // itself, the same arrangement `copilot --additional-mcp-config` uses;
+        // the caller withholds the prose tool catalog in exactly that case, so
+        // the model is never offered two tool surfaces at once. With none, the
+        // flag alone leaves the turn tool-less and the prose catalog stands.
+        if mcp_servers.is_empty() {
+            cmd.arg("--strict-mcp-config");
+        } else {
+            cmd.args([
+                "--mcp-config",
+                &mcp_servers_to_claude_json(mcp_servers),
+                "--strict-mcp-config",
+                "--allowed-tools",
+                &allowed_tools_for(mcp_servers),
+            ]);
+        }
 
         for arg in &self.base.config.extra_args {
             cmd.arg(arg);
@@ -220,7 +288,13 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
-        let mut cmd = self.build_command(prompt, system, "json", request.max_tokens);
+        let mut cmd = self.build_command(
+            prompt,
+            system,
+            "json",
+            request.max_tokens,
+            &request.mcp_servers,
+        );
 
         if let Some(model) = &request.model {
             if let Some(sid) = self.base.get_session(model).await {
@@ -260,7 +334,13 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
-        let mut cmd = self.build_command(prompt, system, "stream-json", request.max_tokens);
+        let mut cmd = self.build_command(
+            prompt,
+            system,
+            "stream-json",
+            request.max_tokens,
+            &request.mcp_servers,
+        );
 
         if let Some(model) = &request.model {
             if let Some(sid) = self.base.get_session(model).await {
@@ -349,6 +429,7 @@ impl LlmProvider for ClaudeCodeRunner {
 mod tests {
     use super::*;
     use crate::types::ErrorKind;
+    use crate::types::McpHeader;
 
     #[test]
     fn test_parse_response_valid_json() {
@@ -415,5 +496,89 @@ mod tests {
         let json = b"not json at all";
         let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Internal);
+    }
+
+    fn http_server() -> McpServerConfig {
+        McpServerConfig {
+            name: "dravr".to_owned(),
+            transport: McpTransport::Http {
+                url: "http://127.0.0.1:8081/mcp".to_owned(),
+                headers: vec![McpHeader {
+                    name: "Authorization".to_owned(),
+                    value: "Bearer session-token".to_owned(),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn an_http_server_carries_its_headers_as_an_object() {
+        let cfg: Value =
+            serde_json::from_str(&mcp_servers_to_claude_json(&[http_server()])).unwrap(); // Safe: serializer output
+        let e = &cfg["mcpServers"]["dravr"];
+        assert_eq!(e["type"], "http");
+        assert_eq!(e["url"], "http://127.0.0.1:8081/mcp");
+        assert_eq!(
+            e["headers"]["Authorization"], "Bearer session-token",
+            "the bearer must survive as a map entry — Claude Code reads headers as an object, \
+             and a turn that loses it reaches an MCP server that will refuse every tool"
+        );
+    }
+
+    #[test]
+    fn a_stdio_server_carries_command_args_and_env() {
+        let s = McpServerConfig {
+            name: "local".to_owned(),
+            transport: McpTransport::Stdio {
+                command: "/usr/local/bin/pierre-mcp".to_owned(),
+                args: vec!["--stdio".to_owned()],
+                env: vec![McpHeader {
+                    name: "TOKEN".to_owned(),
+                    value: "abc".to_owned(),
+                }],
+            },
+        };
+        let cfg: Value = serde_json::from_str(&mcp_servers_to_claude_json(&[s])).unwrap(); // Safe: serializer output
+        let e = &cfg["mcpServers"]["local"];
+        assert_eq!(e["command"], "/usr/local/bin/pierre-mcp");
+        assert_eq!(e["args"][0], "--stdio");
+        assert_eq!(e["env"]["TOKEN"], "abc");
+        assert!(
+            e.get("type").is_none(),
+            "stdio is the untagged shape; a type key here makes Claude Code read it as remote"
+        );
+    }
+
+    #[test]
+    fn every_server_reaches_the_config() {
+        let second = McpServerConfig {
+            name: "admin".to_owned(),
+            transport: McpTransport::Sse {
+                url: "http://127.0.0.1:8081/sse".to_owned(),
+                headers: vec![],
+            },
+        };
+        let cfg: Value =
+            serde_json::from_str(&mcp_servers_to_claude_json(&[http_server(), second])).unwrap(); // Safe: serializer output
+        let m = cfg["mcpServers"].as_object().unwrap(); // Safe: serializer output
+        assert_eq!(m.len(), 2, "dropping a server silently removes its tools");
+        assert_eq!(cfg["mcpServers"]["admin"]["type"], "sse");
+    }
+
+    #[test]
+    fn the_allowlist_names_each_server_not_each_tool() {
+        let second = McpServerConfig {
+            name: "admin".to_owned(),
+            transport: McpTransport::Sse {
+                url: "http://127.0.0.1:8081/sse".to_owned(),
+                headers: vec![],
+            },
+        };
+        assert_eq!(
+            allowed_tools_for(&[http_server(), second]),
+            "mcp__dravr,mcp__admin",
+            "tool names are not known before the session, so the server prefix is the only \
+             selector that can be built up front"
+        );
     }
 }
