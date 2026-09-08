@@ -285,6 +285,41 @@ fn models_from_session(result: &Value) -> Option<Vec<String>> {
     (!ids.is_empty()).then_some(ids)
 }
 
+/// Warn when the model the caller asked for is not one the account may use.
+///
+/// `copilot --acp` routes by `~/.copilot/settings.json` alone. Handed a model
+/// id it does not recognise or may not use, it does not refuse — it silently
+/// serves the turn from its own default and reports the requested id back as a
+/// cosmetic label. That is not hypothetical: production ran on GPT and Gemini
+/// for roughly two months while every log line said `claude-sonnet-4.6`.
+///
+/// `session/new` carries the enabled list, so the mismatch is knowable at
+/// session setup, before a single token is spent. Absent list (`None`, an older
+/// CLI that does not report) means no information, which is not the same as a
+/// mismatch — say nothing rather than cry wolf on every turn.
+///
+/// This warns rather than fails: a model retired upstream would otherwise take
+/// chat down entirely, and serving a turn on the wrong model beats serving no
+/// turn. The warning is what makes the substitution visible.
+fn model_is_unavailable(model: &str, observed: Option<&Vec<String>>) -> bool {
+    observed.is_some_and(|available| !available.iter().any(|id| id == model))
+}
+
+/// Emit the warning [`model_is_unavailable`] decides on.
+fn warn_on_unavailable_model(model: &str, observed: Option<&Vec<String>>) {
+    if !model_is_unavailable(model, observed) {
+        return;
+    }
+    // `observed` is Some here: an absent list can never be unavailable.
+    let available = observed.map_or_else(String::new, |ids| ids.join(","));
+    warn!(
+        requested_model = %model,
+        available_models = %available,
+        "ACP: requested model is not enabled on this account; copilot will serve this turn \
+         from its own default and report the requested id as a label"
+    );
+}
+
 /// Extra attempts when a turn comes back with no content at all.
 ///
 /// One. A second empty turn is an answer about this prompt rather than a flake,
@@ -727,6 +762,7 @@ async fn setup_session(
             reported_models = observed.as_ref().map_or(0, Vec::len),
             "ACP session created"
         );
+        warn_on_unavailable_model(model, observed.as_ref());
 
         // With MCP tools available, run the loop to completion (see
         // `set_autopilot_mode`). Best-effort: on failure we log and continue
@@ -943,6 +979,7 @@ impl AcpProcess {
                 reported_models = observed.as_ref().map_or(0, Vec::len),
                 "ACP session created"
             );
+            warn_on_unavailable_model(model, observed.as_ref());
 
             // Run the tool loop to completion when MCP tools are available
             // (see `set_autopilot_mode`); best-effort.
@@ -2884,6 +2921,45 @@ mod tests {
     }
 
     /// An older CLI omits the field; the caller must keep its catalog.
+    #[test]
+    fn the_configured_model_being_absent_is_the_incident_condition() {
+        let observed = models_from_session(&session_result());
+        assert!(
+            model_is_unavailable("claude-sonnet-4.6", observed.as_ref()),
+            "a retired id the account cannot use is exactly the silent substitution that ran \
+             production on GPT and Gemini for two months while the logs said sonnet"
+        );
+    }
+
+    #[test]
+    fn a_model_the_account_may_use_raises_nothing() {
+        let observed = models_from_session(&session_result());
+        assert!(
+            !model_is_unavailable("claude-sonnet-5", observed.as_ref()),
+            "the configured model is enabled on this account; warning here would train the \
+             operator to ignore the warning"
+        );
+    }
+
+    #[test]
+    fn a_disabled_model_is_treated_as_unavailable() {
+        let observed = models_from_session(&session_result());
+        assert!(
+            model_is_unavailable("some-locked-model", observed.as_ref()),
+            "the id appears on the wire but carries copilotEnablement=disabled, so the account \
+             may not use it and copilot will substitute"
+        );
+    }
+
+    #[test]
+    fn an_unreported_list_never_warns() {
+        assert!(
+            !model_is_unavailable("claude-sonnet-5", None),
+            "an older CLI reports no list at all; absent information is not a mismatch, and \
+             warning on every turn would be noise that hides the real one"
+        );
+    }
+
     #[test]
     fn a_response_without_models_yields_none() {
         let bare = json!({ "sessionId": "abc" });
