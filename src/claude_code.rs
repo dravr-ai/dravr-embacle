@@ -76,6 +76,58 @@ fn allowed_tools_for(servers: &[McpServerConfig]) -> String {
         .join(",")
 }
 
+/// Normalise Claude's usage to the GROSS prompt convention every other runner reports.
+///
+/// Providers disagree about whether the prompt count includes its cached share, and the
+/// disagreement is invisible at the field name. `OpenAI` and Codex report gross: the cached
+/// figure is a subset of `prompt_tokens`. Anthropic reports **fresh-only** — cache reads and
+/// creations are separate and *additive*, so the real prompt is
+/// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+///
+/// Measured rather than assumed, on a real turn: `input_tokens` 2 against
+/// `cache_read_input_tokens` 18483, which is only possible if the cached share is outside.
+///
+/// Consumers carve the cached share back out of the gross prompt to price it — a cache read at
+/// a discount, a write at a premium. Handing them a fresh-only figure makes that subtraction
+/// clamp the real counts to nothing: a ~38 000-token turn priced as 2. Normalising here keeps
+/// one convention behind one field name, rather than pushing a per-provider special case into
+/// every consumer that ever prices a token.
+fn gross_usage(u: &ClaudeUsage) -> TokenUsage {
+    let fresh = u.input.unwrap_or(0);
+    let cache_read = u.cache_read.unwrap_or(0);
+    let cache_creation = u.cache_creation.unwrap_or(0);
+    let output = u.output.unwrap_or(0);
+    let prompt = fresh
+        .saturating_add(cache_read)
+        .saturating_add(cache_creation);
+    TokenUsage::new(prompt, output, prompt.saturating_add(output))
+        .with_cache(u.cache_read, u.cache_creation)
+}
+
+/// Whether a failed Claude Code turn was refused for quota rather than fault.
+///
+/// The vocabulary is Claude Code's own. Its internal classifier keys on the
+/// phrase `usage limit reached`, and the API error envelope carries
+/// `rate_limit_error` (throttling) or `billing_error` (the account's own cap)
+/// as the `type`. Matching those rather than inventing phrasing means this
+/// keeps working when the prose around them changes.
+///
+/// `credit balance too low` is deliberately NOT here. It reads like a limit
+/// but never resets on a clock, so routing away from it and waiting would wait
+/// forever; it stays an ordinary external-service failure.
+fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
+    if terminal_reason.is_some_and(|r| {
+        r.eq_ignore_ascii_case("rate_limit") || r.eq_ignore_ascii_case("billing_error")
+    }) {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("usage limit reached")
+        || lower.contains("rate_limit_error")
+        || lower.contains("billing_error")
+        || lower.contains("rate limited")
+}
+
 /// Default model for Claude Code
 const DEFAULT_MODEL: &str = "opus";
 
@@ -248,18 +300,19 @@ impl ClaudeCodeRunner {
                     "claude-code: context length exceeded — {message}"
                 )));
             }
+            // A quota refusal is not a fault: the provider is working and will
+            // answer again once the window resets. Classifying it as
+            // ExternalService made it indistinguishable from a flaky CLI, and
+            // is_transient() then told every retry loop to keep hammering a
+            // wall it cannot pass.
+            if is_quota_refusal(parsed.terminal_reason.as_deref(), message) {
+                return Err(RunnerError::rate_limit("claude-code", message));
+            }
             return Err(RunnerError::external_service("claude-code", message));
         }
 
         let content = parsed.result.unwrap_or_default();
-        let usage = parsed.usage.map(|u| {
-            TokenUsage::new(
-                u.input.unwrap_or(0),
-                u.output.unwrap_or(0),
-                u.input.unwrap_or(0) + u.output.unwrap_or(0),
-            )
-            .with_cache(u.cache_read, u.cache_creation)
-        });
+        let usage = parsed.usage.map(|u| gross_usage(&u));
 
         let response = ChatResponse {
             content,
@@ -447,11 +500,104 @@ mod tests {
 
     #[test]
     fn test_parse_response_error_flag() {
-        let json = br#"{"result":"rate limited","is_error":true}"#;
+        // An ordinary fault: the CLI broke, and a retry may well succeed.
+        // The fixture used to say "rate limited", which now classifies as a
+        // quota refusal — see the tests below.
+        let json = br#"{"result":"stream closed unexpectedly","is_error":true}"#;
         let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::ExternalService);
-        assert!(err.message.contains("rate limited"));
+        assert!(err.kind.is_transient(), "a broken pipe is worth retrying");
+        assert!(err.message.contains("stream closed unexpectedly"));
+    }
+
+    #[test]
+    fn the_prompt_count_absorbs_the_cached_share() {
+        // Measured on a real turn 2026-09-09: input 2, cache_read 18483,
+        // cache_creation 19681. Anthropic's input_tokens excludes both, so a
+        // consumer that carves the cached share back out of the prompt clamps
+        // the real cost to nothing — a ~38k-token turn priced as 2.
+        let json = br#"{"result":"ok","is_error":false,"usage":{
+            "input_tokens":2,"output_tokens":7,
+            "cache_read_input_tokens":18483,"cache_creation_input_tokens":19681}}"#;
+        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let usage = response.usage.expect("usage present"); // Safe: test assertion
+
+        assert_eq!(
+            usage.prompt_tokens, 38_166,
+            "prompt must be gross — 2 + 18483 + 19681 — because that is the convention every \
+             other runner reports and the one consumers carve the cached share back out of"
+        );
+        assert_eq!(
+            usage.cached_read_tokens,
+            Some(18_483),
+            "the read stays separately priced"
+        );
+        assert_eq!(usage.cached_write_tokens, Some(19_681), "so does the write");
+        assert_eq!(
+            usage.total_tokens, 38_173,
+            "total is the gross prompt plus output"
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_cache_is_unchanged() {
+        // The normalisation must be invisible when there is nothing cached,
+        // or it would inflate every uncached turn.
+        let json =
+            br#"{"result":"ok","is_error":false,"usage":{"input_tokens":500,"output_tokens":50}}"#;
+        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let usage = response.usage.expect("usage present"); // Safe: test assertion
+        assert_eq!(usage.prompt_tokens, 500);
+        assert_eq!(usage.total_tokens, 550);
+        assert_eq!(
+            usage.cached_read_tokens, None,
+            "absent stays absent, never Some(0)"
+        );
+    }
+
+    #[test]
+    fn a_usage_limit_is_a_quota_refusal_not_a_fault() {
+        // "usage limit reached" is Claude Code's own phrase — its internal
+        // classifier keys on exactly this string.
+        let json = br#"{"result":"Claude usage limit reached","is_error":true}"#;
+        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert!(
+            !err.kind.is_transient(),
+            "classifying a quota wall as transient is what made every retry loop hammer it; \
+             the window resets on its own clock, not on a backoff schedule"
+        );
+    }
+
+    #[test]
+    fn the_api_error_envelope_types_are_recognised() {
+        for body in [
+            br#"{"result":"{\"type\":\"rate_limit_error\"}","is_error":true}"#.as_slice(),
+            br#"{"result":"{\"type\":\"billing_error\"}","is_error":true}"#.as_slice(),
+        ] {
+            let err = ClaudeCodeRunner::parse_response(body).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::RateLimit, "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_credit_balance_is_not_a_quota_refusal() {
+        // It reads like a limit but never resets on a clock. Routing away and
+        // waiting for a reset would wait forever, so it stays an ordinary
+        // failure the caller can see and act on.
+        assert!(!is_quota_refusal(None, "credit balance is too low"));
+    }
+
+    #[test]
+    fn a_structured_terminal_reason_is_enough_on_its_own() {
+        assert!(is_quota_refusal(Some("rate_limit"), "something opaque"));
+        assert!(is_quota_refusal(Some("billing_error"), "something opaque"));
+        assert!(!is_quota_refusal(
+            Some("turn_setup_failed"),
+            "something opaque"
+        ));
     }
 
     #[test]

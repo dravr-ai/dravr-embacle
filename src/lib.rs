@@ -106,6 +106,15 @@ pub mod process;
 pub mod prompt;
 /// Response quality validation with retry
 pub mod quality_gate;
+/// Provider quota: snapshots, pluggable checkers, and cooldown policy.
+pub mod quota;
+/// HTTP quota checkers: the real Anthropic budget, and the GitHub headroom proxy.
+#[cfg(feature = "quota-http")]
+pub mod quota_http;
+/// Where routing state lives, behind a trait so a shared store is a plugin.
+pub mod quota_store;
+/// Budget-driven routing across several providers, with a pluggable strategy.
+pub mod router;
 /// Environment sandboxing and tool policy
 pub mod sandbox;
 /// Stream wrapper for child process lifecycle management

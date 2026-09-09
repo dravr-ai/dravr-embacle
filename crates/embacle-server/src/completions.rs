@@ -837,6 +837,10 @@ fn runner_error_to_response(err: &RunnerError) -> Response {
         ErrorKind::Guardrail => (StatusCode::BAD_REQUEST, "guardrail_error"),
         ErrorKind::ContextLength => (StatusCode::BAD_REQUEST, "context_length_exceeded"),
         ErrorKind::ModelUnavailable => (StatusCode::NOT_FOUND, "model_not_found"),
+        // The OpenAI vocabulary for an exhausted quota. `x-should-retry` is
+        // deliberately absent: the window resets on its own schedule, and a
+        // client that retries on a timer will simply be refused again.
+        ErrorKind::RateLimit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded"),
         ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
 
@@ -1144,6 +1148,21 @@ mod tests {
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         };
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn error_maps_rate_limit_to_429_through_the_real_mapper() {
+        // Calls runner_error_to_response rather than restating the match, so
+        // this fails if the arm is dropped — the sibling tests above only
+        // re-implement the mapping and would pass either way.
+        let err = RunnerError::rate_limit("claude-code", "5-hour limit reached");
+        let response = runner_error_to_response(&err);
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "an exhausted quota must reach the client as 429, not as a 502 that reads like \
+             an upstream fault the caller should retry into"
+        );
     }
 
     #[test]

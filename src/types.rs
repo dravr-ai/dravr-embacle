@@ -64,6 +64,20 @@ pub enum ErrorKind {
     /// entitled to it. Transient in the sense that a retry with a different
     /// model may succeed.
     ModelUnavailable,
+    /// The provider refused because a usage quota or rate limit is exhausted.
+    ///
+    /// Distinct from `ExternalService` on purpose. Both used to arrive as
+    /// `ExternalService`, whose `is_transient()` is `true`, so a retrying
+    /// caller would spend its whole budget against a wall it cannot get past
+    /// within the retry window — and no caller could tell an exhausted
+    /// subscription from a flaky CLI.
+    ///
+    /// It is retryable *eventually* but not *now*, which the binary
+    /// `is_transient()` predicate cannot express; it therefore reports
+    /// `false`, and the reset instant is carried by whatever tracks quota
+    /// rather than by the error. Callers that route around an exhausted
+    /// provider should switch, not sleep.
+    RateLimit,
 }
 
 impl ErrorKind {
@@ -72,6 +86,11 @@ impl ErrorKind {
     /// Transient errors (timeouts, external service issues) may succeed on a
     /// subsequent attempt. Permanent errors (config, auth, missing binary) will
     /// not benefit from retries.
+    ///
+    /// [`Self::RateLimit`] is deliberately NOT transient. It will succeed again
+    /// once the window resets, but not on the timescale a retry loop works on,
+    /// so treating it as transient burns the budget for nothing. Route around
+    /// it instead.
     #[must_use]
     pub const fn is_transient(self) -> bool {
         matches!(self, Self::Timeout | Self::ExternalService)
@@ -149,6 +168,20 @@ impl RunnerError {
         Self {
             kind: ErrorKind::ModelUnavailable,
             message: format!("Model {model:?} is not available"),
+        }
+    }
+
+    /// Create a rate-limit / quota-exhausted error.
+    ///
+    /// `service` names the provider that refused so a caller routing across
+    /// several of them can tell which one is out, rather than parsing the
+    /// message.
+    pub fn rate_limit(service: impl Into<String>, message: impl Into<String>) -> Self {
+        let service = service.into();
+        let message = message.into();
+        Self {
+            kind: ErrorKind::RateLimit,
+            message: format!("{service}: {message}"),
         }
     }
 }
