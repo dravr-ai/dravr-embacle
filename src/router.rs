@@ -31,11 +31,15 @@
 //! Routing state is per-process — see the marker on `RouterProvider.state`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "copilot-headless")]
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use tracing::{info, warn};
 
+#[cfg(feature = "copilot-headless")]
+use crate::copilot_headless::CopilotHeadlessRunner;
 use crate::quota::{LimitChecker, QuotaSnapshot};
 use crate::quota_store::{BackendState, InMemoryQuotaStore, QuotaStore};
 use crate::types::{
@@ -62,6 +66,15 @@ pub struct Backend {
     /// Reads this provider's remaining budget. `None` means unmetered: the
     /// router will never step aside from it proactively, only on a refusal.
     pub checker: Option<Box<dyn LimitChecker>>,
+    /// The concrete ACP runner behind `provider`, when this backend is one.
+    ///
+    /// A `Box<dyn LlmProvider>` cannot be downcast, and the platform's
+    /// SDK-tool-calling path needs the concrete runner to reach `converse()`.
+    /// Carrying the `Arc` here is what lets [`RouterProvider::active_runner`]
+    /// answer honestly: the ACP path is available exactly while this backend
+    /// is the one answering, and not a turn longer.
+    #[cfg(feature = "copilot-headless")]
+    headless: Option<Arc<CopilotHeadlessRunner>>,
 }
 
 impl Backend {
@@ -71,6 +84,8 @@ impl Backend {
         Self {
             provider,
             checker: Some(checker),
+            #[cfg(feature = "copilot-headless")]
+            headless: None,
         }
     }
 
@@ -80,7 +95,21 @@ impl Backend {
         Self {
             provider,
             checker: None,
+            #[cfg(feature = "copilot-headless")]
+            headless: None,
         }
+    }
+
+    /// Record the concrete ACP runner this backend wraps.
+    ///
+    /// Pass the same `Arc` the provider was built from. The runner pools
+    /// subprocesses and caches its observed model list, so cloning the `Arc`
+    /// is the point — a second runner would throw both away.
+    #[cfg(feature = "copilot-headless")]
+    #[must_use]
+    pub fn with_headless(mut self, runner: Arc<CopilotHeadlessRunner>) -> Self {
+        self.headless = Some(runner);
+        self
     }
 }
 
@@ -253,6 +282,18 @@ impl RouterProvider {
         self.active
             .load(Ordering::Relaxed)
             .min(self.backends.len() - 1)
+    }
+
+    /// The concrete ACP runner behind the backend that is currently answering.
+    ///
+    /// `None` when the live backend is not a Copilot Headless one — which is
+    /// the correct answer, not a missing feature. The platform's dispatch reads
+    /// this to decide between the SDK tool-calling loop and the CLI text loop,
+    /// and a stale `Some` would run the wrong loop against the wrong provider.
+    #[cfg(feature = "copilot-headless")]
+    #[must_use]
+    pub fn active_runner(&self) -> Option<Arc<CopilotHeadlessRunner>> {
+        self.backends[self.active_index()].headless.clone()
     }
 
     /// Refresh any reading old enough to be worth re-reading.
@@ -722,6 +763,67 @@ mod tests {
              failed turn is what the reactive path already did, and it costs an athlete a wait"
         );
         assert_eq!(router.name(), "copilot_headless");
+    }
+
+    #[cfg(feature = "copilot-headless")]
+    #[tokio::test]
+    async fn the_acp_runner_is_reachable_only_while_its_backend_answers() {
+        use crate::copilot_headless_config::CopilotHeadlessConfig;
+
+        // The platform's dispatch chooses between the SDK tool-calling loop and
+        // the CLI text loop by asking for this runner. Answering `Some` while a
+        // different backend is live would run the ACP loop against a provider
+        // that is not answering the turn.
+        let headless = Arc::new(CopilotHeadlessRunner::with_config(
+            CopilotHeadlessConfig::default(),
+        ));
+
+        let claude_is_live = RouterProvider::new(
+            vec![
+                Backend::metered(
+                    Box::new(TestProvider::ok("claude-code")),
+                    Box::new(FakeChecker::at_percent("c", 5.0, 9_999_999_999)),
+                ),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
+                    .with_headless(Arc::clone(&headless)),
+            ],
+            Box::new(PreferInOrder),
+        )
+        .unwrap(); // Safe: test assertion
+
+        let r = claude_is_live.complete(&request()).await.unwrap(); // Safe: test assertion
+        assert_eq!(r.content, "answered by claude-code");
+        assert!(
+            claude_is_live.active_runner().is_none(),
+            "claude-code is answering, so the ACP path must not be offered"
+        );
+
+        // Same backends, but the primary's window is full, so the router steps
+        // aside to the headless backend before spending the turn.
+        let copilot_is_live = RouterProvider::new(
+            vec![
+                Backend::metered(
+                    Box::new(TestProvider::ok("claude-code")),
+                    Box::new(FakeChecker::at_percent("c", 95.0, 9_999_999_999)),
+                ),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
+                    .with_headless(Arc::clone(&headless)),
+            ],
+            Box::new(PreferInOrder),
+        )
+        .unwrap(); // Safe: test assertion
+
+        let r = copilot_is_live.complete(&request()).await.unwrap(); // Safe: test assertion
+        assert_eq!(r.content, "answered by copilot_headless");
+
+        let live = copilot_is_live
+            .active_runner()
+            .expect("copilot_headless is answering, so the ACP path must be offered"); // Safe: test assertion
+        assert!(
+            Arc::ptr_eq(&live, &headless),
+            "it must hand back the SAME runner the backend was built from — a second \
+             CopilotHeadlessRunner would drop the subprocess pool and the cached model list"
+        );
     }
 
     #[tokio::test]
