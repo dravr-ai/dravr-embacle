@@ -44,6 +44,7 @@ Both modes support all 12 CLI runners, streaming, model routing, and vision. See
 - [Supported Runners](#supported-runners)
 - [Quick Start](#quick-start)
 - [REST API Server](#rest-api-server-embacle-server)
+- [Unified Harness Protocol](#unified-harness-protocol-uhp)
 - [MCP Server](#mcp-server-embacle-mcp)
 - [OpenAI API](#openai-api-feature-flag)
 - [Copilot Headless](#copilot-headless-feature-flag)
@@ -150,7 +151,7 @@ async fn main() -> Result<(), embacle::types::RunnerError> {
 
 ## REST API Server (`embacle-server`)
 
-A unified OpenAI-compatible HTTP server with built-in MCP support that proxies requests to embacle runners. Any client that speaks the OpenAI chat completions API or MCP protocol can use it without modification. Supports `--transport stdio` for MCP-only mode (editor integration).
+A unified HTTP server that proxies requests to embacle runners, speaking three protocols at once: the OpenAI chat completions API, MCP, and the [Unified Harness Protocol](#unified-harness-protocol-uhp). Any client that speaks one of them can use it without modification, and the three are served side by side rather than in place of one another. Supports `--transport stdio` for MCP-only mode (editor integration).
 
 ### Usage
 
@@ -173,6 +174,7 @@ embacle-server --transport stdio --provider copilot
 | `GET` | `/v1/models` | List available providers and models |
 | `GET` | `/health` | Per-provider readiness check |
 | `POST` | `/mcp` | MCP Streamable HTTP (JSON-RPC 2.0) |
+| — | `/uhp/v1/*` | [Unified Harness Protocol](#unified-harness-protocol-uhp), 25 endpoints under a configurable base |
 
 ### MCP Streamable HTTP
 
@@ -264,6 +266,94 @@ Optional. Set `EMBACLE_API_KEY` to require bearer token auth on all endpoints. W
 ```bash
 EMBACLE_API_KEY=my-secret embacle-server
 curl http://localhost:3000/v1/models -H "Authorization: Bearer my-secret"
+```
+
+## Unified Harness Protocol (UHP)
+
+`embacle-server` speaks the [Unified Harness Protocol](https://unifiedharnessprotocol.org)
+`2026-08-11` — an open HTTP contract for driving agent harnesses behind one API. It scores
+**64/64 on the published conformance suite at class `full`**: no failures, no skips.
+
+```
+64/64 passed · 0 failed · 0 skipped · 0 errored
+CONFORMANT — UHP 2026-08-11 (full)
+```
+
+embacle already runs twelve CLI harnesses behind one trait, which is exactly what UHP calls a
+*runner*: a server that puts existing harnesses behind the contract and advertises them as its
+catalog. UHP serves that catalogue over a standard wire format, so anything that speaks the
+protocol can drive Claude Code, Codex, Gemini CLI or any other supported harness through this
+server without knowing which one it is talking to.
+
+### It sits beside the OpenAI API, not instead of it
+
+Both surfaces define `GET /v1/models` and the bodies are incompatible — the OpenAI API answers a
+flat `{"object":"list","data":[…]}`, UHP requires `{"backends":{"<id>":{"default":…,"models":[…]}}}`.
+So UHP mounts under its own base path and **nothing on `/v1` changes**. Existing OpenAI clients are
+unaffected.
+
+The protocol expects this: its published `servers:` block lists a base of `/api/harness`, and the
+conformance suite takes a `--base-url`.
+
+```bash
+# Default base is /uhp
+embacle-server --port 3000
+
+# Or mount it anywhere, including the root
+UHP_BASE_PATH=/api/harness embacle-server --port 3000
+UHP_BASE_PATH=/ embacle-server --port 3000
+```
+
+### What it serves
+
+| Area | Endpoints |
+|------|-----------|
+| Discovery | `GET /v1/uhp` (unauthenticated), `GET /v1/harnesses`, `GET /v1/models`, `GET /v1/harnesses/{id}/models` |
+| Tasks | `POST /v1/responses`, `GET`/`DELETE /v1/responses/{id}`, `POST /v1/responses/{id}/cancel` |
+| Sessions | `GET /v1/sessions`, `GET`/`DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/turns` |
+| Sharing | `POST`/`GET`/`DELETE /v1/sessions/{id}/share`, and the public `GET /share/{id}` view |
+| Files | `GET /v1/sessions/{id}/files`, `GET /v1/containers/{id}/files/{id}/content` |
+| Management | `POST`/`PUT`/`DELETE /v1/harnesses`, `GET /v1/harnesses/{id}/skills/{name}/files` |
+
+Paths are relative to `UHP_BASE_PATH`.
+
+### Running a task
+
+```bash
+# Discovery needs no credential — a client must be able to learn what this is
+# before deciding what to present
+curl http://localhost:3000/uhp/v1/uhp
+
+# Run one
+curl http://localhost:3000/uhp/v1/responses \
+  -H "Authorization: Bearer $EMBACLE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Reply with exactly: ok", "stream": false}'
+
+# Stream it instead
+curl -N http://localhost:3000/uhp/v1/responses \
+  -H "Authorization: Bearer $EMBACLE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Count to three", "stream": true}'
+```
+
+A task runs in its own session working folder, so files the harness writes are captured as session
+artifacts and downloaded with `X-Content-Type-Options: nosniff` — an artifact is content a model was
+steered into producing, and must never render as a page on this origin. Deleting a session removes
+that folder, so an artifact never outlives what produced it.
+
+### Verifying conformance yourself
+
+The suite is Apache-2.0 and ships inside the reference implementation. It runs real agent tasks by
+design, so a full pass spends real model calls and several minutes.
+
+```bash
+git clone --depth 1 https://github.com/HarnessRouter/harnessrouter.git
+python3 -m venv venv && ./venv/bin/pip install -e harnessrouter/protocol/conformance
+
+EMBACLE_API_KEY=secret embacle-server --port 3000 &
+./venv/bin/uhp-conformance --base-url http://127.0.0.1:3000/uhp \
+  --api-key secret --class full
 ```
 
 ## MCP Server (`embacle-mcp`)
