@@ -342,6 +342,9 @@ artifacts and downloaded with `X-Content-Type-Options: nosniff` — an artifact 
 steered into producing, and must never render as a page on this origin. Deleting a session removes
 that folder, so an artifact never outlives what produced it.
 
+Full endpoint table, authentication rules, artifact handling and harness configuration are in
+[docs/uhp.md](docs/uhp.md).
+
 ### Verifying conformance yourself
 
 The suite is Apache-2.0 and ships inside the reference implementation. It runs real agent tasks by
