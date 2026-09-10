@@ -14,6 +14,7 @@
 //! - `GET /v1/models` — list available providers and models
 //! - `GET /health` — per-provider readiness check
 //! - `POST /mcp` — MCP Streamable HTTP (JSON-RPC 2.0, via embacle-mcp)
+//! - `GET  {UHP_BASE_PATH}/v1/uhp` and friends — Unified Harness Protocol (default base `/uhp`)
 //!
 //! ## Modules
 //!
@@ -27,6 +28,7 @@
 //! - [`router`] — Axum router wiring all endpoints (`OpenAI` + MCP)
 //! - [`state`] — re-export of unified state from embacle-mcp
 //! - [`runner`] — runner factory bridging to embacle core
+//! - [`uhp`] — Unified Harness Protocol surface, mounted under its own base path
 
 #![cfg_attr(
     test,
@@ -50,3 +52,4 @@ pub mod router;
 pub mod runner;
 pub mod state;
 pub mod streaming;
+pub mod uhp;
