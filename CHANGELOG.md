@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.26.0] — 2026-09-10
+
+### Added
+
+- feat(uhp): serve the Unified Harness Protocol, fully conformant
+- feat(router): hand back the ACP runner, but only while it is answering
+
+### Other
+
+- chore(deps): bump dravr-tronc 1.0.1 -> 1.1.0
+
+
+
 ## [0.25.3] — 2026-09-08
 
 
