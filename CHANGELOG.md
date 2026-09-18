@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.27.0] — 2026-09-18
+
+### Fixed
+
+- fix(copilot): list claude-sonnet-5 in the catalog; CI on features/*
+- fix(ci): closed-stdin brew steps, and ignore the claude_docs symlink
+
+### Other
+
+- perf(cache): O(1) eviction with a VecDeque insertion order
+
+
+
 ## [0.26.0] — 2026-09-10
 
 ### Added
