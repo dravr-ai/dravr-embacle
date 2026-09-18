@@ -149,6 +149,12 @@ pub const CATALOG: &[ModelCandidate] = &[
     },
     // Claude Sonnet
     ModelCandidate {
+        id: "claude-sonnet-5",
+        family: Family::ClaudeSonnet,
+        version: (5, 0),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
         id: "claude-sonnet-4.6",
         family: Family::ClaudeSonnet,
         version: (4, 6),
@@ -414,6 +420,15 @@ mod tests {
     #[test]
     fn catalog_ids_matches_catalog_len() {
         assert_eq!(catalog_ids().len(), CATALOG.len());
+    }
+
+    #[test]
+    fn catalog_lists_the_model_coaching_turns_run_on() {
+        // `claude-sonnet-5` is what every coaching turn is pinned to. The
+        // catalog omitted it while the CLI served it, so a platform-side check
+        // against this list warned about the working model at every startup
+        // (dravr-carnet#356) before any session could report the real list.
+        assert!(catalog_ids().iter().any(|id| id == "claude-sonnet-5"));
     }
 
     #[test]
