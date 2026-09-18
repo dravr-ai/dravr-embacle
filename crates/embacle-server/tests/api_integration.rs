@@ -19,6 +19,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use embacle::config::CliRunnerType;
 use embacle::discovery;
+use embacle::factory::ALL_PROVIDERS;
 use embacle_mcp::ServerState;
 use embacle_server::completions;
 use embacle_server::state::AppState;
@@ -101,7 +102,7 @@ async fn health_returns_json_with_status_field() {
 }
 
 #[tokio::test]
-async fn health_providers_contains_all_twelve() {
+async fn health_providers_lists_every_provider() {
     let _guard = ENV_MUTEX.lock().await;
     env::remove_var("EMBACLE_API_KEY");
 
@@ -126,7 +127,20 @@ async fn health_providers_contains_all_twelve() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
 
     let providers = json["providers"].as_object().expect("providers is object");
-    assert_eq!(providers.len(), 13, "expected 13 providers");
+    // The set is the crate's own list, so a feature that adds a provider —
+    // including one unified in by another workspace member's dev-dependency —
+    // is counted, not hard-coded.
+    assert_eq!(
+        providers.len(),
+        ALL_PROVIDERS.len(),
+        "every provider in ALL_PROVIDERS reports a status"
+    );
+    for provider in ALL_PROVIDERS.iter() {
+        assert!(
+            providers.contains_key(&provider.to_string()),
+            "{provider} is missing from /health"
+        );
+    }
 
     // Each provider should have a status string
     for (name, value) in providers {

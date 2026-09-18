@@ -7,40 +7,8 @@
 use std::env;
 use std::path::PathBuf;
 
+use crate::copilot_common::{resolve_github_token, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS};
 use crate::copilot_models::preferred_default;
-
-/// Policy for handling ACP permission requests from the copilot subprocess.
-///
-/// Controls whether tool-execution permission prompts are auto-approved or denied.
-///
-/// **Denies by default.** The subprocess's own tools — shell, git, file editing —
-/// run with the host's environment and credentials, in the session working
-/// directory (a scratch directory unless the host configures one), so a host
-/// that builds its prompt from untrusted input (an end user's chat text, say)
-/// turns an approval into arbitrary execution next to its secrets. That is not a
-/// hypothetical: a Dravr coaching turn was observed making five `shell`/`bash`/
-/// `Grep`/`Glob` calls during a user's request, because the default approved them.
-///
-/// A host that genuinely wants the subprocess to run tools must now say so
-/// explicitly with [`PermissionPolicy::AutoApprove`]. Every current consumer
-/// wants denial, and the safe value should not depend on each one remembering to
-/// set an env var.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PermissionPolicy {
-    /// Deny all permission requests by cancelling them.
-    #[default]
-    DenyAll,
-    /// Automatically approve permission requests by selecting the best allow option.
-    ///
-    /// Only safe when the prompt is fully trusted — never when it is assembled
-    /// from end-user input.
-    AutoApprove,
-}
-
-/// Default number of conversation history turns injected into the ACP prompt.
-/// Each "turn" is one user or assistant message. Override with
-/// `COPILOT_HEADLESS_MAX_HISTORY_TURNS`.
-pub const DEFAULT_MAX_HISTORY_TURNS: usize = 20;
 
 /// Configuration for the Copilot Headless (ACP) provider.
 #[derive(Debug, Clone)]
@@ -97,22 +65,11 @@ impl CopilotHeadlessConfig {
         let model =
             env::var("COPILOT_HEADLESS_MODEL").unwrap_or_else(|_| preferred_default().to_owned());
 
-        let github_token = env::var("COPILOT_GITHUB_TOKEN")
-            .or_else(|_| env::var("GH_TOKEN"))
-            .or_else(|_| env::var("GITHUB_TOKEN"))
-            .ok();
+        let github_token = resolve_github_token();
 
-        // Approval is opt-in and must be spelled out. An unset — or misspelled —
-        // value denies, so a typo degrades to the safe side rather than silently
-        // handing the subprocess a shell.
-        let permission_policy = match env::var("COPILOT_HEADLESS_PERMISSION_POLICY")
-            .unwrap_or_default()
-            .to_lowercase()
-            .as_str()
-        {
-            "auto_approve" | "autoapprove" | "approve" => PermissionPolicy::AutoApprove,
-            _ => PermissionPolicy::DenyAll,
-        };
+        let permission_policy = PermissionPolicy::parse(
+            &env::var("COPILOT_HEADLESS_PERMISSION_POLICY").unwrap_or_default(),
+        );
 
         let max_history_turns = env::var("COPILOT_HEADLESS_MAX_HISTORY_TURNS")
             .ok()

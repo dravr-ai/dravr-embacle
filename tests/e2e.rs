@@ -532,3 +532,195 @@ mod openai_api_e2e {
         test_provider_complete(&runner).await;
     }
 }
+
+// ============================================================================
+// Copilot SDK tests — requires copilot-sdk feature, a runtime pair on disk
+// (COPILOT_RUNTIME_PATH) and Copilot auth (COPILOT_GITHUB_TOKEN)
+// ============================================================================
+
+#[cfg(feature = "copilot-sdk")]
+mod sdk {
+    use super::*;
+    use embacle::types::ErrorKind;
+    use embacle::{CopilotSdkRunner, HeadlessStreamEvent, HeadlessTurnProvider};
+
+    const CODEWORD: &str = "DRAVR-COACH-7741";
+
+    /// A cheap, catalogued model for the live turns.
+    const MODEL: &str = "claude-haiku-4.5";
+
+    fn skipped(test: &str) -> bool {
+        if runner_enabled("copilot_sdk") {
+            return false;
+        }
+        eprintln!("SKIP {test} (set EMBACLE_E2E_COPILOT_SDK=1 and COPILOT_RUNTIME_PATH)");
+        true
+    }
+
+    fn request(system: &str, user: &str) -> ChatRequest {
+        let mut request =
+            ChatRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
+                .with_max_tokens(60);
+        request.model = Some(MODEL.to_owned());
+        request
+    }
+
+    #[tokio::test]
+    async fn e2e_copilot_sdk_complete() {
+        if skipped("e2e_copilot_sdk_complete") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+        test_provider_complete(&runner).await;
+    }
+
+    #[tokio::test]
+    async fn e2e_copilot_sdk_stream() {
+        if skipped("e2e_copilot_sdk_stream") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+        test_provider_stream(&runner).await;
+    }
+
+    /// The system prompt travels in the runtime's own system slot and
+    /// replaces the Copilot CLI persona: the model answers from these
+    /// instructions, and when asked to quote them it quotes ours.
+    #[tokio::test]
+    async fn e2e_copilot_sdk_system_prompt_replaces_the_copilot_persona() {
+        if skipped("e2e_copilot_sdk_system_prompt_replaces_the_copilot_persona") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+
+        let codeword_turn = request(
+            &format!(
+                "You are Dravr's coach. Your codeword is {CODEWORD}. When asked for \
+                 your codeword, reply with exactly the codeword and nothing else."
+            ),
+            "What is your codeword?",
+        );
+        let response = runner
+            .converse(&codeword_turn)
+            .await
+            .unwrap_or_else(|e| panic!("converse() failed: {e}"));
+        assert!(
+            response.content.contains(CODEWORD),
+            "the system prompt reached the model: {:?}",
+            response.content
+        );
+
+        let quote_turn = request(
+            "You are Dravr's coach and nothing else. When asked to quote your \
+             instructions, reply with their first sentence, verbatim.",
+            "Quote the first sentence of your instructions.",
+        );
+        let response = runner
+            .converse(&quote_turn)
+            .await
+            .unwrap_or_else(|e| panic!("converse() failed: {e}"));
+        let quoted = response.content.to_lowercase();
+        assert!(
+            quoted.contains("dravr"),
+            "the model quotes our instructions: {:?}",
+            response.content
+        );
+        assert!(
+            !quoted.contains("github copilot"),
+            "the Copilot CLI persona was displaced: {:?}",
+            response.content
+        );
+    }
+
+    /// The served model and the runtime's cache counts come back on every turn.
+    #[tokio::test]
+    async fn e2e_copilot_sdk_reports_the_served_model_and_cache_counts() {
+        if skipped("e2e_copilot_sdk_reports_the_served_model_and_cache_counts") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+        let turn = request(
+            "You are a test bot. Follow instructions exactly.",
+            "Respond with exactly: PONG. Nothing else.",
+        );
+        let response = runner
+            .converse(&turn)
+            .await
+            .unwrap_or_else(|e| panic!("converse() failed: {e}"));
+        assert_eq!(
+            response.model, MODEL,
+            "the model that served is the one asked for"
+        );
+        let usage = response.usage.expect("assistant.usage was reported");
+        assert!(usage.prompt_tokens > 0, "prompt tokens counted: {usage:?}");
+        assert!(
+            usage.completion_tokens > 0,
+            "completion tokens counted: {usage:?}"
+        );
+        assert!(
+            usage.cached_read_tokens.is_some() && usage.cached_write_tokens.is_some(),
+            "cache counts are carried, not dropped: {usage:?}"
+        );
+        assert!(
+            response.tool_calls.is_empty(),
+            "no tools were offered, none ran"
+        );
+    }
+
+    /// A model the catalogue lacks fails loudly instead of being served by
+    /// whatever the runtime substitutes.
+    #[tokio::test]
+    async fn e2e_copilot_sdk_unknown_model_fails_loudly() {
+        if skipped("e2e_copilot_sdk_unknown_model_fails_loudly") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+        let mut turn = request("You are a test bot.", "Respond with exactly: PONG.");
+        turn.model = Some("claude-sonnet-4.6".to_owned());
+        let err = runner
+            .converse(&turn)
+            .await
+            .expect_err("an unknown model id is refused");
+        assert_eq!(err.kind, ErrorKind::ModelUnavailable, "{err}");
+        assert!(err.to_string().contains("claude-sonnet-4.6"), "{err}");
+    }
+
+    /// Streaming delivers text deltas and ends with the aggregated response.
+    #[tokio::test]
+    async fn e2e_copilot_sdk_converse_stream_ends_with_done() {
+        if skipped("e2e_copilot_sdk_converse_stream_ends_with_done") {
+            return;
+        }
+        let runner = CopilotSdkRunner::from_env();
+        let turn = request(
+            "You are a test bot. Follow instructions exactly.",
+            "Count from 1 to 3, each number on its own line. Nothing else.",
+        );
+        let mut stream = runner
+            .converse_stream(&turn)
+            .await
+            .unwrap_or_else(|e| panic!("converse_stream() failed: {e}"));
+
+        let mut deltas = 0u32;
+        let mut streamed = String::new();
+        let mut done = None;
+        while let Some(event) = stream.next().await {
+            match event.unwrap_or_else(|e| panic!("stream error: {e}")) {
+                HeadlessStreamEvent::TextDelta(delta) => {
+                    deltas += 1;
+                    streamed.push_str(&delta);
+                }
+                HeadlessStreamEvent::ToolCall(call) => panic!("no tool was offered: {call:?}"),
+                HeadlessStreamEvent::Done(response) => done = Some(response),
+            }
+        }
+        let done = done.expect("the stream ends with Done");
+        assert!(deltas > 0, "text arrived incrementally");
+        assert_eq!(
+            done.content, streamed,
+            "Done carries the text the deltas spelled"
+        );
+        assert_eq!(done.model, MODEL);
+        assert!(done.usage.is_some(), "usage rides on Done");
+    }
+}

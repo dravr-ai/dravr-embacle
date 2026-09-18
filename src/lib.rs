@@ -142,6 +142,10 @@ pub mod openai_api;
 #[cfg(feature = "web-ui")]
 pub mod web_ui;
 
+/// Types and helpers every Copilot provider shares: the permission policy,
+/// the turn API, history rendering
+pub mod copilot_common;
+
 // Copilot Headless modules (behind feature flag)
 /// Configuration for the Copilot Headless (ACP) provider
 #[cfg(feature = "copilot-headless")]
@@ -149,6 +153,14 @@ pub mod copilot_headless;
 /// Configuration types for the Copilot Headless provider
 #[cfg(feature = "copilot-headless")]
 pub mod copilot_headless_config;
+
+// Copilot SDK modules (behind feature flag)
+/// The Copilot SDK provider — GitHub's Rust runtime over stdio
+#[cfg(feature = "copilot-sdk")]
+pub mod copilot_sdk;
+/// Configuration types for the Copilot SDK provider
+#[cfg(feature = "copilot-sdk")]
+pub mod copilot_sdk_config;
 
 // C FFI bindings (behind feature flag)
 #[cfg(feature = "ffi")]
@@ -226,13 +238,20 @@ pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
 #[cfg(feature = "web-ui")]
 pub use web_ui::{WebProviderConfig, WebUiConfig, WebUiRunner};
 
+// Copilot turn API shared by every Copilot provider
+pub use copilot_common::{
+    HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse, HeadlessTurnProvider,
+    ObservedToolCall, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS,
+};
+
 // Copilot Headless re-exports (behind feature flag)
 #[cfg(feature = "copilot-headless")]
-pub use copilot_headless::{
-    CopilotHeadlessRunner, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
-    ObservedToolCall,
-};
+pub use copilot_headless::CopilotHeadlessRunner;
 #[cfg(feature = "copilot-headless")]
-pub use copilot_headless_config::{
-    CopilotHeadlessConfig, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS,
-};
+pub use copilot_headless_config::CopilotHeadlessConfig;
+
+// Copilot SDK re-exports (behind feature flag)
+#[cfg(feature = "copilot-sdk")]
+pub use copilot_sdk::CopilotSdkRunner;
+#[cfg(feature = "copilot-sdk")]
+pub use copilot_sdk_config::CopilotSdkConfig;

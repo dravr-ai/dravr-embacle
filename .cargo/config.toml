@@ -1,0 +1,11 @@
+# ABOUTME: Build-time environment for this workspace's build scripts.
+# ABOUTME: Keeps github-copilot-sdk's build.rs from downloading and embedding the Copilot CLI.
+
+[env]
+# github-copilot-sdk's build script fetches ~130 MB from github.com and
+# `include_bytes!`s the Copilot CLI plus its runtime into the rlib unless this
+# is set — in every environment that compiles the `copilot-sdk` feature. The
+# runtime pair is a file on disk that `COPILOT_RUNTIME_PATH` names at run time,
+# never a payload in the binary: a build that phones home is a supply-chain
+# and an offline-build hazard, and the embedded archives alone are ~163 MB.
+COPILOT_SKIP_CLI_DOWNLOAD = "1"

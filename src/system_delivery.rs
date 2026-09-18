@@ -1,5 +1,8 @@
 // ABOUTME: Every runner must declare HOW it delivers the System message to its model
 // ABOUTME: Makes "silently dropped the system prompt" a compile error instead of a runtime ghost
+//
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 dravr.ai
 
 //! System-message delivery contract.
 //!
@@ -83,6 +86,12 @@ impl CliRunnerType {
             // `false` value.
             #[cfg(feature = "copilot-headless")]
             Self::CopilotHeadless => SystemDelivery::InlineInPrompt,
+
+            // The SDK's `session.create` carries `systemMessage { mode:
+            // "replace" }`, which the runtime honours; the prompt body must
+            // not repeat it.
+            #[cfg(feature = "copilot-sdk")]
+            Self::CopilotSdk => SystemDelivery::SeparateChannel,
 
             // Browser-driven; the whole conversation is typed into the page.
             #[cfg(feature = "web-ui")]

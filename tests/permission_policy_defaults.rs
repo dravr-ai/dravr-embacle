@@ -19,7 +19,7 @@
 // off and the crate root compiles out.
 #![cfg(feature = "copilot-headless")]
 
-use embacle::copilot_headless_config::PermissionPolicy;
+use embacle::PermissionPolicy;
 
 #[test]
 fn derived_default_denies() {

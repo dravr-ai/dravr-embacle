@@ -218,7 +218,7 @@ pub struct Discovered {
 /// Every installed provider, as harnesses.
 pub async fn discover(state: &SharedState) -> Vec<Discovered> {
     let mut found = Vec::new();
-    for &provider in ALL_PROVIDERS {
+    for &provider in ALL_PROVIDERS.iter() {
         if !installed(provider) {
             continue;
         }

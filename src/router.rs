@@ -31,15 +31,13 @@
 //! Routing state is per-process — see the marker on `RouterProvider.state`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "copilot-headless")]
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use tracing::{info, warn};
 
-#[cfg(feature = "copilot-headless")]
-use crate::copilot_headless::CopilotHeadlessRunner;
+use crate::copilot_common::HeadlessTurnProvider;
 use crate::quota::{LimitChecker, QuotaSnapshot};
 use crate::quota_store::{BackendState, InMemoryQuotaStore, QuotaStore};
 use crate::types::{
@@ -73,8 +71,7 @@ pub struct Backend {
     /// Carrying the `Arc` here is what lets [`RouterProvider::active_runner`]
     /// answer honestly: the ACP path is available exactly while this backend
     /// is the one answering, and not a turn longer.
-    #[cfg(feature = "copilot-headless")]
-    headless: Option<Arc<CopilotHeadlessRunner>>,
+    headless: Option<Arc<dyn HeadlessTurnProvider>>,
 }
 
 impl Backend {
@@ -84,7 +81,6 @@ impl Backend {
         Self {
             provider,
             checker: Some(checker),
-            #[cfg(feature = "copilot-headless")]
             headless: None,
         }
     }
@@ -95,7 +91,6 @@ impl Backend {
         Self {
             provider,
             checker: None,
-            #[cfg(feature = "copilot-headless")]
             headless: None,
         }
     }
@@ -105,9 +100,8 @@ impl Backend {
     /// Pass the same `Arc` the provider was built from. The runner pools
     /// subprocesses and caches its observed model list, so cloning the `Arc`
     /// is the point — a second runner would throw both away.
-    #[cfg(feature = "copilot-headless")]
     #[must_use]
-    pub fn with_headless(mut self, runner: Arc<CopilotHeadlessRunner>) -> Self {
+    pub fn with_headless(mut self, runner: Arc<dyn HeadlessTurnProvider>) -> Self {
         self.headless = Some(runner);
         self
     }
@@ -290,9 +284,8 @@ impl RouterProvider {
     /// the correct answer, not a missing feature. The platform's dispatch reads
     /// this to decide between the SDK tool-calling loop and the CLI text loop,
     /// and a stale `Some` would run the wrong loop against the wrong provider.
-    #[cfg(feature = "copilot-headless")]
     #[must_use]
-    pub fn active_runner(&self) -> Option<Arc<CopilotHeadlessRunner>> {
+    pub fn active_runner(&self) -> Option<Arc<dyn HeadlessTurnProvider>> {
         self.backends[self.active_index()].headless.clone()
     }
 
@@ -768,6 +761,9 @@ mod tests {
     #[cfg(feature = "copilot-headless")]
     #[tokio::test]
     async fn the_acp_runner_is_reachable_only_while_its_backend_answers() {
+        use std::ptr;
+
+        use crate::copilot_headless::CopilotHeadlessRunner;
         use crate::copilot_headless_config::CopilotHeadlessConfig;
 
         // The platform's dispatch chooses between the SDK tool-calling loop and
@@ -785,7 +781,7 @@ mod tests {
                     Box::new(FakeChecker::at_percent("c", 5.0, 9_999_999_999)),
                 ),
                 Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
-                    .with_headless(Arc::clone(&headless)),
+                    .with_headless(headless.clone()),
             ],
             Box::new(PreferInOrder),
         )
@@ -807,7 +803,7 @@ mod tests {
                     Box::new(FakeChecker::at_percent("c", 95.0, 9_999_999_999)),
                 ),
                 Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
-                    .with_headless(Arc::clone(&headless)),
+                    .with_headless(headless.clone()),
             ],
             Box::new(PreferInOrder),
         )
@@ -820,7 +816,7 @@ mod tests {
             .active_runner()
             .expect("copilot_headless is answering, so the ACP path must be offered"); // Safe: test assertion
         assert!(
-            Arc::ptr_eq(&live, &headless),
+            ptr::addr_eq(Arc::as_ptr(&live), Arc::as_ptr(&headless)),
             "it must hand back the SAME runner the backend was built from — a second \
              CopilotHeadlessRunner would drop the subprocess pool and the cached model list"
         );

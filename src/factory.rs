@@ -5,6 +5,7 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::env;
+use std::sync::LazyLock;
 
 use crate::config::{CliRunnerType, RunnerConfig};
 use crate::discovery::resolve_binary;
@@ -30,6 +31,11 @@ pub async fn create_runner(
     #[cfg(feature = "copilot-headless")]
     if runner_type == CliRunnerType::CopilotHeadless {
         return Ok(Box::new(crate::CopilotHeadlessRunner::from_env()));
+    }
+    // CopilotSdk likewise: the runtime is resolved by the SDK, not discovered
+    #[cfg(feature = "copilot-sdk")]
+    if runner_type == CliRunnerType::CopilotSdk {
+        return Ok(Box::new(crate::CopilotSdkRunner::from_env()));
     }
 
     // ClaudeWeb drives a browser, not a PATH binary — env-based config
@@ -60,6 +66,8 @@ pub async fn create_runner(
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => unreachable!("handled above"),
+        #[cfg(feature = "copilot-sdk")]
+        CliRunnerType::CopilotSdk => unreachable!("handled above"),
         #[cfg(feature = "web-ui")]
         CliRunnerType::ClaudeWeb => unreachable!("handled above"),
     };
@@ -97,6 +105,9 @@ pub async fn create_runner_with_config(
         // CopilotHeadless ignores RunnerConfig — uses env-based config
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env()),
+        // CopilotSdk ignores RunnerConfig — uses env-based config
+        #[cfg(feature = "copilot-sdk")]
+        CliRunnerType::CopilotSdk => Box::new(crate::CopilotSdkRunner::from_env()),
         // ClaudeWeb ignores RunnerConfig — drives a browser via the embedded provider config
         #[cfg(feature = "web-ui")]
         CliRunnerType::ClaudeWeb => {
@@ -109,40 +120,31 @@ pub async fn create_runner_with_config(
     })
 }
 
-/// All provider types supported by embacle, in discovery priority order
-#[cfg(not(feature = "copilot-headless"))]
-pub const ALL_PROVIDERS: &[CliRunnerType] = &[
-    CliRunnerType::ClaudeCode,
-    CliRunnerType::Copilot,
-    CliRunnerType::CursorAgent,
-    CliRunnerType::OpenCode,
-    CliRunnerType::GeminiCli,
-    CliRunnerType::CodexCli,
-    CliRunnerType::GooseCli,
-    CliRunnerType::ClineCli,
-    CliRunnerType::ContinueCli,
-    CliRunnerType::WarpCli,
-    CliRunnerType::KiroCli,
-    CliRunnerType::KiloCli,
-];
-
-/// All provider types supported by embacle, in discovery priority order
-#[cfg(feature = "copilot-headless")]
-pub const ALL_PROVIDERS: &[CliRunnerType] = &[
-    CliRunnerType::ClaudeCode,
-    CliRunnerType::Copilot,
-    CliRunnerType::CopilotHeadless,
-    CliRunnerType::CursorAgent,
-    CliRunnerType::OpenCode,
-    CliRunnerType::GeminiCli,
-    CliRunnerType::CodexCli,
-    CliRunnerType::GooseCli,
-    CliRunnerType::ClineCli,
-    CliRunnerType::ContinueCli,
-    CliRunnerType::WarpCli,
-    CliRunnerType::KiroCli,
-    CliRunnerType::KiloCli,
-];
+/// All provider types supported by embacle, in discovery priority order.
+///
+/// One list, with the feature-gated Copilot transports slotted in behind the
+/// Copilot CLI: a `const` slice cannot carry `#[cfg]` on its elements, and a
+/// list per feature combination would drift.
+pub static ALL_PROVIDERS: LazyLock<Vec<CliRunnerType>> = LazyLock::new(|| {
+    let mut providers = vec![CliRunnerType::ClaudeCode, CliRunnerType::Copilot];
+    #[cfg(feature = "copilot-headless")]
+    providers.push(CliRunnerType::CopilotHeadless);
+    #[cfg(feature = "copilot-sdk")]
+    providers.push(CliRunnerType::CopilotSdk);
+    providers.extend([
+        CliRunnerType::CursorAgent,
+        CliRunnerType::OpenCode,
+        CliRunnerType::GeminiCli,
+        CliRunnerType::CodexCli,
+        CliRunnerType::GooseCli,
+        CliRunnerType::ClineCli,
+        CliRunnerType::ContinueCli,
+        CliRunnerType::WarpCli,
+        CliRunnerType::KiroCli,
+        CliRunnerType::KiloCli,
+    ]);
+    providers
+});
 
 /// Parse a provider name string into a `CliRunnerType`
 ///
@@ -168,19 +170,23 @@ pub fn parse_runner_type(s: &str) -> Option<CliRunnerType> {
         "copilot_headless" | "copilot-headless" | "copilotheadless" | "headless" => {
             Some(CliRunnerType::CopilotHeadless)
         }
+        #[cfg(feature = "copilot-sdk")]
+        "copilot_sdk" | "copilot-sdk" | "copilotsdk" => Some(CliRunnerType::CopilotSdk),
         #[cfg(feature = "web-ui")]
         "claude_web" | "claude-web" | "claudeweb" | "web" => Some(CliRunnerType::ClaudeWeb),
         _ => None,
     }
 }
 
-/// Format the list of valid provider names for error messages
-pub const fn valid_provider_names() -> &'static str {
-    if cfg!(feature = "copilot-headless") {
-        "claude_code, copilot, copilot_headless, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
-    } else {
-        "claude_code, copilot, cursor_agent, opencode, gemini_cli, codex_cli, goose_cli, cline_cli, continue_cli, warp_cli, kiro_cli, kilo_cli"
-    }
+/// The valid provider names for error messages, comma-separated, derived
+/// from [`ALL_PROVIDERS`] so the list cannot drift from what the crate serves.
+#[must_use]
+pub fn valid_provider_names() -> String {
+    ALL_PROVIDERS
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -266,10 +272,24 @@ mod tests {
 
     #[test]
     fn all_providers_count() {
-        if cfg!(feature = "copilot-headless") {
-            assert_eq!(ALL_PROVIDERS.len(), 13);
-        } else {
-            assert_eq!(ALL_PROVIDERS.len(), 12);
+        let expected = 12
+            + usize::from(cfg!(feature = "copilot-headless"))
+            + usize::from(cfg!(feature = "copilot-sdk"));
+        assert_eq!(ALL_PROVIDERS.len(), expected);
+    }
+
+    #[test]
+    fn valid_provider_names_lists_every_provider_once() {
+        let names = valid_provider_names();
+        let listed: Vec<&str> = names.split(", ").collect();
+        for provider in ALL_PROVIDERS.iter() {
+            let name = provider.to_string();
+            assert_eq!(
+                listed.iter().filter(|n| **n == name).count(),
+                1,
+                "{provider} appears once in {names}"
+            );
         }
+        assert!(names.starts_with("claude_code, copilot"));
     }
 }

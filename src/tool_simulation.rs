@@ -135,7 +135,7 @@ pub type TextToolHandler = Arc<dyn Fn(&str, &Value) -> FunctionResponse + Send +
 
 /// Result of a text-based tool-calling conversation.
 ///
-/// Analogous to [`HeadlessToolResponse`](crate::copilot_headless::HeadlessToolResponse)
+/// Analogous to [`HeadlessToolResponse`](crate::copilot_common::HeadlessToolResponse)
 /// (requires `copilot-headless` feature) but for CLI providers.
 #[derive(Debug, Clone)]
 pub struct TextToolResponse {

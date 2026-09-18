@@ -8,14 +8,11 @@ use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::path::{self, Path, PathBuf};
-use std::pin::Pin;
 use std::process::{self, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
-
-use tokio_stream::Stream;
 
 use agent_client_protocol_schema as schema;
 use async_trait::async_trait;
@@ -27,11 +24,15 @@ use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, info, instrument, trace, warn, Span};
 
-use crate::copilot_headless_config::{CopilotHeadlessConfig, PermissionPolicy};
+use crate::copilot_common::{
+    render_turn, system_prompt, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
+    HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
+};
+use crate::copilot_headless_config::CopilotHeadlessConfig;
 use crate::copilot_models::catalog_ids;
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
-    McpServerConfig, McpTransport, MessageRole, RunnerError, StreamChunk, TokenUsage,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
+    McpServerConfig, McpTransport, RunnerError, StreamChunk, TokenUsage,
 };
 
 /// Default prompt timeout (5 minutes). Override with `EMBACLE_ACP_PROMPT_TIMEOUT_SECS`.
@@ -1133,10 +1134,13 @@ fn process_notification_inner(
             }
         }
         schema::SessionUpdate::ToolCall(tc) => {
+            // ACP carries a title and a status; the name, arguments and
+            // result stay `None` because the adapter never sends them.
             let observed = ObservedToolCall {
                 id: tc.tool_call_id.0.to_string(),
                 title: tc.title.clone(),
                 status: format!("{:?}", tc.status),
+                ..ObservedToolCall::default()
             };
             acc.tool_calls.push(observed.clone());
             if let Some(tx) = event_tx {
@@ -1574,60 +1578,6 @@ async fn collect_streaming_with_tools(
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A tool call observed during an ACP session turn.
-#[derive(Debug, Clone)]
-pub struct ObservedToolCall {
-    /// Tool call ID from the ACP protocol.
-    pub id: String,
-    /// Human-readable title describing the tool action.
-    pub title: String,
-    /// Execution status (e.g., "Pending", "`InProgress`", "Completed", "Failed").
-    pub status: String,
-}
-
-/// Response from a headless conversation turn including tool execution metadata.
-#[derive(Debug, Clone)]
-pub struct HeadlessToolResponse {
-    /// Final assistant response content.
-    pub content: String,
-    /// Model that generated the response.
-    pub model: String,
-    /// Tool calls observed during the turn.
-    pub tool_calls: Vec<ObservedToolCall>,
-    /// Token usage for this turn.
-    pub usage: Option<TokenUsage>,
-    /// Finish reason.
-    pub finish_reason: Option<String>,
-}
-
-/// Event emitted by [`CopilotHeadlessRunner::converse_stream`] as the ACP
-/// turn progresses.
-///
-/// Unlike [`StreamChunk`] (which only carries text deltas), this enum
-/// surfaces tool-call observations alongside text — keeping the rich
-/// metadata that [`CopilotHeadlessRunner::converse`] returns at the end
-/// of the turn while delivering it incrementally.
-#[derive(Debug, Clone)]
-pub enum HeadlessStreamEvent {
-    /// Partial assistant text — the next chunk to append to the
-    /// in-flight assistant message.
-    TextDelta(String),
-    /// A tool call was observed (start or status update). Each event
-    /// is a snapshot of the tool call's latest known state, so a
-    /// consumer can either accumulate updates or replace by id.
-    ToolCall(ObservedToolCall),
-    /// The turn has finished. Carries the aggregated
-    /// [`HeadlessToolResponse`] — same shape that
-    /// [`CopilotHeadlessRunner::converse`] would have returned.
-    /// Always emitted as the last event before the stream closes
-    /// successfully.
-    Done(HeadlessToolResponse),
-}
-
-/// Stream of [`HeadlessStreamEvent`]s for a single converse turn.
-pub type HeadlessEventStream =
-    Pin<Box<dyn Stream<Item = Result<HeadlessStreamEvent, RunnerError>> + Send>>;
-
 /// Why a warm subprocess must not serve the turn in front of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscardReason {
@@ -1885,73 +1835,11 @@ impl CopilotHeadlessRunner {
         // former `inject_system_in_prompt` knob had no correct `false` value: it
         // did not select an alternative mechanism, it selected none, shipping
         // every turn with no persona and no safety scaffolding, silently.
-        let system = Self::extract_system_prompt(request);
-        let max_turns = self.config.max_history_turns;
+        let turn = render_turn(request, self.config.max_history_turns, true);
 
-        // Separate non-system messages into history (all but last user) + last user
-        let non_system: Vec<&ChatMessage> = request
-            .messages
-            .iter()
-            .filter(|m| m.role != MessageRole::System)
-            .collect();
+        let mut blocks = vec![json!({"type": "text", "text": turn.text})];
 
-        let (history, last_user) = if non_system.is_empty() {
-            (Vec::new(), None)
-        } else {
-            let last_idx = non_system.iter().rposition(|m| m.role == MessageRole::User);
-            match last_idx {
-                Some(idx) => {
-                    let hist = non_system[..idx].to_vec();
-                    (hist, Some(non_system[idx]))
-                }
-                None => (non_system, None),
-            }
-        };
-
-        let user_text = last_user.map(|m| m.content.as_str()).unwrap_or_default();
-
-        // Apply max_history_turns limit — keep only the most recent turns
-        let truncated_history = if max_turns == 0 || history.is_empty() {
-            &[][..]
-        } else if history.len() > max_turns {
-            &history[history.len() - max_turns..]
-        } else {
-            &history
-        };
-
-        // Serialize prior turns into a conversation history block
-        let history_block = if truncated_history.is_empty() {
-            String::new()
-        } else {
-            let mut buf = String::from("<conversation-history>\n");
-            for msg in truncated_history {
-                let role_label = match msg.role {
-                    MessageRole::User => "User",
-                    MessageRole::Assistant => "Assistant",
-                    MessageRole::Tool => "Tool",
-                    MessageRole::System => continue,
-                };
-                buf.push_str(role_label);
-                buf.push_str(": ");
-                buf.push_str(&msg.content);
-                buf.push('\n');
-            }
-            buf.push_str("</conversation-history>\n\n");
-            buf
-        };
-
-        // Assemble: system prompt + conversation history + current user message
-        let mut text = String::new();
-        if let Some(sys) = system {
-            text.push_str(sys);
-            text.push_str("\n\n");
-        }
-        text.push_str(&history_block);
-        text.push_str(user_text);
-
-        let mut blocks = vec![json!({"type": "text", "text": text})];
-
-        if let Some(images) = last_user.and_then(|m| m.images.as_ref()) {
+        if let Some(images) = turn.last_user.and_then(|m| m.images.as_ref()) {
             for img in images {
                 blocks.push(json!({
                     "type": "image",
@@ -1964,14 +1852,6 @@ impl CopilotHeadlessRunner {
         blocks
     }
 
-    /// Extract the system prompt if present.
-    fn extract_system_prompt(request: &ChatRequest) -> Option<&str> {
-        request
-            .messages
-            .iter()
-            .find(|m| m.role == MessageRole::System)
-            .map(|m| m.content.as_str())
-    }
     /// Run one turn on a pooled subprocess.
     ///
     /// Checks out a slot, makes sure the process in it is fit to serve this
@@ -2194,7 +2074,7 @@ impl CopilotHeadlessRunner {
     ) -> Result<HeadlessToolResponse, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
-        let system_prompt = Self::extract_system_prompt(request);
+        let system_prompt = system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
         // Pooled, like `complete()`. This path used to spawn a dedicated
@@ -2274,7 +2154,7 @@ impl CopilotHeadlessRunner {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
         Span::current().record("model", field::display(&model));
-        let system_prompt = Self::extract_system_prompt(request);
+        let system_prompt = system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
         // Admission BEFORE the spawn, not after: the point of the bound is to
@@ -2372,6 +2252,20 @@ impl CopilotHeadlessRunner {
 }
 
 #[async_trait]
+impl HeadlessTurnProvider for CopilotHeadlessRunner {
+    async fn converse(&self, request: &ChatRequest) -> Result<HeadlessToolResponse, RunnerError> {
+        Self::converse(self, request).await
+    }
+
+    async fn converse_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<HeadlessEventStream, RunnerError> {
+        Self::converse_stream(self, request).await
+    }
+}
+
+#[async_trait]
 impl LlmProvider for CopilotHeadlessRunner {
     fn name(&self) -> &'static str {
         "copilot_headless"
@@ -2412,7 +2306,7 @@ impl LlmProvider for CopilotHeadlessRunner {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
         Span::current().record("model", field::display(&model));
-        let system_prompt = Self::extract_system_prompt(request);
+        let system_prompt = system_prompt(request);
         let prompt_blocks = self.build_prompt_blocks(request);
 
         // Copilot ends a turn with zero agent-message chunks often enough to
@@ -2486,7 +2380,7 @@ impl LlmProvider for CopilotHeadlessRunner {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let cli_path = self.resolve_cli_path()?;
         let model = self.resolve_model(request.model.as_deref());
-        let system_prompt = Self::extract_system_prompt(request).map(str::to_owned);
+        let system_prompt = system_prompt(request).map(str::to_owned);
         let prompt_blocks = self.build_prompt_blocks(request);
 
         // Admission BEFORE the spawn, not after: the point of the bound is to

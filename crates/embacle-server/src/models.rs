@@ -25,7 +25,7 @@ use crate::state::SharedState;
 pub async fn handle(State(state): State<SharedState>) -> impl IntoResponse {
     let mut data = Vec::new();
 
-    for &provider in ALL_PROVIDERS {
+    for &provider in ALL_PROVIDERS.iter() {
         let binary_name = provider.binary_name();
         let env_key = provider.env_override_key();
         let env_override = env::var(env_key).ok();

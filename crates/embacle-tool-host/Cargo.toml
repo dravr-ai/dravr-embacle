@@ -28,8 +28,9 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-# The live example drives a real `copilot --acp`; the unit tests do not need it.
-embacle = { path = "../..", version = "0.26.0", features = ["copilot-headless"] }
+# The live example drives a real `copilot --acp` and the live test the SDK
+# runtime; the unit tests need neither.
+embacle = { path = "../..", version = "0.26.0", features = ["copilot-headless", "copilot-sdk"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1.45", features = ["full", "test-util"] }

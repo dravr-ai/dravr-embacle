@@ -124,6 +124,10 @@ pub async fn check_readiness(
         CliRunnerType::KiloCli => check_version_probe_unverified(binary_path, "kilo").await,
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => check_copilot_readiness(binary_path).await,
+        // The SDK runner proves readiness with the runtime's own protocol
+        // handshake on first use; the wrapper binary has nothing to probe.
+        #[cfg(feature = "copilot-sdk")]
+        CliRunnerType::CopilotSdk => Ok(ProviderReadiness::Ready),
         // ClaudeWeb readiness is browser/session-based, not binary-based.
         #[cfg(feature = "web-ui")]
         CliRunnerType::ClaudeWeb => Ok(ProviderReadiness::Ready),

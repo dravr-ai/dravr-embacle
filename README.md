@@ -497,7 +497,7 @@ async fn main() -> Result<(), embacle::types::RunnerError> {
 }
 ```
 
-The headless runner spawns `copilot --acp` per request and communicates via NDJSON-framed JSON-RPC. The system prompt is passed via ACP's `session/new` `systemPrompt` parameter. Conversation history from prior turns is serialized into a `<conversation-history>` block in the prompt text for multi-turn continuity. The `max_tokens` field from `ChatRequest` is forwarded to ACP's `session/prompt` as `maxTokens`.
+The headless runner keeps a small pool of warm `copilot --acp` subprocesses across calls and communicates via NDJSON-framed JSON-RPC. The CLI strips ACP's `session/new` `systemPrompt` field, so the system prompt is inlined at the top of the prompt text — the only delivery path this transport has. Conversation history from prior turns is serialized into a `<conversation-history>` block in the prompt text for multi-turn continuity. The `max_tokens` field from `ChatRequest` is forwarded to ACP's `session/prompt` as `maxTokens`.
 
 Configuration via environment variables:
 
@@ -508,7 +508,57 @@ Configuration via environment variables:
 | `COPILOT_HEADLESS_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
 | `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
-| `COPILOT_HEADLESS_INJECT_SYSTEM_IN_PROMPT` | `true` | Prepend system prompt as plain text in prompt (set `false` to rely on ACP `systemPrompt` only) |
+| `COPILOT_HEADLESS_PERMISSION_POLICY` | deny | `auto_approve` lets the subprocess run its own tools (shell, git, file edits); anything else denies |
+| `COPILOT_HEADLESS_MCP_TOOL_CALLING` | `false` | Advertise `SDK_TOOL_CALLING`: the caller passes `mcp_servers` per request and copilot calls those tools natively |
+
+## Copilot SDK (feature flag)
+
+Enable the `copilot-sdk` feature to reach the same GitHub Copilot runtime through GitHub's own Rust SDK instead of the `copilot --acp` adapter:
+
+```toml
+[dependencies]
+embacle = { version = "0.26", features = ["copilot-sdk"] }
+```
+
+```rust
+use embacle::{CopilotSdkRunner, HeadlessTurnProvider};
+use embacle::types::{ChatMessage, ChatRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), embacle::types::RunnerError> {
+    // Reads COPILOT_RUNTIME_PATH, COPILOT_SDK_MODEL, COPILOT_GITHUB_TOKEN, etc. from env
+    let runner = CopilotSdkRunner::from_env();
+
+    let request = ChatRequest::new(vec![
+        ChatMessage::system("You are Dravr's coach."),
+        ChatMessage::user("Explain Rust ownership"),
+    ]);
+
+    let turn = runner.converse(&request).await?;
+    println!("{} (served by {})", turn.content, turn.model);
+    Ok(())
+}
+```
+
+`copilot --acp` is `app.js` over `runtime.node`; the SDK runner drops the JS adapter and spawns the ~400 KB Rust `copilot-runtime` wrapper (`--server --stdio`) that loads the same `runtime.node` — no Node process anywhere on this path. It opens one session per turn (the host owns the conversation, so prior turns are rendered into a `<conversation-history>` block exactly as the headless runner does), delivers the system prompt through the runtime's own system slot in `replace` mode, and reads the turn off the runtime's event stream. What that stream reports and ACP's does not: the model that actually served (`assistant.usage.model`), cache read/write token counts per call, and every tool execution with its name, arguments and result (`ObservedToolCall::{name, arguments, result}`). A model id the runtime's catalogue does not know fails with `ErrorKind::ModelUnavailable` instead of being silently served by another model; the prompt timeout aborts the session instead of killing a process.
+
+Both Copilot runners implement `HeadlessTurnProvider` (`converse` / `converse_stream`), so a host names the trait, not a transport.
+
+The runtime pair is a file on disk, never a payload in the binary. Point `COPILOT_RUNTIME_PATH` at the `copilot-runtime` wrapper with `runtime.node` adjacent — the pair ships inside the `github-copilot-<version>-<platform>.tgz` release asset of `github/copilot-cli` (`prebuilds/<platform>/`), and the Copilot CLI extracts the same pair into its package cache on first run. The SDK's build script would otherwise download and embed the whole CLI (~163 MB); this workspace's `.cargo/config.toml` sets `COPILOT_SKIP_CLI_DOWNLOAD=1`, and a consumer building with this feature sets the same variable in its own build environment.
+
+Configuration via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COPILOT_RUNTIME_PATH` | SDK resolves `COPILOT_CLI_PATH` | Path to the `copilot-runtime` wrapper; `runtime.node` must sit next to it. No `PATH` scan |
+| `COPILOT_SDK_HOME` | per-process dir under the system temp dir | The runtime's home (`COPILOT_HOME`): session state, credential store, logs |
+| `COPILOT_SDK_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
+| `COPILOT_GITHUB_TOKEN` | stored login | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
+| `COPILOT_SDK_PERMISSION_POLICY` | deny | `auto_approve` lets the runtime run its own tools; anything else denies |
+| `COPILOT_SDK_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
+| `COPILOT_SDK_MCP_TOOL_CALLING` | `false` | Advertise `SDK_TOOL_CALLING`: the caller passes `mcp_servers` per request and the runtime calls those tools natively |
+| `EMBACLE_SDK_PROMPT_TIMEOUT_SECS` | `300` | Bound on one turn, prompt sent to session idle; the session is aborted on expiry |
+| `EMBACLE_SDK_SESSION_TIMEOUT_SECS` | `60` | Bound on starting the runtime and opening a session |
 
 ## Vision / Image Support
 
@@ -519,6 +569,7 @@ Embacle supports sending images alongside text prompts via the `ImagePart` type.
 | Provider | Vision | How |
 |----------|--------|-----|
 | Copilot Headless (ACP) | Native | Images sent as ACP `image` content blocks |
+| Copilot SDK | Native | Images written to the turn's scratch directory and attached as files |
 | OpenAI API | Native | Images sent as `image_url` parts with `data:` URIs |
 | C FFI | Native | Images forwarded to copilot headless via `image_url` content |
 | All 12 CLI runners | Tempfile | Images decoded to temp files, file paths injected into prompt |

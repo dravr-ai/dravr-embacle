@@ -102,6 +102,11 @@ default = []
 agui = []
 # Enable Copilot Headless provider (ACP protocol via copilot --acp)
 copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
+# Enable the Copilot SDK provider: GitHub's Rust runtime through github-copilot-sdk
+# over stdio (spawns the Rust `copilot-runtime` wrapper; no Node in the path).
+# `.cargo/config.toml` keeps the SDK's build script from downloading and embedding
+# the CLI; the runtime pair is a file `COPILOT_RUNTIME_PATH` names at run time.
+copilot-sdk = ["dep:github-copilot-sdk", "tokio/sync"]
 # Enable OpenAI-compatible HTTP API client runner (reqwest-based)
 openai-api = ["dep:reqwest", "tokio/sync"]
 # Enable the HTTP quota checkers (Anthropic OAuth usage, GitHub rate-limit headroom).
@@ -132,6 +137,10 @@ which = "7"
 
 # Optional: ACP schema types for Copilot Headless (copilot --acp)
 agent-client-protocol-schema = { version = "0.12", optional = true }
+
+# Optional: GitHub's SDK for its Rust Copilot runtime (copilot-sdk feature).
+# default-features = false drops `bundled-cli`, which would embed the CLI.
+github-copilot-sdk = { version = "1.0.14", default-features = false, optional = true }
 
 # Optional: HTTP client for OpenAI-compatible API runner
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
