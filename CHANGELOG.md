@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.28.0] — 2026-09-18
+
+
+
 ### Changed
 
 - `openai-api` now implies `http-api` and `OpenAiApiRunner` maps statuses through the shared `http_api::client::map_http_error`: a 429 is `ErrorKind::RateLimit` (it was `ExternalService`, so it was retried in place and fell through a chain; now it propagates so a caller routes around the quota), and a 400/422 is the new `ErrorKind::InvalidRequest` (it was `ExternalService`). `embacle-server` answers `InvalidRequest` with HTTP 400 `invalid_request_error`.
