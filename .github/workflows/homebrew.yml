@@ -34,16 +34,35 @@ jobs:
           test -x /home/linuxbrew/.linuxbrew/bin/brew || { echo "linuxbrew not found on runner"; exit 1; }
           echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
 
+      # Every brew step reads stdin from /dev/null. Linuxbrew answers a closed
+      # stdin with "Broken pipe" and exit 1 a few seconds after the tap, before
+      # the install starts, and under `bash -e` that kills the step in front of
+      # `|| true` — the whole release run reads as failed while the release
+      # itself is good (carnet#426). macOS runners hand brew an open stdin, so
+      # only the Linux leg ever hit it. Each brew command is also its own step,
+      # so a red run names the command that failed.
+      - name: Tap dravr-ai/tap
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: brew tap dravr-ai/tap </dev/null
+
+      # Homebrew 6.0 added "tap trust": third-party formulae must be
+      # explicitly trusted before install. `brew trust` is the documented,
+      # non-interactive CI path; it is absent on older brew (< 6.0), which
+      # needs no trust, so tolerate that with `|| true`. (Preferred over the
+      # HOMEBREW_NO_REQUIRE_TAP_TRUST bypass, which Homebrew will remove.)
+      - name: Trust dravr-ai/tap
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: brew trust dravr-ai/tap </dev/null || true
+
       - name: Install from tap
-        run: |
-          brew tap dravr-ai/tap
-          # Homebrew 6.0 added "tap trust": third-party formulae must be
-          # explicitly trusted before install. `brew trust` is the documented,
-          # non-interactive CI path; it is absent on older brew (< 6.0), which
-          # needs no trust, so tolerate that with `|| true`. (Preferred over the
-          # HOMEBREW_NO_REQUIRE_TAP_TRUST bypass, which Homebrew will remove.)
-          brew trust dravr-ai/tap || true
-          brew install embacle
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: brew install embacle </dev/null
 
       - name: Verify binaries exist
         run: |

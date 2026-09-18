@@ -28,3 +28,6 @@ release/
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+
+# Documentation directory (symlink created per-machine by obsidian-vault-setup skill)
+claude_docs
