@@ -13,6 +13,7 @@
 use std::error::Error;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -78,6 +79,13 @@ pub enum ErrorKind {
     /// rather than by the error. Callers that route around an exhausted
     /// provider should switch, not sleep.
     RateLimit,
+    /// The provider rejected the request itself as malformed: an HTTP 400 or
+    /// 422 validation failure, a schema the endpoint refused.
+    ///
+    /// Permanent and caller-side. Another provider would reject the same
+    /// request the same way, so a fallback chain must not spend a second tier
+    /// on it — see [`ErrorKind::is_provider_fault`].
+    InvalidRequest,
 }
 
 impl ErrorKind {
@@ -94,6 +102,38 @@ impl ErrorKind {
     #[must_use]
     pub const fn is_transient(self) -> bool {
         matches!(self, Self::Timeout | Self::ExternalService)
+    }
+
+    /// Whether the provider, not the request, failed — so a different
+    /// provider may still answer the same request.
+    ///
+    /// This is the fall-through predicate a [`FallbackProvider`] uses under
+    /// [`FallThrough::ProviderFault`]: a timeout, an upstream failure, a
+    /// rejected credential, a missing binary, an unavailable model or an
+    /// internal fault are all reasons to ask the next tier. `Config`,
+    /// `Guardrail`, `ContextLength`, `RateLimit` and `InvalidRequest` are the
+    /// request's or the operator's problem and propagate unchanged: rerouting
+    /// them would hide the real diagnostic behind another provider's version
+    /// of the same rejection, and a quota refusal is a reason to switch
+    /// deliberately, not to cascade blindly.
+    ///
+    /// Wider than [`Self::is_transient`] on purpose: an auth failure is not
+    /// worth retrying in place, but it is exactly the case where the next
+    /// provider, holding its own credential, answers.
+    ///
+    /// [`FallbackProvider`]: crate::fallback::FallbackProvider
+    /// [`FallThrough::ProviderFault`]: crate::fallback::FallThrough::ProviderFault
+    #[must_use]
+    pub const fn is_provider_fault(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout
+                | Self::ExternalService
+                | Self::AuthFailure
+                | Self::Internal
+                | Self::BinaryNotFound
+                | Self::ModelUnavailable
+        )
     }
 }
 
@@ -168,6 +208,18 @@ impl RunnerError {
         Self {
             kind: ErrorKind::ModelUnavailable,
             message: format!("Model {model:?} is not available"),
+        }
+    }
+
+    /// Create an invalid-request error (permanent, caller-side).
+    ///
+    /// The provider read the request and refused it as malformed — an HTTP
+    /// 400/422 validation failure. Not a provider fault, so a fallback chain
+    /// propagates it instead of asking the next tier.
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::InvalidRequest,
+            message: message.into(),
         }
     }
 
@@ -886,6 +938,47 @@ pub trait LlmProvider: Send + Sync {
     async fn health_check(&self) -> Result<bool, RunnerError>;
 }
 
+/// A shared provider is a provider.
+///
+/// Lets an `Arc<T>` be boxed as a `dyn LlmProvider` tier — a fallback chain
+/// can hold the same runner a caller keeps a handle to (for its ACP session,
+/// its router state) without a wrapper type whose only job is to forward
+/// eight methods.
+#[async_trait]
+impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+
+    fn display_name(&self) -> &str {
+        (**self).display_name()
+    }
+
+    fn capabilities(&self) -> LlmCapabilities {
+        (**self).capabilities()
+    }
+
+    fn default_model(&self) -> &str {
+        (**self).default_model()
+    }
+
+    fn available_models(&self) -> &[String] {
+        (**self).available_models()
+    }
+
+    async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
+        (**self).complete(request).await
+    }
+
+    async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
+        (**self).complete_stream(request).await
+    }
+
+    async fn health_check(&self) -> Result<bool, RunnerError> {
+        (**self).health_check().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,6 +995,55 @@ mod tests {
         assert!(!ErrorKind::Guardrail.is_transient());
         assert!(!ErrorKind::ContextLength.is_transient());
         assert!(!ErrorKind::ModelUnavailable.is_transient());
+        assert!(!ErrorKind::RateLimit.is_transient());
+        assert!(!ErrorKind::InvalidRequest.is_transient());
+    }
+
+    /// Every variant, both predicates: `is_provider_fault` is a strict superset
+    /// of `is_transient`, and the request-side kinds are in neither.
+    #[test]
+    fn is_provider_fault_classification() {
+        let provider_faults = [
+            ErrorKind::Timeout,
+            ErrorKind::ExternalService,
+            ErrorKind::AuthFailure,
+            ErrorKind::Internal,
+            ErrorKind::BinaryNotFound,
+            ErrorKind::ModelUnavailable,
+        ];
+        for kind in provider_faults {
+            assert!(kind.is_provider_fault(), "{kind:?} is the provider's fault");
+        }
+        let request_side = [
+            ErrorKind::Config,
+            ErrorKind::Guardrail,
+            ErrorKind::ContextLength,
+            ErrorKind::RateLimit,
+            ErrorKind::InvalidRequest,
+        ];
+        for kind in request_side {
+            assert!(
+                !kind.is_provider_fault(),
+                "{kind:?} is not the provider's fault"
+            );
+            assert!(!kind.is_transient(), "{kind:?} is not transient either");
+        }
+        // Transient implies provider fault; the converse does not hold.
+        for kind in provider_faults {
+            if kind.is_transient() {
+                assert!(kind.is_provider_fault());
+            }
+        }
+        assert!(ErrorKind::AuthFailure.is_provider_fault());
+        assert!(!ErrorKind::AuthFailure.is_transient());
+    }
+
+    #[test]
+    fn invalid_request_constructor() {
+        let err = RunnerError::invalid_request("messages must not be empty");
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        assert_eq!(err.message, "messages must not be empty");
+        assert!(!err.kind.is_provider_fault());
     }
 
     #[test]

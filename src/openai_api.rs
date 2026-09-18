@@ -34,11 +34,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument, trace, warn};
 
+use crate::http_api::client::{self, map_send_error};
+use crate::http_api::sse::create_sse_stream;
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider,
     ResponseFormat, RunnerError, StreamChunk, TokenUsage, ToolCallRequest, ToolChoice,
@@ -61,14 +60,14 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Timeout for model discovery requests (seconds)
 const DISCOVERY_TIMEOUT_SECS: u64 = 5;
 
+/// The name this runner reports, and the price-table key its usage bills under
+const PROVIDER_NAME: &str = "openai_api";
+
 /// Chat completions API path
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Models list API path
 const MODELS_PATH: &str = "/v1/models";
-
-/// SSE stream channel buffer capacity
-const STREAM_CHANNEL_CAPACITY: usize = 128;
 
 /// Environment variable for the API base URL
 const ENV_BASE_URL: &str = "OPENAI_API_BASE_URL";
@@ -478,15 +477,10 @@ impl OpenAiApiRunner {
         }
 
         let started = Instant::now();
-        let response = req.send().await.map_err(|e| {
-            if e.is_timeout() {
-                RunnerError::timeout(format!("Request timed out: {e}"))
-            } else if e.is_connect() {
-                RunnerError::external_service("openai_api", format!("Connection failed: {e}"))
-            } else {
-                RunnerError::external_service("openai_api", e.to_string())
-            }
-        })?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| map_send_error(PROVIDER_NAME, e))?;
 
         let status = response.status();
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -521,7 +515,7 @@ impl OpenAiApiRunner {
 #[async_trait]
 impl LlmProvider for OpenAiApiRunner {
     fn name(&self) -> &'static str {
-        "openai_api"
+        PROVIDER_NAME
     }
 
     fn display_name(&self) -> &str {
@@ -623,86 +617,11 @@ impl LlmProvider for OpenAiApiRunner {
         let api_request = self.build_api_request(request, true);
         let response = self.send_request(&api_request).await?;
 
-        let (tx, rx) = mpsc::channel::<Result<StreamChunk, RunnerError>>(STREAM_CHANNEL_CAPACITY);
-        let byte_stream = response.bytes_stream();
-
-        tokio::spawn(async move {
-            let mut stream = byte_stream;
-            let mut buffer = String::new();
-
-            loop {
-                let chunk = stream.next().await;
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                        for event_data in extract_sse_events(&mut buffer) {
-                            if event_data == "[DONE]" {
-                                let _ = tx
-                                    .send(Ok(StreamChunk {
-                                        delta: String::new(),
-                                        is_final: true,
-                                        finish_reason: Some("stop".to_owned()),
-                                    }))
-                                    .await;
-                                return;
-                            }
-
-                            match serde_json::from_str::<ApiStreamResponse>(&event_data) {
-                                Ok(resp) => {
-                                    for choice in resp.choices {
-                                        let delta = choice.delta.content.unwrap_or_default();
-                                        let is_final = choice.finish_reason.is_some();
-
-                                        if !delta.is_empty() || is_final {
-                                            let chunk = StreamChunk {
-                                                delta,
-                                                is_final,
-                                                finish_reason: choice.finish_reason,
-                                            };
-                                            if tx.send(Ok(chunk)).await.is_err() {
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx
-                                        .send(Err(RunnerError::external_service(
-                                            "openai_api",
-                                            format!("SSE parse error: {e}"),
-                                        )))
-                                        .await;
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        let _ = tx
-                            .send(Err(RunnerError::external_service(
-                                "openai_api",
-                                e.to_string(),
-                            )))
-                            .await;
-                        return;
-                    }
-                    None => {
-                        // Byte stream ended without [DONE]; emit final chunk
-                        let _ = tx
-                            .send(Ok(StreamChunk {
-                                delta: String::new(),
-                                is_final: true,
-                                finish_reason: Some("stop".to_owned()),
-                            }))
-                            .await;
-                        return;
-                    }
-                }
-            }
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        Ok(create_sse_stream(
+            response.bytes_stream(),
+            parse_stream_data,
+            PROVIDER_NAME,
+        ))
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {
@@ -819,57 +738,36 @@ fn map_response_format(format: &ResponseFormat) -> serde_json::Value {
     }
 }
 
-/// Map an HTTP error status to a `RunnerError`
+/// Map an HTTP error status to a `RunnerError`: the vendor's message is
+/// lifted out of the `OpenAI` error envelope, and the status decides the kind
+/// through the shared [`client::map_http_error`].
 fn map_http_error(status: StatusCode, body: &str) -> RunnerError {
     let api_message = serde_json::from_str::<ApiErrorResponse>(body)
         .map_or_else(|_| body.to_owned(), |e| e.error.message);
-
-    let detail = format!("HTTP {status}: {api_message}");
-
-    match status.as_u16() {
-        401 | 403 => RunnerError::auth_failure(detail),
-        408 | 504 => RunnerError::timeout(detail),
-        _ => RunnerError::external_service("openai_api", detail),
-    }
+    client::map_http_error(PROVIDER_NAME, status, &api_message)
 }
 
-// ============================================================================
-// SSE Parsing
-// ============================================================================
-
-/// Extract complete SSE event data payloads from a buffer
+/// Parse one SSE `data:` payload into a `StreamChunk`.
 ///
-/// Consumes complete events (delimited by `\n\n` or `\r\n\r\n`) from the
-/// buffer and returns their `data:` field values. Partial events remain
-/// in the buffer for the next call.
-fn extract_sse_events(buffer: &mut String) -> Vec<String> {
-    let mut events = Vec::new();
-
-    loop {
-        let boundary = buffer
-            .find("\n\n")
-            .map(|pos| (pos, 2))
-            .or_else(|| buffer.find("\r\n\r\n").map(|pos| (pos, 4)));
-
-        let Some((pos, skip)) = boundary else {
-            break;
-        };
-
-        let event_block: String = buffer.drain(..pos + skip).collect();
-
-        for line in event_block.lines() {
-            let data = line
-                .strip_prefix("data: ")
-                .or_else(|| line.strip_prefix("data:"));
-            if let Some(data) = data {
-                if !data.is_empty() {
-                    events.push(data.to_owned());
-                }
-            }
+/// A frame whose first choice carries neither a delta nor a finish reason
+/// yields nothing; an unparseable frame ends the stream with an error.
+fn parse_stream_data(json: &str) -> Option<Result<StreamChunk, RunnerError>> {
+    match serde_json::from_str::<ApiStreamResponse>(json) {
+        Ok(resp) => {
+            let choice = resp.choices.into_iter().next()?;
+            let delta = choice.delta.content.unwrap_or_default();
+            let is_final = choice.finish_reason.is_some();
+            (!delta.is_empty() || is_final).then_some(Ok(StreamChunk {
+                delta,
+                is_final,
+                finish_reason: choice.finish_reason,
+            }))
         }
+        Err(e) => Some(Err(RunnerError::external_service(
+            PROVIDER_NAME,
+            format!("SSE parse error: {e}"),
+        ))),
     }
-
-    events
 }
 
 // ============================================================================
@@ -957,59 +855,6 @@ mod tests {
 
         let config = OpenAiApiConfig::new("https://example.com///");
         assert_eq!(config.base_url, "https://example.com");
-    }
-
-    #[test]
-    fn extract_sse_single_event() {
-        let mut buffer = "data: {\"choices\":[]}\n\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["{\"choices\":[]}"]);
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn extract_sse_multiple_events() {
-        let mut buffer = "data: first\n\ndata: second\n\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["first", "second"]);
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn extract_sse_done_signal() {
-        let mut buffer = "data: [DONE]\n\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["[DONE]"]);
-    }
-
-    #[test]
-    fn extract_sse_partial_event_stays_in_buffer() {
-        let mut buffer = "data: partial".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert!(events.is_empty());
-        assert_eq!(buffer, "data: partial");
-    }
-
-    #[test]
-    fn extract_sse_crlf_boundary() {
-        let mut buffer = "data: content\r\n\r\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["content"]);
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn extract_sse_ignores_comments() {
-        let mut buffer = ": keepalive\n\ndata: real\n\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["real"]);
-    }
-
-    #[test]
-    fn extract_sse_no_space_after_data_colon() {
-        let mut buffer = "data:{\"ok\":true}\n\n".to_owned();
-        let events = extract_sse_events(&mut buffer);
-        assert_eq!(events, vec!["{\"ok\":true}"]);
     }
 
     #[test]
@@ -1133,11 +978,54 @@ mod tests {
         assert!(err.message.contains("overloaded"));
     }
 
+    /// A 400 is the request's fault: `InvalidRequest`, carrying the body the
+    /// vendor sent even when it is not the `OpenAI` error envelope.
     #[test]
     fn map_http_error_unparseable_body() {
         let err = map_http_error(StatusCode::BAD_REQUEST, "not json");
-        assert_eq!(err.kind, ErrorKind::ExternalService);
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
         assert!(err.message.contains("not json"));
+    }
+
+    /// A 429 is a quota refusal, not a transient upstream fault: `RateLimit`,
+    /// which a retry loop does not spin on and a fallback chain does not
+    /// reroute.
+    #[test]
+    fn map_http_error_rate_limit() {
+        let err = map_http_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"message":"Rate limit reached. Please try again in 2s."}}"#,
+        );
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert!(err.message.contains("2 seconds"), "{}", err.message);
+    }
+
+    #[test]
+    fn parse_stream_data_content_delta() {
+        let chunk =
+            parse_stream_data(r#"{"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#)
+                .expect("a delta") // Safe: test assertion
+                .expect("ok"); // Safe: test assertion
+        assert_eq!(chunk.delta, "Hi");
+        assert!(!chunk.is_final);
+    }
+
+    #[test]
+    fn parse_stream_data_final_without_content() {
+        let chunk = parse_stream_data(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+            .expect("a final chunk") // Safe: test assertion
+            .expect("ok"); // Safe: test assertion
+        assert!(chunk.delta.is_empty());
+        assert!(chunk.is_final);
+        assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn parse_stream_data_unparseable_is_an_error() {
+        let err = parse_stream_data("not json")
+            .expect("an item") // Safe: test assertion
+            .expect_err("an error");
+        assert_eq!(err.kind, ErrorKind::ExternalService);
     }
 
     #[test]

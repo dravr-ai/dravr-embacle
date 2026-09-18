@@ -100,6 +100,8 @@ pub mod mcp_tool_bridge;
 pub mod metrics;
 /// `OpenCode` CLI runner
 pub mod opencode;
+/// Per-token price table keyed on each provider's `name()`
+pub mod pricing;
 /// Subprocess spawning with safety limits
 pub mod process;
 /// Prompt construction from `ChatMessage` sequences
@@ -132,6 +134,11 @@ pub mod warp_cli;
 /// TOML-based declarative configuration file loading
 #[cfg(feature = "config-file")]
 pub mod config_file;
+
+// HTTP API providers (behind feature flag)
+/// HTTP API providers: Gemini, Cohere, Groq, `OpenRouter`, OpenAI-compatible
+#[cfg(feature = "http-api")]
+pub mod http_api;
 
 // OpenAI API module (behind feature flag)
 /// OpenAI-compatible HTTP API client runner
@@ -187,7 +194,10 @@ pub use factory::{
     create_runner, create_runner_with_config, parse_runner_type, valid_provider_names,
     ALL_PROVIDERS,
 };
-pub use fallback::{FallbackProvider, RetryConfig};
+pub use fallback::{
+    is_empty_completion, Attempt, FallThrough, FallbackObserver, FallbackProvider,
+    FallthroughReason, ResponsePolicy, RetryConfig, Tier,
+};
 pub use gemini_cli::GeminiCliRunner;
 pub use goose_cli::GooseCliRunner;
 pub use guardrail::{
@@ -197,10 +207,12 @@ pub use guardrail::{
 pub use kilo_cli::KiloCliRunner;
 pub use kiro_cli::KiroCliRunner;
 pub use mcp_tool_bridge::{McpToolDefinition, McpToolExecutor};
-pub use metrics::{
-    default_pricing_table, MetricsProvider, MetricsReport, PricingTable, TokenPricing,
-};
+pub use metrics::{MetricsProvider, MetricsReport};
 pub use opencode::OpenCodeRunner;
+pub use pricing::{
+    calculate_cost, calculate_cost_for, is_not_per_token_metered, ModelPricing, TokenCounts,
+    NOT_PER_TOKEN_METERED_PROVIDERS, PRICING_TABLE,
+};
 pub use quality_gate::{QualityGateProvider, QualityPolicy};
 pub use structured_output::{
     extract_json_from_response, request_structured_output, StructuredOutputRequest,
@@ -229,6 +241,13 @@ pub use agui::{AgUiEmitter, AgUiEvent, AgUiEventFilter, AgUiEventKind, NoopEmitt
 pub use config_file::{
     build_fallback_from_config, build_runner_config, load_config, load_config_from, resolve_alias,
     DefaultsConfig, EmbacleConfig, FallbackConfig, McpServerConfig, ProviderConfig,
+};
+
+// HTTP API provider re-exports (behind feature flag)
+#[cfg(feature = "http-api")]
+pub use http_api::{
+    CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
 };
 
 // OpenAI API re-exports (behind feature flag)

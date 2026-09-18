@@ -1,5 +1,5 @@
-# ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools as pluggable providers
-# ABOUTME: Wraps CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo) and ACP
+# ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools, ACP, and HTTP APIs as pluggable providers
+# ABOUTME: CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo), ACP, and HTTP (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible)
 
 [workspace]
 members = [".", "crates/embacle-mcp", "crates/embacle-server", "crates/embacle-tool-host"]
@@ -9,7 +9,7 @@ name = "embacle"
 version = "0.27.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "LLM runner library — wraps 12 AI CLI tools as pluggable LLM providers with agent loop, guardrails, and cost tracking"
+description = "LLM runner library — 12 AI CLI tools, ACP, and HTTP APIs (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 homepage = "https://github.com/dravr-ai/dravr-embacle"
 documentation = "https://docs.rs/embacle"
@@ -107,8 +107,13 @@ copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # `.cargo/config.toml` keeps the SDK's build script from downloading and embedding
 # the CLI; the runtime pair is a file `COPILOT_RUNTIME_PATH` names at run time.
 copilot-sdk = ["dep:github-copilot-sdk", "tokio/sync"]
-# Enable OpenAI-compatible HTTP API client runner (reqwest-based)
-openai-api = ["dep:reqwest", "tokio/sync"]
+# Enable the HTTP API providers: Gemini, Cohere, Groq, OpenRouter, and any
+# OpenAI-compatible endpoint (Ollama, vLLM, LocalAI) — reqwest-based, with the
+# shared SSE parser, retry policy and HTTP error mapping in `http_api`.
+http-api = ["dep:reqwest", "tokio/sync"]
+# Enable OpenAI-compatible HTTP API client runner (reqwest-based). Shares
+# http-api's client, SSE parser and error mapping.
+openai-api = ["http-api"]
 # Enable the HTTP quota checkers (Anthropic OAuth usage, GitHub rate-limit headroom).
 # The quota vocabulary and policy in `quota` are always available; this only adds
 # the checkers that reach the network.
@@ -142,7 +147,7 @@ agent-client-protocol-schema = { version = "0.12", optional = true }
 # default-features = false drops `bundled-cli`, which would embed the CLI.
 github-copilot-sdk = { version = "1.0.14", default-features = false, optional = true }
 
-# Optional: HTTP client for OpenAI-compatible API runner
+# Optional: HTTP client for the http-api providers and the OpenAI API runner
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
 
 # Optional: TOML config file support

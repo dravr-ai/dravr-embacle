@@ -833,7 +833,12 @@ fn runner_error_to_response(err: &RunnerError) -> Response {
         ErrorKind::AuthFailure => (StatusCode::UNAUTHORIZED, "authentication_error"),
         ErrorKind::Timeout => (StatusCode::GATEWAY_TIMEOUT, "timeout_error"),
         ErrorKind::ExternalService => (StatusCode::BAD_GATEWAY, "external_service_error"),
-        ErrorKind::Config => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+        // Config: the server's request to the runner is wrong; InvalidRequest:
+        // the provider read it and refused it as malformed. Either way the
+        // client's request is what has to change.
+        ErrorKind::Config | ErrorKind::InvalidRequest => {
+            (StatusCode::BAD_REQUEST, "invalid_request_error")
+        }
         ErrorKind::Guardrail => (StatusCode::BAD_REQUEST, "guardrail_error"),
         ErrorKind::ContextLength => (StatusCode::BAD_REQUEST, "context_length_exceeded"),
         ErrorKind::ModelUnavailable => (StatusCode::NOT_FOUND, "model_not_found"),

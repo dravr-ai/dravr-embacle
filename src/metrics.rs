@@ -12,9 +12,11 @@
 //!
 //! ## Cost Tracking
 //!
-//! Attach a [`PricingTable`] via [`MetricsProvider::with_pricing()`] or use
-//! [`MetricsProvider::with_default_pricing()`] for built-in model prices.
-//! Costs are computed from token counts and accumulated in the report.
+//! Every call is priced through [`crate::pricing`], keyed on the wrapped
+//! provider's `name()` and the response's model, with the cache and
+//! reasoning counts the provider reported. A pair the table does not price
+//! costs `0.0` (see [`crate::pricing::calculate_cost_for`] for how that is
+//! logged). Costs accumulate in the report.
 //!
 //! ## OpenTelemetry (feature: `otel`)
 //!
@@ -24,7 +26,6 @@
 //! Token estimation: when `TokenUsage` is not provided by the inner provider,
 //! tokens are estimated at ~4 characters per token.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -36,82 +37,13 @@ use opentelemetry::metrics::{Counter, Histogram};
 use async_trait::async_trait;
 use tracing::info;
 
+use crate::pricing::{calculate_cost_for, TokenCounts};
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, TokenUsage,
 };
 
 /// Characters-per-token estimate used when the provider does not report usage
 const CHARS_PER_TOKEN_ESTIMATE: u32 = 4;
-
-/// Per-model token pricing (cost per 1000 tokens)
-#[derive(Debug, Clone)]
-pub struct TokenPricing {
-    /// Cost per 1000 prompt (input) tokens
-    pub prompt_price_per_1k: f64,
-    /// Cost per 1000 completion (output) tokens
-    pub completion_price_per_1k: f64,
-}
-
-/// Mapping from model name to pricing
-pub type PricingTable = HashMap<String, TokenPricing>;
-
-/// Built-in pricing table with known model prices (approximate, USD)
-pub fn default_pricing_table() -> PricingTable {
-    let mut table = PricingTable::new();
-    // Claude models
-    table.insert(
-        "opus".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.015,
-            completion_price_per_1k: 0.075,
-        },
-    );
-    table.insert(
-        "sonnet".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.003,
-            completion_price_per_1k: 0.015,
-        },
-    );
-    table.insert(
-        "haiku".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.00025,
-            completion_price_per_1k: 0.00125,
-        },
-    );
-    // GPT models
-    table.insert(
-        "gpt-5.4".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.005,
-            completion_price_per_1k: 0.015,
-        },
-    );
-    table.insert(
-        "gpt-4o".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.005,
-            completion_price_per_1k: 0.015,
-        },
-    );
-    // Gemini models
-    table.insert(
-        "gemini-2.5-pro".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.00125,
-            completion_price_per_1k: 0.005,
-        },
-    );
-    table.insert(
-        "gemini-2.5-flash".to_owned(),
-        TokenPricing {
-            prompt_price_per_1k: 0.000_075,
-            completion_price_per_1k: 0.0003,
-        },
-    );
-    table
-}
 
 /// Accumulated metrics state protected by a mutex
 #[derive(Debug, Default)]
@@ -144,7 +76,7 @@ pub struct MetricsReport {
     pub total_tokens: u64,
     /// Number of calls that returned an error
     pub errors_count: u64,
-    /// Accumulated cost in USD (0.0 if no pricing table configured)
+    /// Accumulated cost in USD (0.0 for every call the price table does not cover)
     pub total_cost: f64,
 }
 
@@ -209,7 +141,6 @@ impl OtelInstruments {
 pub struct MetricsProvider {
     inner: Box<dyn LlmProvider>,
     state: Arc<Mutex<MetricsState>>,
-    pricing: Option<PricingTable>,
     #[cfg(feature = "otel")]
     otel: OtelInstruments,
 }
@@ -220,21 +151,9 @@ impl MetricsProvider {
         Self {
             inner,
             state: Arc::new(Mutex::new(MetricsState::default())),
-            pricing: None,
             #[cfg(feature = "otel")]
             otel: OtelInstruments::new(),
         }
-    }
-
-    /// Attach a custom pricing table for cost tracking
-    pub fn with_pricing(mut self, pricing: PricingTable) -> Self {
-        self.pricing = Some(pricing);
-        self
-    }
-
-    /// Attach the built-in pricing table for known models
-    pub fn with_default_pricing(self) -> Self {
-        self.with_pricing(default_pricing_table())
     }
 
     /// Return a snapshot of the current metrics
@@ -275,25 +194,26 @@ impl MetricsProvider {
         Ok(())
     }
 
-    /// Compute cost for a single call based on token counts and model name
-    fn compute_cost(&self, model: &str, prompt_tokens: u64, completion_tokens: u64) -> f64 {
-        let Some(table) = &self.pricing else {
-            return 0.0;
-        };
-        // Try exact match first, then try substring matching for partial model names
-        let pricing = table.get(model).or_else(|| {
-            table
-                .iter()
-                .find(|(key, _)| model.contains(key.as_str()))
-                .map(|(_, v)| v)
-        });
-        let Some(pricing) = pricing else {
-            return 0.0;
-        };
-        #[allow(clippy::cast_precision_loss)]
-        let cost = (prompt_tokens as f64 * pricing.prompt_price_per_1k / 1000.0)
-            + (completion_tokens as f64 * pricing.completion_price_per_1k / 1000.0);
-        cost
+    /// Price one call: the wrapped provider's `name()` is the table key, and
+    /// the cache and reasoning counts the provider reported ride along.
+    /// `prompt_tokens`/`completion_tokens` are the (possibly estimated)
+    /// headline counts; `usage` supplies the optional categories.
+    fn compute_cost(
+        &self,
+        model: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        usage: Option<&TokenUsage>,
+    ) -> f64 {
+        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        let optional = |n: Option<u32>| i64::from(n.unwrap_or(0));
+        let counts = TokenCounts::new(count(prompt_tokens), count(completion_tokens))
+            .with_cache(
+                optional(usage.and_then(|u| u.cached_read_tokens)),
+                optional(usage.and_then(|u| u.cached_write_tokens)),
+            )
+            .with_reasoning(optional(usage.and_then(|u| u.reasoning_tokens)));
+        calculate_cost_for(self.inner.name(), model, &counts)
     }
 }
 
@@ -363,7 +283,7 @@ impl LlmProvider for MetricsProvider {
             state.total_completion_tokens += completion_tokens;
             state.total_tokens += total;
 
-            let cost = self.compute_cost(&response.model, prompt_tokens, completion_tokens);
+            let cost = self.compute_cost(&response.model, prompt_tokens, completion_tokens, usage);
             state.total_cost += cost;
 
             info!(
@@ -432,13 +352,20 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct TestProvider {
+        provider_name: &'static str,
         responses: Mutex<Vec<Result<ChatResponse, RunnerError>>>,
         call_count: AtomicU32,
     }
 
     impl TestProvider {
         fn new(responses: Vec<Result<ChatResponse, RunnerError>>) -> Self {
+            Self::named("test", responses)
+        }
+
+        /// A provider reporting `name`, so the price table keys on it.
+        fn named(name: &'static str, responses: Vec<Result<ChatResponse, RunnerError>>) -> Self {
             Self {
+                provider_name: name,
                 responses: Mutex::new(responses),
                 call_count: AtomicU32::new(0),
             }
@@ -448,7 +375,7 @@ mod tests {
     #[async_trait]
     impl LlmProvider for TestProvider {
         fn name(&self) -> &'static str {
-            "test"
+            self.provider_name
         }
         fn display_name(&self) -> &str {
             "Test Provider"
@@ -608,89 +535,54 @@ mod tests {
     }
 
     // ========================================================================
-    // Cost tracking tests
+    // Cost tracking tests — priced through `crate::pricing`, keyed on name()
     // ========================================================================
+
+    /// gemini-2.5-flash: $0.15/M input, $0.60/M output.
+    const FLASH_IN: f64 = 0.15 / 1_000_000.0;
+    const FLASH_OUT: f64 = 0.60 / 1_000_000.0;
+
+    fn flash_response(content: &str, usage: Option<TokenUsage>) -> ChatResponse {
+        ChatResponse {
+            content: content.to_owned(),
+            model: "gemini-2.5-flash".to_owned(),
+            usage,
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        }
+    }
 
     #[tokio::test]
     async fn cost_with_known_model() {
-        let provider = TestProvider::new(vec![Ok(ChatResponse {
-            content: "response".to_owned(),
-            model: "opus".to_owned(),
-            usage: Some(TokenUsage::new(1000, 500, 1500)),
-            finish_reason: Some("stop".to_owned()),
-            warnings: None,
-            tool_calls: None,
-        })]);
-        let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
+        let provider = TestProvider::named(
+            "gemini",
+            vec![Ok(flash_response(
+                "response",
+                Some(TokenUsage::new(1000, 500, 1500)),
+            ))],
+        );
+        let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         metered.complete(&request).await.expect("call"); // Safe: test assertion
 
         let report = metered.report().unwrap(); // Safe: test assertion
-                                                // opus: 1000 prompt * 0.015/1000 + 500 completion * 0.075/1000
-                                                // = 0.015 + 0.0375 = 0.0525
-        assert!((report.total_cost - 0.0525).abs() < 1e-10);
+        let expected = 1000.0f64.mul_add(FLASH_IN, 500.0 * FLASH_OUT);
+        assert!(
+            (report.total_cost - expected).abs() < 1e-12,
+            "{}",
+            report.total_cost
+        );
     }
 
+    /// The table is keyed on the provider's `name()`: the same model under a
+    /// provider the table does not price costs nothing.
     #[tokio::test]
-    async fn cost_with_unknown_model() {
-        let provider = TestProvider::new(vec![Ok(ChatResponse {
-            content: "response".to_owned(),
-            model: "some-unknown-model".to_owned(),
-            usage: Some(TokenUsage::new(1000, 500, 1500)),
-            finish_reason: Some("stop".to_owned()),
-            warnings: None,
-            tool_calls: None,
-        })]);
-        let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
-        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call"); // Safe: test assertion
-
-        let report = metered.report().unwrap(); // Safe: test assertion
-        assert!(report.total_cost == 0.0);
-    }
-
-    #[tokio::test]
-    async fn cost_accumulates() {
-        let provider = TestProvider::new(vec![
-            Ok(ChatResponse {
-                content: "r1".to_owned(),
-                model: "opus".to_owned(),
-                usage: Some(TokenUsage::new(1000, 500, 1500)),
-                finish_reason: Some("stop".to_owned()),
-                warnings: None,
-                tool_calls: None,
-            }),
-            Ok(ChatResponse {
-                content: "r2".to_owned(),
-                model: "opus".to_owned(),
-                usage: Some(TokenUsage::new(2000, 1000, 3000)),
-                finish_reason: Some("stop".to_owned()),
-                warnings: None,
-                tool_calls: None,
-            }),
-        ]);
-        let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
-        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
-        metered.complete(&request).await.expect("call 1"); // Safe: test assertion
-        metered.complete(&request).await.expect("call 2"); // Safe: test assertion
-
-        let report = metered.report().unwrap(); // Safe: test assertion
-                                                // call1: 0.015 + 0.0375 = 0.0525
-                                                // call2: 0.030 + 0.075 = 0.105
-                                                // total: 0.1575
-        assert!((report.total_cost - 0.1575).abs() < 1e-10);
-    }
-
-    #[tokio::test]
-    async fn cost_without_pricing() {
-        let provider = TestProvider::new(vec![Ok(ChatResponse {
-            content: "response".to_owned(),
-            model: "opus".to_owned(),
-            usage: Some(TokenUsage::new(1000, 500, 1500)),
-            finish_reason: Some("stop".to_owned()),
-            warnings: None,
-            tool_calls: None,
-        })]);
+    async fn cost_with_unknown_provider_is_zero() {
+        let provider = TestProvider::new(vec![Ok(flash_response(
+            "response",
+            Some(TokenUsage::new(1000, 500, 1500)),
+        ))]);
         let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         metered.complete(&request).await.expect("call"); // Safe: test assertion
@@ -700,49 +592,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cost_with_estimated_tokens() {
-        let provider = TestProvider::new(vec![Ok(ChatResponse {
-            content: "abcdefghijklmnop".to_owned(), // 16 chars => 4 tokens
-            model: "opus".to_owned(),
-            usage: None,
-            finish_reason: Some("stop".to_owned()),
-            warnings: None,
-            tool_calls: None,
-        })]);
-        let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
-        let request = ChatRequest::new(vec![ChatMessage::user("12345678")]); // 8 chars => 2 tokens
+    async fn cost_with_unknown_model() {
+        let provider = TestProvider::named(
+            "gemini",
+            vec![Ok(ChatResponse {
+                content: "response".to_owned(),
+                model: "some-unknown-model".to_owned(),
+                usage: Some(TokenUsage::new(1000, 500, 1500)),
+                finish_reason: Some("stop".to_owned()),
+                warnings: None,
+                tool_calls: None,
+            })],
+        );
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         metered.complete(&request).await.expect("call"); // Safe: test assertion
 
         let report = metered.report().unwrap(); // Safe: test assertion
-                                                // 2 prompt tokens, 4 completion tokens via estimation
-                                                // 2 * 0.015/1000 + 4 * 0.075/1000 = 0.00003 + 0.0003 = 0.00033
-        assert!(report.total_cost > 0.0);
-        assert!((report.total_cost - 0.00033).abs() < 1e-10);
+        assert!(report.total_cost == 0.0);
     }
 
-    #[test]
-    fn default_pricing_populated() {
-        let table = default_pricing_table();
-        assert!(table.contains_key("opus"));
-        assert!(table.contains_key("sonnet"));
-        assert!(table.contains_key("haiku"));
-        assert!(table.contains_key("gpt-5.4"));
-        assert!(table.contains_key("gemini-2.5-pro"));
-        assert!(table.contains_key("gemini-2.5-flash"));
-        assert!(table.len() >= 7);
+    #[tokio::test]
+    async fn cost_accumulates() {
+        let provider = TestProvider::named(
+            "gemini",
+            vec![
+                Ok(flash_response("r1", Some(TokenUsage::new(1000, 500, 1500)))),
+                Ok(flash_response(
+                    "r2",
+                    Some(TokenUsage::new(2000, 1000, 3000)),
+                )),
+            ],
+        );
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+        metered.complete(&request).await.expect("call 1"); // Safe: test assertion
+        metered.complete(&request).await.expect("call 2"); // Safe: test assertion
+
+        let report = metered.report().unwrap(); // Safe: test assertion
+        let expected = 3000.0f64.mul_add(FLASH_IN, 1500.0 * FLASH_OUT);
+        assert!(
+            (report.total_cost - expected).abs() < 1e-12,
+            "{}",
+            report.total_cost
+        );
+    }
+
+    /// Cache reads the provider reports bill at the model's read multiplier
+    /// (Gemini 0.25×), not as fresh input.
+    #[tokio::test]
+    async fn cost_credits_reported_cache_reads() {
+        let provider = TestProvider::named(
+            "gemini",
+            vec![Ok(flash_response(
+                "r",
+                Some(TokenUsage::new(1000, 0, 1000).with_cache(Some(1000), None)),
+            ))],
+        );
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        let report = metered.report().unwrap(); // Safe: test assertion
+        let expected = 1000.0 * FLASH_IN * 0.25;
+        assert!(
+            (report.total_cost - expected).abs() < 1e-12,
+            "{}",
+            report.total_cost
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_with_estimated_tokens() {
+        // 16 chars => 4 completion tokens; the request's 8 chars => 2 prompt tokens
+        let provider =
+            TestProvider::named("gemini", vec![Ok(flash_response("abcdefghijklmnop", None))]);
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("12345678")]);
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        let report = metered.report().unwrap(); // Safe: test assertion
+        let expected = 2.0f64.mul_add(FLASH_IN, 4.0 * FLASH_OUT);
+        assert!(report.total_cost > 0.0);
+        assert!(
+            (report.total_cost - expected).abs() < 1e-12,
+            "{}",
+            report.total_cost
+        );
     }
 
     #[tokio::test]
     async fn reset_zeroes_cost() {
-        let provider = TestProvider::new(vec![Ok(ChatResponse {
-            content: "response".to_owned(),
-            model: "opus".to_owned(),
-            usage: Some(TokenUsage::new(1000, 500, 1500)),
-            finish_reason: Some("stop".to_owned()),
-            warnings: None,
-            tool_calls: None,
-        })]);
-        let metered = MetricsProvider::new(Box::new(provider)).with_default_pricing();
+        let provider = TestProvider::named(
+            "gemini",
+            vec![Ok(flash_response(
+                "response",
+                Some(TokenUsage::new(1000, 500, 1500)),
+            ))],
+        );
+        let metered = MetricsProvider::new(Box::new(provider));
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         metered.complete(&request).await.expect("call"); // Safe: test assertion
         assert!(metered.report().unwrap().total_cost > 0.0); // Safe: test assertion

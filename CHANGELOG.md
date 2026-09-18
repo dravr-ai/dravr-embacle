@@ -1,5 +1,13 @@
 # Changelog
 
+### Changed
+
+- `openai-api` now implies `http-api` and `OpenAiApiRunner` maps statuses through the shared `http_api::client::map_http_error`: a 429 is `ErrorKind::RateLimit` (it was `ExternalService`, so it was retried in place and fell through a chain; now it propagates so a caller routes around the quota), and a 400/422 is the new `ErrorKind::InvalidRequest` (it was `ExternalService`). `embacle-server` answers `InvalidRequest` with HTTP 400 `invalid_request_error`.
+- `ErrorKind` gains `InvalidRequest`; an exhaustive `match` on it needs a new arm.
+- `MetricsProvider` prices every call through `embacle::pricing`, keyed on the wrapped provider's `name()`; `TokenPricing`, `PricingTable`, `default_pricing_table`, `with_pricing` and `with_default_pricing` are removed.
+- `FallbackProvider::health_check` returns the last tier's outcome verbatim when no tier is healthy, instead of collapsing an `Err` into `Ok(false)`.
+- The shared SSE stream always ends with exactly one final chunk, synthesising a `stop` when the byte stream closes without one.
+
 ## [0.27.0] — 2026-09-18
 
 ### Added

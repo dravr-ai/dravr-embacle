@@ -57,34 +57,35 @@ echo "✅"
 echo ""
 
 # ============================================================================
-# TIER 2: Clippy (copilot-headless feature)
+# TIER 2: Clippy (copilot-headless, http-api, openai-api features)
 # ============================================================================
-echo "📎 Tier 2: Clippy (copilot-headless feature)"
+FEATURES="copilot-headless,copilot-sdk,web-ui,http-api,openai-api"
+echo "📎 Tier 2: Clippy (--features $FEATURES)"
 echo "---------------------------------------------"
-echo -n "Running clippy --features copilot-headless... "
+echo -n "Running clippy --features $FEATURES... "
 
-if cargo clippy --all-targets --features copilot-headless --quiet 2>&1 | grep -q "^error"; then
+if cargo clippy --all-targets --features "$FEATURES" --quiet 2>&1 | grep -q "^error"; then
     echo "❌"
     echo ""
-    cargo clippy --all-targets --features copilot-headless 2>&1 | head -40
+    cargo clippy --all-targets --features "$FEATURES" 2>&1 | head -40
     exit 1
 fi
 echo "✅"
 echo ""
 
 # ============================================================================
-# TIER 3: Tests (all features)
+# TIER 3: Tests (the same feature set CI's HTTP API step runs)
 # ============================================================================
 echo "🧪 Tier 3: Tests"
 echo "-----------------"
-echo -n "Running cargo test --lib --features copilot-headless... "
+echo -n "Running cargo test --workspace --features $FEATURES... "
 
-if cargo test --lib --features copilot-headless --quiet 2>&1; then
+if cargo test --workspace --features "$FEATURES" --quiet 2>&1; then
     echo "✅"
 else
     echo "❌"
     echo ""
-    echo "Tests failed. Run: cargo test --lib --features copilot-headless -- --nocapture"
+    echo "Tests failed. Run: cargo test --workspace --features $FEATURES -- --nocapture"
     exit 1
 fi
 echo ""

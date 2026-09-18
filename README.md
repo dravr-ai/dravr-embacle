@@ -47,6 +47,8 @@ Both modes support all 12 CLI runners, streaming, model routing, and vision. See
 - [Unified Harness Protocol](#unified-harness-protocol-uhp)
 - [MCP Server](#mcp-server-embacle-mcp)
 - [OpenAI API](#openai-api-feature-flag)
+- [HTTP API providers](#http-api-providers-feature-flag)
+- [Fallback chains](#fallback-chains)
 - [Copilot Headless](#copilot-headless-feature-flag)
 - [Vision / Image Support](#vision--image-support)
 - [Docker](#docker)
@@ -107,6 +109,11 @@ embacle = "0.27"
 | Runner | Feature Flag | Features |
 |--------|-------------|----------|
 | OpenAI API | `openai-api` | Any OpenAI-compatible endpoint (OpenAI, Groq, Gemini, Ollama, vLLM), streaming, tool calling, model discovery |
+| Google Gemini | `http-api` | Generative Language API, streaming, function calling, cache-read usage, retries thinking-only answers |
+| Cohere | `http-api` | v2 chat API (Command A / Command R), typed SSE envelope, tool calling, billed-units usage |
+| Groq | `http-api` | OpenAI-shaped chat on LPU inference, streaming, tool calling, 429 wait parsing |
+| OpenRouter | `http-api` | One key for 200+ upstream models, ranking headers, cached and reasoning token usage |
+| OpenAI-compatible (local) | `http-api` | Ollama, vLLM, LocalAI or any self-hosted endpoint, named after the endpoint it targets |
 
 ### ACP Runners (persistent connection)
 
@@ -438,6 +445,60 @@ Works with any OpenAI-compatible endpoint — OpenAI, Groq, Google Gemini, Ollam
 | `OPENAI_API_MODEL` | `gpt-5.4` | Default model for completions |
 | `OPENAI_API_TIMEOUT_SECS` | `300` | HTTP request timeout |
 
+## HTTP API providers (feature flag)
+
+Enable the `http-api` feature for providers that call a vendor's HTTP API directly. Each one implements `LlmProvider`, accepts a caller-owned `reqwest::Client` through `with_client`, and carries tool calls on `ChatRequest::tools` / `ChatResponse::tool_calls`:
+
+```toml
+[dependencies]
+embacle = { version = "0.27", features = ["http-api"] }
+```
+
+```rust
+use embacle::http_api::{GeminiConfig, GeminiProvider};
+use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
+
+#[tokio::main]
+async fn main() -> Result<(), embacle::types::RunnerError> {
+    let provider = GeminiProvider::new(GeminiConfig::from_env()?)?;
+    let request = ChatRequest::new(vec![ChatMessage::user("What is the capital of France?")]);
+    let response = provider.complete(&request).await?;
+    println!("{}", response.content);
+    Ok(())
+}
+```
+
+Each `XConfig::from_env()` reads its own variables; `XConfig::new(api_key)` and the `with_model` / `with_timeout` / `with_retry` builders set them programmatically.
+
+| Provider | `name()` | Required | Optional |
+|----------|----------|----------|----------|
+| `GeminiProvider` | `gemini` | `GEMINI_API_KEY` | `GEMINI_DEFAULT_MODEL` (`gemini-flash-lite-latest`), `GEMINI_MAX_RETRIES`, `GEMINI_INITIAL_RETRY_DELAY_MS`, `GEMINI_MAX_RETRY_DELAY_MS` |
+| `CohereProvider` | `cohere` | `COHERE_API_KEY` | `COHERE_DEFAULT_MODEL` (`command-a-03-2025`), `COHERE_MAX_RETRIES`, `COHERE_INITIAL_RETRY_DELAY_MS`, `COHERE_MAX_RETRY_DELAY_MS` |
+| `GroqProvider` | `groq` | `GROQ_API_KEY` | `GROQ_DEFAULT_MODEL` (`llama-3.3-70b-versatile`), `GROQ_MAX_RETRIES`, `GROQ_INITIAL_RETRY_DELAY_MS`, `GROQ_MAX_RETRY_DELAY_MS` |
+| `OpenRouterProvider` | `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_DEFAULT_MODEL` (`meta-llama/llama-3.3-70b-instruct`), `OPENROUTER_SITE_URL`, `OPENROUTER_APP_TITLE`, `OPENROUTER_MAX_RETRIES`, `OPENROUTER_INITIAL_RETRY_DELAY_MS`, `OPENROUTER_MAX_RETRY_DELAY_MS` |
+| `OpenAiCompatibleProvider` | `ollama` / `vllm` / `localai` / `local` | — | `LOCAL_LLM_BASE_URL` (`http://localhost:11434/v1`), `LOCAL_LLM_MODEL` (`qwen2.5:14b-instruct`), `LOCAL_LLM_API_KEY` |
+
+Every provider maps HTTP statuses the same way (`embacle::http_api::client::map_http_error`): 401/403 → `AuthFailure`, 408/504 → `Timeout`, 429 → `RateLimit` carrying the vendor's wait, 400/422 → `InvalidRequest`, anything else → `ExternalService`. Retries in place on 429/502/503 and on connect/timeout transport errors follow `HttpRetryConfig` (3 retries, 500 ms initial, 5 s cap). Cohere's "no valid response generated" 400/422 is the one vendor exception: a provider fault, so a fallback chain moves on. Every provider's usage is priced by `embacle::pricing`, keyed on its `name()`.
+
+## Fallback chains
+
+`FallbackProvider` asks its tiers in order and returns the first accepted answer. Three policies sit between one tier and the next:
+
+```rust
+use std::sync::Arc;
+use embacle::fallback::{FallbackProvider, ResponsePolicy, FallbackObserver, Tier, Attempt};
+
+let chain = FallbackProvider::new(vec![primary, secondary, tertiary])?
+    .with_fallthrough(ResponsePolicy::strict())
+    .with_observer(Arc::new(MyBreaker::default()));
+```
+
+- **Retry in place** — `with_retry(RetryConfig)` re-asks the same tier with backoff while the error is transient (`ErrorKind::is_transient`).
+- **Fall through** — `ResponsePolicy::strict()` moves to the next tier only on a provider fault (`ErrorKind::is_provider_fault`: timeout, upstream failure, auth failure, missing binary, unavailable model, internal fault); a malformed request, a guardrail refusal or a quota refusal propagates so the caller sees the real diagnostic. It also treats an `Ok` with blank content and no tool call as a failed tier, and clears `request.model` before the next tier so each provider resolves its own configured model. `ResponsePolicy::permissive()` (the default) moves on every error and accepts every `Ok`.
+- **Observe** — a `FallbackObserver` sees every hop: `before_attempt` can veto a tier (`Attempt::Skip("reason")`, consulted only while a later tier exists), `on_fallthrough` names the tier passed over and why (`Skipped`, `EmptyCompletion`, `Error`), `on_success` names the tier that answered, `on_exhausted` carries the last error. Callbacks run synchronously on the calling task, so the caller's tracing span is live inside them — the seam for a circuit breaker that lives outside the chain.
+
+`health_check` is `Ok(true)` as soon as any tier is healthy; otherwise the last tier's outcome is returned verbatim. `RouterProvider` is the deliberate sibling: it routes proactively on quota readings, where the chain reacts to outcomes, and the two compose.
+
 ## AG-UI Progress Events (feature flag)
 
 Enable the `agui` feature to expose the
@@ -750,8 +811,13 @@ Your Application
             │   ├── KiroCliRunner       → spawns `kiro-cli send "prompt"`
             │   └── KiloCliRunner       → spawns `kilo run --auto --format json`
             │
-            ├── HTTP API Runners (behind feature flag)
-            │   └── OpenAiApiRunner       → reqwest to any OpenAI-compatible endpoint
+            ├── HTTP API Runners (behind feature flags)
+            │   ├── OpenAiApiRunner       → reqwest to any OpenAI-compatible endpoint
+            │   ├── GeminiProvider        → Google Generative Language API
+            │   ├── CohereProvider        → Cohere v2 chat
+            │   ├── GroqProvider          → Groq (OpenAI-shaped)
+            │   ├── OpenRouterProvider    → OpenRouter gateway
+            │   └── OpenAiCompatibleProvider → Ollama / vLLM / LocalAI / any local endpoint
             │
             ├── ACP Runners (persistent connection, behind feature flag)
             │   └── CopilotHeadlessRunner → NDJSON/JSON-RPC to `copilot --acp`
@@ -760,8 +826,8 @@ Your Application
             │   └── WebUiRunner           → drives the Claude.ai web UI via dravr-browser
             │
             ├── Provider Decorators (composable wrappers)
-            │   ├── FallbackProvider    → ordered chain with retry and exponential backoff
-            │   ├── MetricsProvider     → latency, token, and cost tracking
+            │   ├── FallbackProvider    → ordered chain: retry in place, fall through on provider fault, observe every hop
+            │   ├── MetricsProvider     → latency, token, and cost tracking (priced by embacle::pricing)
             │   ├── QualityGateProvider → response validation with retry
             │   ├── GuardrailProvider   → pluggable pre/post request validation
             │   └── CacheProvider       → response caching with TTL and capacity

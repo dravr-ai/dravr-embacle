@@ -73,6 +73,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      # The HTTP providers, the OpenAI runner and the price-key check are
+      # feature-gated: without this step their tests are only type-checked by
+      # the --all-features clippy lane and never execute. The price-key check
+      # asks every runner for its name, so it needs every runner feature. No
+      # secrets — the live cases in these files are env-gated and skip.
+      - name: HTTP API provider tests
+        run: cargo test --workspace --features http-api,openai-api,copilot-headless,copilot-sdk,web-ui
       - name: Install Copilot CLI
         if: env.HAS_COPILOT_TOKEN == 'true'
         run: |
@@ -142,9 +149,9 @@ jobs:
   # `--dry-run` builds the package tarball and runs the same verification
   # crates.io does without uploading or needing a token.
   #
-  # All three crates are published in ONE invocation: embacle-mcp/-server
-  # depend on `embacle = "<this version>"`, which is not on crates.io until
-  # release time. A per-crate dry-run resolves those deps against the registry
+  # All four crates are published in ONE invocation: embacle-mcp/-server/
+  # -tool-host depend on `embacle = "<this version>"`, which is not on
+  # crates.io until release time. A per-crate dry-run resolves those deps against the registry
   # and fails ("failed to select a version for the requirement `embacle`").
   # A workspace co-publish makes cargo treat the to-be-published sibling
   # versions as available and resolve them locally in dependency order.
@@ -157,4 +164,4 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo publish -p embacle -p embacle-mcp -p embacle-server --dry-run
+      - run: cargo publish -p embacle -p embacle-mcp -p embacle-server -p embacle-tool-host --dry-run

@@ -1,5 +1,5 @@
 // ABOUTME: Provider fallback chains that try multiple LlmProviders in order
-// ABOUTME: Returns the first successful response or the last error encountered
+// ABOUTME: Retry in place, fall through on the provider's fault, reject an empty answer, observe every hop
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -7,16 +7,44 @@
 //! # Provider Fallback Chains
 //!
 //! [`FallbackProvider`] wraps multiple `Box<dyn LlmProvider>` instances and
-//! tries them in order for each request. The first successful response is
-//! returned; if all providers fail, the last error is propagated.
+//! asks them in order for each request. The first accepted response is
+//! returned; if every tier fails, the last error is propagated.
 //!
-//! Optional per-provider retry with exponential backoff can be configured
-//! via [`RetryConfig`] and [`FallbackProvider::with_retry()`]. Retries
-//! are only attempted for transient errors (see [`ErrorKind::is_transient()`]).
+//! Three policies decide what happens between one tier and the next:
 //!
-//! Health checks pass if ANY provider is healthy. Capabilities are the
-//! bitwise OR of all inner providers.
+//! - **Retry in place** — [`RetryConfig`] via [`FallbackProvider::with_retry()`]
+//!   re-asks the *same* tier after exponential backoff while the error is
+//!   transient (see [`ErrorKind::is_transient()`]).
+//! - **Fall through** — [`ResponsePolicy`] via
+//!   [`FallbackProvider::with_fallthrough()`] decides which errors move the
+//!   request to the *next* tier. The default, [`FallThrough::Always`], moves on
+//!   every error; [`FallThrough::ProviderFault`] moves only when the provider,
+//!   not the request, failed (see [`ErrorKind::is_provider_fault()`]), so a
+//!   malformed request surfaces its own diagnostic instead of the next
+//!   provider's version of the same rejection.
+//! - **Reject** — the same policy can treat an `Ok` that carries nothing
+//!   deliverable (blank content, no tool call) as a failed tier, and can clear
+//!   `request.model` before the next tier so each provider resolves its own
+//!   configured model instead of the first tier's namespace.
+//!
+//! A [`FallbackObserver`] attached with [`FallbackProvider::with_observer()`]
+//! sees every hop — and can veto a tier before it is asked, which is how a
+//! circuit breaker that lives outside the chain steers it. Every callback runs
+//! synchronously on the calling task, so the caller's tracing span is live
+//! inside each one.
+//!
+//! Health checks pass if ANY provider is healthy; otherwise the last tier's
+//! outcome is returned verbatim, so an `Err` from the final tier reaches the
+//! caller with its diagnostic intact. Capabilities are the bitwise OR of all
+//! inner providers.
+//!
+//! [`RouterProvider`](crate::router::RouterProvider) is the deliberate
+//! sibling: it routes *proactively* on quota readings, where this chain reacts
+//! to outcomes. The two compose.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,7 +52,7 @@ use tokio::time;
 use tracing::warn;
 
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider, RunnerError,
 };
 
 /// Configuration for per-provider retry with exponential backoff
@@ -48,6 +76,153 @@ impl Default for RetryConfig {
     }
 }
 
+/// Which errors move a request to the next tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FallThrough {
+    /// Every error moves on. The default.
+    #[default]
+    Always,
+    /// Only a provider fault moves on ([`ErrorKind::is_provider_fault`]); a
+    /// deterministic rejection propagates so the caller sees the real
+    /// diagnostic.
+    ProviderFault,
+}
+
+impl FallThrough {
+    /// Whether an error of this kind moves the request to the next tier.
+    #[must_use]
+    pub const fn allows(self, kind: ErrorKind) -> bool {
+        match self {
+            Self::Always => true,
+            Self::ProviderFault => kind.is_provider_fault(),
+        }
+    }
+}
+
+/// What the chain does with one tier's outcome before asking the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResponsePolicy {
+    /// Which errors move the request on.
+    pub fall_through: FallThrough,
+    /// An `Ok` whose content is blank and carries no tool call is treated as
+    /// a failed tier ([`FallthroughReason::EmptyCompletion`]). An empty answer
+    /// from the last tier is still returned as `Ok` — there is nobody left to
+    /// ask.
+    pub reject_empty_completion: bool,
+    /// Clear `request.model` before the next tier so it resolves its own
+    /// configured model instead of the first tier's namespace.
+    pub own_model_per_tier: bool,
+}
+
+impl ResponsePolicy {
+    /// Fall through on every error, accept every `Ok`, forward the request
+    /// untouched. Equal to `Default`.
+    #[must_use]
+    pub const fn permissive() -> Self {
+        Self {
+            fall_through: FallThrough::Always,
+            reject_empty_completion: false,
+            own_model_per_tier: false,
+        }
+    }
+
+    /// Fall through only on a provider fault, reject an empty completion, and
+    /// give every tier its own model.
+    #[must_use]
+    pub const fn strict() -> Self {
+        Self {
+            fall_through: FallThrough::ProviderFault,
+            reject_empty_completion: true,
+            own_model_per_tier: true,
+        }
+    }
+}
+
+/// `true` when a completion carries nothing the caller can deliver.
+///
+/// Blank means `content.trim().is_empty()` — every surface trims before
+/// rendering, so three spaces reach the reader as nothing at all — and no
+/// non-empty `tool_calls`. `Some(vec![])` reads as none: providers disagree on
+/// which they send, and a model that calls a tool instead of speaking returns
+/// empty content by design, which must NOT count as empty.
+#[must_use]
+pub fn is_empty_completion(response: &ChatResponse) -> bool {
+    let has_tool_calls = response
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty());
+    response.content.trim().is_empty() && !has_tool_calls
+}
+
+/// One tier of the chain, as the observer sees it.
+#[derive(Clone, Copy)]
+pub struct Tier<'a> {
+    /// Zero-based position in the chain; `0` is the primary.
+    pub position: usize,
+    /// The provider at that position.
+    pub provider: &'a dyn LlmProvider,
+}
+
+/// Why a tier was passed over.
+pub enum FallthroughReason<'a> {
+    /// [`FallbackObserver::before_attempt`] vetoed the tier; the observer's
+    /// own reason string.
+    Skipped(&'static str),
+    /// An `Ok` that carried nothing deliverable.
+    EmptyCompletion,
+    /// An error the [`FallThrough`] policy classified as the provider's fault.
+    Error(&'a RunnerError),
+}
+
+/// The observer's answer to "may this tier be asked?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    /// Ask it.
+    Try,
+    /// Pass it over, for this reason.
+    Skip(&'static str),
+}
+
+/// Per-attempt visibility, plus the one veto a breaker that lives outside
+/// the chain needs.
+///
+/// Every method is called synchronously on the calling task, never spawned,
+/// so the caller's tracing span is live inside each callback. Each has a
+/// no-op default, so an observer implements only the hops it cares about.
+pub trait FallbackObserver: Send + Sync {
+    /// Consulted only when a later tier exists — the last tier is always
+    /// asked.
+    fn before_attempt(&self, tier: Tier<'_>) -> Attempt {
+        let _ = tier;
+        Attempt::Try
+    }
+
+    /// `from` was passed over for `reason`; `to` is the tier asked next.
+    fn on_fallthrough(&self, from: Tier<'_>, to: Tier<'_>, reason: FallthroughReason<'_>) {
+        let _ = (from, to, reason);
+    }
+
+    /// A tier's `complete()` returned an accepted response, or its stream
+    /// opened.
+    fn on_success(&self, tier: Tier<'_>) {
+        let _ = tier;
+    }
+
+    /// The last tier failed too; `error` is what `complete()` returns.
+    fn on_exhausted(&self, last: Tier<'_>, error: &RunnerError) {
+        let _ = (last, error);
+    }
+}
+
+/// One tier's call, boxed so the driver can run `complete` and
+/// `complete_stream` through the same loop.
+type TierCall<'r, T> = Pin<Box<dyn Future<Output = Result<T, RunnerError>> + Send + 'r>>;
+
+/// A provider method the driver can call on any tier with any request
+/// borrow: `complete` or `complete_stream`, boxed.
+type TierMethod<'m, T> =
+    &'m (dyn for<'r> Fn(&'r dyn LlmProvider, &'r ChatRequest) -> TierCall<'r, T> + Sync);
+
 /// Provider that tries multiple inner providers in order, returning the first success.
 ///
 /// # Construction
@@ -56,18 +231,25 @@ impl Default for RetryConfig {
 /// An empty vec is rejected with a config error.
 ///
 /// Use [`FallbackProvider::with_retry()`] to enable per-provider retry
-/// with exponential backoff on transient errors.
+/// with exponential backoff on transient errors,
+/// [`FallbackProvider::with_fallthrough()`] to choose what moves a request
+/// on, and [`FallbackProvider::with_observer()`] to watch every hop.
 pub struct FallbackProvider {
     providers: Vec<Box<dyn LlmProvider>>,
     display_name: String,
     combined_models: Vec<String>,
     retry_config: RetryConfig,
+    policy: ResponsePolicy,
+    /// Shared with whoever else holds the breaker or the metrics the observer
+    /// writes to; the chain only reads through it.
+    observer: Option<Arc<dyn FallbackObserver>>,
 }
 
 impl FallbackProvider {
     /// Create a fallback chain from a non-empty list of providers.
     ///
-    /// No retries are attempted (equivalent to `max_retries = 0`).
+    /// No retries are attempted (equivalent to `max_retries = 0`), every
+    /// error falls through, every `Ok` is accepted.
     ///
     /// # Errors
     ///
@@ -113,7 +295,23 @@ impl FallbackProvider {
             display_name,
             combined_models,
             retry_config,
+            policy: ResponsePolicy::permissive(),
+            observer: None,
         })
+    }
+
+    /// Choose what moves a request from one tier to the next.
+    #[must_use]
+    pub const fn with_fallthrough(mut self, policy: ResponsePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Watch every hop, and veto a tier before it is asked.
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn FallbackObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Compute the backoff delay for a given attempt (0-indexed)
@@ -123,6 +321,164 @@ impl FallbackProvider {
             .base_delay
             .saturating_mul(2u32.saturating_pow(attempt));
         delay.min(self.retry_config.max_delay)
+    }
+
+    fn tier(&self, position: usize) -> Tier<'_> {
+        Tier {
+            position,
+            provider: self.providers[position].as_ref(),
+        }
+    }
+
+    /// Ask the observer whether this tier may be asked; `Try` when there is
+    /// no observer.
+    fn before_attempt(&self, tier: Tier<'_>) -> Attempt {
+        self.observer
+            .as_ref()
+            .map_or(Attempt::Try, |o| o.before_attempt(tier))
+    }
+
+    fn on_fallthrough(&self, from: Tier<'_>, to: Tier<'_>, reason: FallthroughReason<'_>) {
+        if let Some(observer) = &self.observer {
+            observer.on_fallthrough(from, to, reason);
+        }
+    }
+
+    fn on_success(&self, tier: Tier<'_>) {
+        if let Some(observer) = &self.observer {
+            observer.on_success(tier);
+        }
+    }
+
+    fn on_exhausted(&self, last: Tier<'_>, error: &RunnerError) {
+        if let Some(observer) = &self.observer {
+            observer.on_exhausted(last, error);
+        }
+    }
+
+    /// The request the next tier sees: the original, or a copy with `model`
+    /// cleared once the policy asks for it. Made at the first hop and reused.
+    fn forwarded<'r>(&self, original: &'r ChatRequest, held: &'r mut Option<ChatRequest>) {
+        if self.policy.own_model_per_tier && held.is_none() {
+            let mut cleared = original.clone();
+            cleared.model = None;
+            *held = Some(cleared);
+        }
+    }
+
+    /// Ask one tier, retrying in place while the error is transient and the
+    /// retry budget allows.
+    async fn attempt<T>(
+        &self,
+        tier: Tier<'_>,
+        request: &ChatRequest,
+        call: TierMethod<'_, T>,
+    ) -> Result<T, RunnerError> {
+        let mut attempt = 0;
+        loop {
+            match call(tier.provider, request).await {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    let retryable =
+                        err.kind.is_transient() && attempt < self.retry_config.max_retries;
+                    if !retryable {
+                        return Err(err);
+                    }
+                    let delay = self.backoff_delay(attempt);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let delay_ms = delay.as_millis() as u64;
+                    warn!(
+                        provider = tier.provider.name(),
+                        attempt,
+                        error = %err,
+                        delay_ms,
+                        "fallback: transient error, retrying after backoff"
+                    );
+                    time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Walk the tiers. `reject` says whether an `Ok` counts as a failed tier
+    /// (only consulted while a later tier exists); `call` is the provider
+    /// method being driven.
+    async fn drive<T>(
+        &self,
+        request: &ChatRequest,
+        reject: impl Fn(&T) -> bool + Send + Sync,
+        call: TierMethod<'_, T>,
+    ) -> Result<T, RunnerError> {
+        let last = self.providers.len().saturating_sub(1);
+        let mut held: Option<ChatRequest> = None;
+
+        for position in 0..self.providers.len() {
+            let tier = self.tier(position);
+            let has_successor = position < last;
+
+            if has_successor {
+                if let Attempt::Skip(reason) = self.before_attempt(tier) {
+                    self.on_fallthrough(
+                        tier,
+                        self.tier(position + 1),
+                        FallthroughReason::Skipped(reason),
+                    );
+                    self.forwarded(request, &mut held);
+                    continue;
+                }
+            }
+
+            let current: &ChatRequest = held.as_ref().unwrap_or(request);
+            // The borrow of `held` ends with the call; a later hop may rewrite it.
+            let outcome = self.attempt(tier, current, call).await;
+
+            match outcome {
+                Ok(value) if has_successor && reject(&value) => {
+                    warn!(
+                        provider = tier.provider.name(),
+                        "fallback: provider answered with nothing deliverable, trying next"
+                    );
+                    self.on_fallthrough(
+                        tier,
+                        self.tier(position + 1),
+                        FallthroughReason::EmptyCompletion,
+                    );
+                    self.forwarded(request, &mut held);
+                }
+                Ok(value) => {
+                    self.on_success(tier);
+                    return Ok(value);
+                }
+                Err(err) if !self.policy.fall_through.allows(err.kind) => {
+                    return Err(err);
+                }
+                Err(err) if has_successor => {
+                    warn!(
+                        provider = tier.provider.name(),
+                        error = %err,
+                        "fallback: provider failed, trying next"
+                    );
+                    self.on_fallthrough(
+                        tier,
+                        self.tier(position + 1),
+                        FallthroughReason::Error(&err),
+                    );
+                    self.forwarded(request, &mut held);
+                }
+                Err(err) => {
+                    warn!(
+                        provider = tier.provider.name(),
+                        error = %err,
+                        "fallback: last provider failed, chain exhausted"
+                    );
+                    self.on_exhausted(tier, &err);
+                    return Err(err);
+                }
+            }
+        }
+
+        Err(RunnerError::internal("no providers configured"))
     }
 }
 
@@ -151,90 +507,36 @@ impl LlmProvider for FallbackProvider {
     }
 
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let mut last_error = RunnerError::internal("no providers configured");
-
-        for provider in &self.providers {
-            for attempt in 0..=self.retry_config.max_retries {
-                match provider.complete(request).await {
-                    Ok(response) => return Ok(response),
-                    Err(err) => {
-                        let is_retryable =
-                            err.kind.is_transient() && attempt < self.retry_config.max_retries;
-                        if is_retryable {
-                            let delay = self.backoff_delay(attempt);
-                            #[allow(clippy::cast_possible_truncation)]
-                            let delay_ms = delay.as_millis() as u64;
-                            warn!(
-                                provider = provider.name(),
-                                attempt,
-                                error = %err,
-                                delay_ms,
-                                "fallback: transient error, retrying after backoff"
-                            );
-                            time::sleep(delay).await;
-                        } else {
-                            warn!(
-                                provider = provider.name(),
-                                error = %err,
-                                "fallback: provider failed, trying next"
-                            );
-                            last_error = err;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_error)
+        let reject_empty = self.policy.reject_empty_completion;
+        self.drive(
+            request,
+            move |response: &ChatResponse| reject_empty && is_empty_completion(response),
+            &|provider, request| Box::pin(provider.complete(request)),
+        )
+        .await
     }
 
+    /// An opened stream is a success; its bytes are not inspected for
+    /// emptiness, so the empty-completion rule does not apply here.
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
-        let mut last_error = RunnerError::internal("no providers configured");
-
-        for provider in &self.providers {
-            for attempt in 0..=self.retry_config.max_retries {
-                match provider.complete_stream(request).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(err) => {
-                        let is_retryable =
-                            err.kind.is_transient() && attempt < self.retry_config.max_retries;
-                        if is_retryable {
-                            let delay = self.backoff_delay(attempt);
-                            #[allow(clippy::cast_possible_truncation)]
-                            let delay_ms = delay.as_millis() as u64;
-                            warn!(
-                                provider = provider.name(),
-                                attempt,
-                                error = %err,
-                                delay_ms,
-                                "fallback: transient stream error, retrying after backoff"
-                            );
-                            time::sleep(delay).await;
-                        } else {
-                            warn!(
-                                provider = provider.name(),
-                                error = %err,
-                                "fallback: provider stream failed, trying next"
-                            );
-                            last_error = err;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_error)
+        self.drive(request, |_: &ChatStream| false, &|provider, request| {
+            Box::pin(provider.complete_stream(request))
+        })
+        .await
     }
 
+    /// `Ok(true)` as soon as any tier is healthy; otherwise the last tier's
+    /// outcome, verbatim — an `Err` there keeps its diagnostic.
     async fn health_check(&self) -> Result<bool, RunnerError> {
+        let mut last = Ok(false);
         for provider in &self.providers {
-            if matches!(provider.health_check().await, Ok(true)) {
+            let outcome = provider.health_check().await;
+            if matches!(outcome, Ok(true)) {
                 return Ok(true);
             }
+            last = outcome;
         }
-        Ok(false)
+        last
     }
 }
 
@@ -256,7 +558,7 @@ mod tests {
         models: Vec<String>,
         responses: Mutex<Vec<Result<ChatResponse, RunnerError>>>,
         call_count: AtomicU32,
-        healthy: bool,
+        health: Result<bool, RunnerError>,
     }
 
     impl TestProvider {
@@ -275,7 +577,7 @@ mod tests {
                     tool_calls: None,
                 })]),
                 call_count: AtomicU32::new(0),
-                healthy: true,
+                health: Ok(true),
             }
         }
 
@@ -295,7 +597,21 @@ mod tests {
                 models: vec![format!("{name}-model")],
                 responses: Mutex::new(vec![Err(err)]),
                 call_count: AtomicU32::new(0),
-                healthy: false,
+                health: Ok(false),
+            }
+        }
+
+        /// A tier whose health probe itself errors — a rejected credential,
+        /// a dead endpoint — rather than answering `false`.
+        fn health_erroring(name: &'static str, err: RunnerError) -> Self {
+            Self {
+                provider_name: name,
+                display: name,
+                caps: LlmCapabilities::text_only(),
+                models: vec![format!("{name}-model")],
+                responses: Mutex::new(vec![]),
+                call_count: AtomicU32::new(0),
+                health: Err(err),
             }
         }
 
@@ -310,7 +626,7 @@ mod tests {
                 models: vec![format!("{name}-model")],
                 responses: Mutex::new(responses),
                 call_count: AtomicU32::new(0),
-                healthy: true,
+                health: Ok(true),
             }
         }
     }
@@ -367,7 +683,7 @@ mod tests {
             }
         }
         async fn health_check(&self) -> Result<bool, RunnerError> {
-            Ok(self.healthy)
+            self.health.clone()
         }
     }
 
@@ -439,6 +755,63 @@ mod tests {
         assert!(!healthy);
     }
 
+    /// When no tier is healthy, the last tier's own outcome comes back
+    /// verbatim — an `Err` keeps the diagnostic a caller's health probe logs,
+    /// instead of collapsing into an `Ok(false)` that says nothing.
+    #[tokio::test]
+    async fn health_check_returns_the_last_tiers_error_when_none_is_healthy() {
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(TestProvider::failing("a")),
+            Box::new(TestProvider::health_erroring(
+                "b",
+                RunnerError::auth_failure("b: invalid api token"),
+            )),
+        ];
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
+
+        let err = fallback
+            .health_check()
+            .await
+            .expect_err("the last tier's probe error must propagate");
+        assert_eq!(err.kind, ErrorKind::AuthFailure);
+        assert!(err.message.contains("invalid api token"), "{err}");
+    }
+
+    /// The rule is "the last tier's outcome", not "any error": an earlier
+    /// tier's probe error is superseded by a later `Ok(false)`.
+    #[tokio::test]
+    async fn health_check_last_tier_unhealthy_outranks_an_earlier_error() {
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(TestProvider::health_erroring(
+                "a",
+                RunnerError::timeout("a: probe timed out"),
+            )),
+            Box::new(TestProvider::failing("b")),
+        ];
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
+
+        let healthy = fallback
+            .health_check()
+            .await
+            .expect("Ok(false), not the earlier error"); // Safe: test assertion
+        assert!(!healthy);
+    }
+
+    /// A healthy tier anywhere short-circuits, even after an erroring probe.
+    #[tokio::test]
+    async fn health_check_any_healthy_tier_wins_over_an_error() {
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(TestProvider::health_erroring(
+                "a",
+                RunnerError::auth_failure("a: down"),
+            )),
+            Box::new(TestProvider::ok("b", "ok")),
+        ];
+        let fallback = FallbackProvider::new(providers).expect("non-empty"); // Safe: test assertion
+
+        assert!(fallback.health_check().await.expect("healthy")); // Safe: test assertion
+    }
+
     #[test]
     fn capabilities_union() {
         let providers: Vec<Box<dyn LlmProvider>> = vec![
@@ -470,7 +843,7 @@ mod tests {
             models: vec!["shared-model".to_owned(), "a-only".to_owned()],
             responses: Mutex::new(vec![]),
             call_count: AtomicU32::new(0),
-            healthy: true,
+            health: Ok(true),
         };
         let b = TestProvider {
             provider_name: "b",
@@ -479,7 +852,7 @@ mod tests {
             models: vec!["shared-model".to_owned(), "b-only".to_owned()],
             responses: Mutex::new(vec![]),
             call_count: AtomicU32::new(0),
-            healthy: true,
+            health: Ok(true),
         };
 
         let providers: Vec<Box<dyn LlmProvider>> = vec![Box::new(a), Box::new(b)];
