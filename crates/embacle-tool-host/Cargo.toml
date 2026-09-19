@@ -1,4 +1,4 @@
-# ABOUTME: Loopback MCP endpoint serving a caller-supplied tool surface to an ACP agent
+# ABOUTME: Loopback MCP endpoint serving a caller-supplied tool surface to the Copilot runtime
 # ABOUTME: Separate crate so the published root keeps its "no HTTP dependencies in core" rule
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -9,10 +9,10 @@ name = "embacle-tool-host"
 version = "0.28.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Host your own tools to an ACP agent over a loopback MCP endpoint"
+description = "Host your own tools to the Copilot SDK runtime over a loopback MCP endpoint"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 readme = "README.md"
-keywords = ["mcp", "acp", "llm", "tools"]
+keywords = ["mcp", "copilot", "llm", "tools"]
 categories = ["development-tools"]
 
 [dependencies]
@@ -28,9 +28,8 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-# The live example drives a real `copilot --acp` and the live test the SDK
-# runtime; the unit tests need neither.
-embacle = { path = "../..", version = "0.28.0", features = ["copilot-headless", "copilot-sdk"] }
+# The live test drives the SDK runtime; the unit tests need no runner feature.
+embacle = { path = "../..", version = "0.28.0", features = ["copilot-sdk"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1.45", features = ["full", "test-util"] }

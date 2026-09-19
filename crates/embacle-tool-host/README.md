@@ -1,29 +1,29 @@
 # embacle-tool-host
 
-Host **your own tools** to an ACP agent over a loopback MCP endpoint.
+Host **your own tools** to the Copilot runtime over a loopback MCP endpoint.
 
 ## Why
 
-An ACP agent such as `copilot --acp` runs its own tool loop inside its own
-subprocess. It never asks its caller to execute a tool — it executes them itself
-and reports afterwards, and that report carries no tool name: ACP's
-`session/update` notification has `toolCallId`, `title`, `kind` and `status`, and
-nothing identifying which tool ran.
+The Copilot runtime behind `CopilotSdkRunner` runs its own tool loop inside its
+own process. It never asks its caller to execute a tool — it executes them
+itself and reports afterwards — and a tool it knows only from prose in the
+prompt is not in its toolset, so the model disowns it.
 
-So a caller that wants the agent to use *its* tools has one channel: declare an
-MCP server in `session/new`. The agent then speaks MCP to it, and `tools/call`
-carries the name and arguments in full fidelity.
+So a caller that wants the runtime to use *its* tools has one channel: register
+an MCP server on the turn's session (`ChatRequest::mcp_servers`). The runtime
+then speaks MCP to it, and `tools/call` carries the name and arguments in full
+fidelity.
 
-That channel cannot be an in-process callback. With stdio the agent forks the
+That channel cannot be an in-process callback. With stdio the runtime forks the
 server itself, so it is a grandchild process in another address space, and the
-ACP frame carries only `command`/`args`/`env` — no socket, no file descriptor,
-no back-channel. Reaching a caller's `McpToolExecutor` needs a real listener.
-Loopback HTTP is the smallest one that works.
+registration carries only `command`/`args`/`env` — no socket, no file
+descriptor, no back-channel. Reaching a caller's `McpToolExecutor` needs a real
+listener. Loopback HTTP is the smallest one that works.
 
 This crate is separate from `embacle` because the root crate holds the line
 "No HTTP dependencies in core", and its `ffi` feature ships a `staticlib`
-compiled `panic = "abort"`. Consumers that enable `copilot-headless` without
-hosting tools pay nothing for this.
+compiled `panic = "abort"`. Consumers that enable `copilot-sdk` without hosting
+tools pay nothing for this.
 
 ## Use
 

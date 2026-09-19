@@ -69,7 +69,8 @@ pub struct CopilotRunner {
 /// Render `mcp_servers` in the Copilot CLI's `--additional-mcp-config` shape.
 ///
 /// The CLI keys servers by name in an object and takes headers as a map, where
-/// ACP takes an array of `{name, value}`. Same information, different spelling.
+/// [`McpServerConfig`] carries an array of `{name, value}`. Same information,
+/// different spelling.
 fn mcp_config_json(servers: &[McpServerConfig]) -> String {
     fn headers_to_map(headers: &[McpHeader]) -> Value {
         let mut map = serde_json::Map::new();

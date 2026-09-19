@@ -588,11 +588,10 @@ pub struct McpHeader {
     pub value: String,
 }
 
-/// Transport an ACP-managed agent uses to reach an [`McpServerConfig`].
+/// Transport the Copilot runtime uses to reach an [`McpServerConfig`].
 ///
-/// Mirrors the transports in the Agent Client Protocol `McpServer` schema.
-/// `Stdio` is mandatory for all ACP agents; `Http`/`Sse` are available only
-/// when the agent advertises the matching `mcpCapabilities` at initialize.
+/// The three shapes the runtime's MCP client accepts: a streamable-HTTP or
+/// SSE endpoint it connects to, or a stdio server it spawns itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum McpTransport {
     /// Streamable HTTP transport.
@@ -620,11 +619,12 @@ pub enum McpTransport {
     },
 }
 
-/// An MCP server an ACP-managed provider (Copilot Headless) should connect to,
-/// exposing its tools to the model for native tool calling.
+/// An MCP server a Copilot provider should connect to, exposing its tools to
+/// the model for native tool calling.
 ///
-/// Providers without SDK tool calling ignore this; only the ACP `converse()`
-/// path forwards it into `session/new`.
+/// The Copilot SDK runner registers it on the turn's session and the Copilot
+/// CLI runner passes it as `--additional-mcp-config`; providers without MCP
+/// tool calling ignore it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Human-readable identifier for the server.
@@ -677,11 +677,12 @@ pub struct ChatRequest {
     /// never generate it themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<ConversationTurnId>,
-    /// MCP servers an ACP-managed provider should expose to the model for
-    /// native tool calling.
+    /// MCP servers a Copilot provider should expose to the model for native
+    /// tool calling.
     ///
-    /// Only the Copilot Headless `converse()` path forwards these into the ACP
-    /// `session/new` request; providers without SDK tool calling ignore them.
+    /// The Copilot SDK runner registers them on the turn's session and the
+    /// Copilot CLI runner passes them as `--additional-mcp-config`; providers
+    /// without MCP tool calling ignore them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -706,7 +707,7 @@ impl ChatRequest {
         }
     }
 
-    /// Set the MCP servers an ACP-managed provider exposes to the model.
+    /// Set the MCP servers a Copilot provider exposes to the model.
     #[must_use]
     pub fn with_mcp_servers(mut self, mcp_servers: Vec<McpServerConfig>) -> Self {
         self.mcp_servers = mcp_servers;
@@ -941,7 +942,7 @@ pub trait LlmProvider: Send + Sync {
 /// A shared provider is a provider.
 ///
 /// Lets an `Arc<T>` be boxed as a `dyn LlmProvider` tier — a fallback chain
-/// can hold the same runner a caller keeps a handle to (for its ACP session,
+/// can hold the same runner a caller keeps a handle to (for its turn API,
 /// its router state) without a wrapper type whose only job is to forward
 /// eight methods.
 #[async_trait]

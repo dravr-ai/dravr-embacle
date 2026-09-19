@@ -1,26 +1,26 @@
-// ABOUTME: Loopback MCP endpoint serving a CALLER-SUPPLIED tool surface to an ACP agent
+// ABOUTME: Loopback MCP endpoint serving a CALLER-SUPPLIED tool surface to the Copilot runtime
 // ABOUTME: One listener per process, one revocable session per turn, bearer dies with the guard
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-//! Host your own tools to an ACP agent.
+//! Host your own tools to the Copilot runtime.
 //!
 //! # Why this exists
 //!
-//! An ACP agent such as `copilot --acp` runs its own tool loop inside its own
-//! subprocess. It never asks its caller to execute a tool; it executes them
-//! itself and reports afterwards, and the report carries no tool name — ACP's
-//! `session/update` notification has `toolCallId`, `title`, `kind` and `status`,
-//! and nothing that identifies which tool ran.
+//! The Copilot runtime behind `CopilotSdkRunner` runs its own tool loop
+//! inside its own process. It never asks its caller to execute a tool; it
+//! executes them itself and reports afterwards. A tool the runtime knows only
+//! from prose in the prompt is not in its toolset, so the model disowns it.
 //!
-//! So a caller that wants the agent to use ITS tools has exactly one channel:
-//! declare an MCP server in `session/new`. The agent then speaks MCP to that
-//! server, and `tools/call` carries the name and the arguments in full fidelity.
+//! So a caller that wants the runtime to use ITS tools has exactly one
+//! channel: register an MCP server on the turn's session (`ChatRequest::
+//! mcp_servers`). The runtime then speaks MCP to that server, and `tools/call`
+//! carries the name and the arguments in full fidelity.
 //!
-//! That channel cannot be an in-process callback. The agent forks the MCP
+//! That channel cannot be an in-process callback. The runtime forks the MCP
 //! server itself when the transport is stdio, so the server is a grandchild
-//! process in a different address space, and the ACP frame carries only
+//! process in a different address space, and the registration carries only
 //! `command`/`args`/`env` — no socket, no file descriptor, no back-channel.
 //! Reaching a caller's [`McpToolExecutor`] therefore requires a real listener,
 //! and loopback HTTP is the smallest one that works.
@@ -28,9 +28,9 @@
 //! # Why it is not in the root crate
 //!
 //! `AGENTS.md` states "No HTTP dependencies in core" as a design decision, and
-//! the root crate earns it: `ffi = ["copilot-headless"]` ships a `staticlib`
+//! the root crate earns it: `ffi = ["copilot-sdk"]` ships a `staticlib`
 //! compiled `panic = "abort"`, where a panic inside a tool handler would abort
-//! the host application. Consumers that enable `copilot-headless` without ever
+//! the host application. Consumers that enable `copilot-sdk` without ever
 //! hosting tools should not pay for a web stack. This crate is opt-in by
 //! existing separately.
 //!
@@ -64,7 +64,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-/// Header the session bearer travels in, matching what ACP forwards verbatim.
+/// Header the session bearer travels in; the runtime's MCP client forwards it verbatim.
 const AUTHORIZATION: &str = "authorization";
 
 /// How the endpoint binds.

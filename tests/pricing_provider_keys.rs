@@ -25,7 +25,6 @@
 #![cfg(all(
     feature = "http-api",
     feature = "openai-api",
-    feature = "copilot-headless",
     feature = "copilot-sdk",
     feature = "web-ui"
 ))]
@@ -43,9 +42,9 @@ use embacle::pricing::{
 use embacle::types::LlmProvider;
 use embacle::{
     ClaudeCodeRunner, CliRunnerType, ClineCliRunner, CodexCliRunner, ContinueCliRunner,
-    CopilotHeadlessRunner, CopilotRunner, CopilotSdkRunner, CursorAgentRunner, GeminiCliRunner,
-    GooseCliRunner, KiloCliRunner, KiroCliRunner, OpenAiApiConfig, OpenAiApiRunner, OpenCodeRunner,
-    RunnerConfig, WarpCliRunner, WebProviderConfig, WebUiConfig, WebUiRunner,
+    CopilotRunner, CopilotSdkRunner, CursorAgentRunner, GeminiCliRunner, GooseCliRunner,
+    KiloCliRunner, KiroCliRunner, OpenAiApiConfig, OpenAiApiRunner, OpenCodeRunner, RunnerConfig,
+    WarpCliRunner, WebProviderConfig, WebUiConfig, WebUiRunner,
 };
 
 /// Every CLI runner the factory can construct. This file requires every
@@ -65,7 +64,6 @@ const EVERY_CLI_RUNNER: &[CliRunnerType] = &[
     CliRunnerType::WarpCli,
     CliRunnerType::KiroCli,
     CliRunnerType::KiloCli,
-    CliRunnerType::CopilotHeadless,
     CliRunnerType::CopilotSdk,
     CliRunnerType::ClaudeWeb,
 ];
@@ -86,7 +84,6 @@ fn cli_runner_name(kind: CliRunnerType) -> &'static str {
         CliRunnerType::WarpCli => WarpCliRunner::new(config()).name(),
         CliRunnerType::KiroCli => KiroCliRunner::new(config()).name(),
         CliRunnerType::KiloCli => KiloCliRunner::new(config()).name(),
-        CliRunnerType::CopilotHeadless => CopilotHeadlessRunner::from_env().name(),
         CliRunnerType::CopilotSdk => CopilotSdkRunner::from_env().name(),
         CliRunnerType::ClaudeWeb => WebUiRunner::new(
             WebUiConfig::default(),
@@ -199,8 +196,8 @@ fn claude_code_is_priced_rather_than_suppressed() {
          and hide the miss behind the by-design $0 path"
     );
     assert!(
-        !is_not_per_token_metered("copilot_headless"),
-        "copilot_headless is priced for the same reason"
+        !is_not_per_token_metered("copilot_sdk"),
+        "copilot_sdk is priced for the same reason"
     );
 }
 

@@ -16,7 +16,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
 use crate::types::{ChatMessage, ChatRequest, ChatResponse, ImagePart, LlmProvider, RunnerError};
-use crate::CopilotHeadlessRunner;
+use crate::CopilotSdkRunner;
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -256,13 +256,17 @@ fn to_c_string(s: &str) -> *mut c_char {
 // Public FFI API
 // ---------------------------------------------------------------------------
 
-/// Initialize the tokio runtime and create the copilot headless runner.
+/// Initialize the tokio runtime and create the Copilot SDK runner.
 ///
-/// Reads copilot auth tokens from `~/.config/github-copilot/` and environment
-/// variables (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`).
+/// The runner is configured from the environment (see
+/// [`CopilotSdkConfig::from_env`](crate::CopilotSdkConfig::from_env)):
+/// `COPILOT_RUNTIME_PATH` names the `copilot-runtime` wrapper with
+/// `runtime.node` beside it, and the GitHub token comes from
+/// `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` — a user token with
+/// Copilot access — or the runtime's stored login when none is set.
 ///
 /// Returns 0 on success, -1 if already initialized, -2 on runtime creation
-/// failure, -3 on runner creation failure.
+/// failure.
 #[no_mangle]
 pub extern "C" fn embacle_init() -> i32 {
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -287,8 +291,7 @@ pub extern "C" fn embacle_init() -> i32 {
             }
         };
 
-        let runner: Box<dyn LlmProvider> =
-            Box::new(CopilotHeadlessRunner::from_env()) as Box<dyn LlmProvider>;
+        let runner: Box<dyn LlmProvider> = Box::new(CopilotSdkRunner::from_env());
 
         *guard = Some(Arc::new(FfiState { runtime, runner }));
         0

@@ -117,9 +117,9 @@ impl ModelPricing {
 /// some runners and underscored for others. A model under one of these
 /// prefixes resolves to \$0 *without* the missing-price warning, so cost
 /// dashboards do not flag it as an undercount.
-/// `copilot_headless`, `copilot_sdk` and `claude-code` are deliberately
-/// absent here: they carry real per-token `PRICING_TABLE` entries because
-/// their Anthropic pass-through usage is metered.
+/// `copilot_sdk` and `claude-code` are deliberately absent here: they carry
+/// real per-token `PRICING_TABLE` entries because their Anthropic pass-through
+/// usage is metered.
 pub const NOT_PER_TOKEN_METERED_PROVIDERS: &[&str] = &[
     // Self-hosted OpenAI-compatible runtimes.
     "local",
@@ -179,14 +179,15 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     ("groq", "llama-3.3-70b", ModelPricing::new(0.59, 0.79)),
     ("groq", "mixtral", ModelPricing::new(0.24, 0.24)),
     ("groq", "llama-3.1-8b", ModelPricing::new(0.05, 0.08)),
-    // Copilot headless (embacle) — proxies to Anthropic Claude models
+    // Copilot SDK (the Rust runtime) — proxies to Anthropic Claude models,
+    // keyed on the name CopilotSdkRunner reports.
     (
-        "copilot_headless",
+        "copilot_sdk",
         "claude-opus-4",
         ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
     ),
     (
-        "copilot_headless",
+        "copilot_sdk",
         // Prefix spans every Sonnet generation (claude-sonnet-4, -4.5, -4.6, -5);
         // all bill at the same $3/$15 Sonnet rate, so a version-agnostic prefix
         // keeps shadow-COGS attributed instead of falling through to $0 on a bump.
@@ -194,28 +195,11 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),
     ),
     (
-        "copilot_headless",
-        "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
-    ),
-    // Copilot SDK (the Rust runtime) — the same Anthropic pass-through as
-    // copilot_headless, keyed on the name CopilotSdkRunner reports.
-    (
-        "copilot_sdk",
-        "claude-opus-4",
-        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
-    ),
-    (
-        "copilot_sdk",
-        "claude-sonnet",
-        ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),
-    ),
-    (
         "copilot_sdk",
         "claude-haiku-4",
         ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
     ),
-    // Claude Code CLI — same models as copilot_headless. Keyed "claude-code",
+    // Claude Code CLI — same models as copilot_sdk. Keyed "claude-code",
     // the name ClaudeCodeRunner reports; CliRunnerType's Display prints the
     // underscore spelling, but name() is what a caller's usage record carries.
     (
@@ -226,7 +210,7 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     (
         "claude-code",
         // Version-agnostic Sonnet prefix (claude-sonnet-4, -4.5, -4.6, -5),
-        // mirroring the copilot_headless entry so a model bump keeps shadow-COGS
+        // mirroring the copilot_sdk entry so a model bump keeps shadow-COGS
         // attributed instead of falling through to $0.
         "claude-sonnet",
         ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),

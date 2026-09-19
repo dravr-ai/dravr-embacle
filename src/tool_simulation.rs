@@ -17,8 +17,9 @@
 //! 4. Running a full multi-turn **tool loop** that iterates until the LLM
 //!    produces a final text response
 //!
-//! This is the CLI counterpart to the SDK-managed tool calling in
-//! `CopilotHeadlessRunner` (requires `copilot-headless` feature).
+//! This is the CLI counterpart to the runtime-managed tool calling behind
+//! [`HeadlessTurnProvider`](crate::copilot_common::HeadlessTurnProvider),
+//! which `CopilotSdkRunner` implements (requires the `copilot-sdk` feature).
 //!
 //! ## Quick Start
 //!
@@ -136,7 +137,7 @@ pub type TextToolHandler = Arc<dyn Fn(&str, &Value) -> FunctionResponse + Send +
 /// Result of a text-based tool-calling conversation.
 ///
 /// Analogous to [`HeadlessToolResponse`](crate::copilot_common::HeadlessToolResponse)
-/// (requires `copilot-headless` feature) but for CLI providers.
+/// but for CLI providers.
 #[derive(Debug, Clone)]
 pub struct TextToolResponse {
     /// Final text content from the LLM (with tool call blocks stripped)
@@ -612,8 +613,8 @@ const MAX_TOOL_ITERATIONS: usize = 10;
 
 /// Execute a full text-based tool-calling conversation with a CLI provider.
 ///
-/// This is the CLI counterpart to the SDK-managed tool calling in
-/// [`CopilotHeadlessRunner::converse()`](crate::copilot_headless::CopilotHeadlessRunner::converse).
+/// This is the CLI counterpart to the runtime-managed tool calling in
+/// [`HeadlessTurnProvider::converse()`](crate::copilot_common::HeadlessTurnProvider::converse).
 ///
 /// # Flow
 ///

@@ -150,21 +150,21 @@ Default behavior is to complete the requested task. These triggers override that
 
 ## Project Overview
 
-**embacle** is a Rust workspace providing pluggable LLM providers that delegate to AI CLI tools and the ACP protocol — plus an MCP server and an OpenAI-compatible REST API server.
+**embacle** is a Rust workspace providing pluggable LLM providers that delegate to AI CLI tools and GitHub's Copilot runtime (through its Rust SDK) — plus an MCP server and an OpenAI-compatible REST API server.
 
 ### Workspace Crates
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `embacle` | library | Core: 12 CLI runners, HTTP API runner, ACP headless runner, agent loop, decorators, tool simulation |
+| `embacle` | library | Core: 12 CLI runners, HTTP API runner, Copilot SDK runner, agent loop, decorators, tool simulation |
 | `embacle-mcp` | library + binary | MCP server (stdio/HTTP) exposing all runners via JSON-RPC 2.0 |
 | `embacle-server` | binary | Unified OpenAI-compatible REST API + MCP server with SSE streaming, multiplex fan-out, bearer auth |
 
 ### CLI Runners (subprocess per request)
 Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo Code
 
-### ACP Runner (feature flag: `copilot-headless`)
-`CopilotHeadlessRunner` — NDJSON/JSON-RPC via `copilot --acp` with SDK-managed tool calling
+### Copilot SDK Runner (feature flag: `copilot-sdk`)
+`CopilotSdkRunner` — GitHub's Rust `copilot-runtime` over stdio through `github-copilot-sdk`, with runtime-managed MCP tool calling
 
 ### Higher-Level Features
 - **Agent loop** (`AgentExecutor`) — multi-turn tool calling with configurable max turns
@@ -203,7 +203,7 @@ crates/
 - **100% standalone** — zero dependency on dravr-platform or pierre-core
 - **Types in `types.rs`** — `RunnerError`, `LlmProvider` trait, `ChatRequest`, `ChatResponse`
 - **Subprocess-based** — wraps CLI tools via `tokio::process::Command`
-- **ACP via feature flag** — `copilot-headless` adds NDJSON/JSON-RPC transport for `copilot --acp`
+- **Copilot SDK via feature flag** — `copilot-sdk` adds the `github-copilot-sdk` stdio transport to the Rust `copilot-runtime`
 - **No HTTP dependencies in core** — only tokio (process), serde, tracing, which, bitflags
 
 # Writing code

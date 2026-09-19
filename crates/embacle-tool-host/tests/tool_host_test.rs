@@ -6,7 +6,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! What an ACP agent sees when it talks to the host.
+//! What the Copilot runtime's MCP client sees when it talks to the host.
 //!
 //! These drive real HTTP against a real bound listener, because every property
 //! worth pinning here lives in the transport: that a bearer reaches the right

@@ -7,7 +7,7 @@
 
 Standalone Rust library that wraps 12 AI CLI tools, SDKs, and a browser-driven web UI as pluggable LLM providers, with vision/image support.
 
-Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to tools the user has already installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional headless mode communicates via the ACP (Agent Client Protocol) for SDK-managed tool calling.
+Instead of integrating with LLM APIs directly (which require API keys, SDKs, and managing auth), **Embacle** delegates to tools the user has already installed and authenticated — getting model upgrades, auth management, and protocol handling for free. For GitHub Copilot, an optional SDK provider drives the Rust `copilot-runtime` directly, with runtime-managed MCP tool calling.
 
 The same "use what you've already logged into" idea extends to the browser: an optional **web-UI provider** drives the Claude.ai web app through a headless Chrome session and a one-time login — no API key, on your existing Claude.ai account — and is exposed over both the REST API and MCP. See [docs/web-ui.md](docs/web-ui.md).
 
@@ -49,7 +49,7 @@ Both modes support all 12 CLI runners, streaming, model routing, and vision. See
 - [OpenAI API](#openai-api-feature-flag)
 - [HTTP API providers](#http-api-providers-feature-flag)
 - [Fallback chains](#fallback-chains)
-- [Copilot Headless](#copilot-headless-feature-flag)
+- [Copilot SDK](#copilot-sdk-feature-flag)
 - [Vision / Image Support](#vision--image-support)
 - [Docker](#docker)
 - [C FFI Static Library](#c-ffi-static-library)
@@ -115,11 +115,11 @@ embacle = "0.28"
 | OpenRouter | `http-api` | One key for 200+ upstream models, ranking headers, cached and reasoning token usage |
 | OpenAI-compatible (local) | `http-api` | Ollama, vLLM, LocalAI or any self-hosted endpoint, named after the endpoint it targets |
 
-### ACP Runners (persistent connection)
+### Copilot SDK Runner (persistent runtime, feature-flagged)
 
 | Runner | Feature Flag | Features |
 |--------|-------------|----------|
-| GitHub Copilot Headless | `copilot-headless` | NDJSON/JSON-RPC via `copilot --acp`, SDK-managed tool calling, streaming |
+| GitHub Copilot SDK | `copilot-sdk` | GitHub's Rust `copilot-runtime` over stdio, runtime-managed MCP tool calling, served-model and cache-count reporting, streaming |
 
 ### Browser Web UI Runners (feature-flagged)
 
@@ -385,7 +385,7 @@ embacle-mcp --transport http --host 0.0.0.0 --port 3000 --provider claude_code
 | Tool | Description |
 |------|-------------|
 | `get_provider` | Get active LLM provider and list available providers |
-| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `copilot_headless`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`, `warp_cli`, `kiro_cli`, `kilo_cli`) |
+| `set_provider` | Switch the active provider (`claude_code`, `copilot`, `copilot_sdk`, `cursor_agent`, `opencode`, `gemini_cli`, `codex_cli`, `goose_cli`, `cline_cli`, `continue_cli`, `warp_cli`, `kiro_cli`, `kilo_cli`) |
 | `get_model` | Get current model and list available models for the active provider |
 | `set_model` | Set the model for subsequent requests (pass null to reset to default) |
 | `get_multiplex_provider` | Get providers configured for multiplex dispatch |
@@ -530,51 +530,9 @@ let event = AgUiEvent::run_started("run_abc", Some("thread_xyz"));
 let _ = sink.emit(&event);
 ```
 
-## Copilot Headless (feature flag)
-
-Enable the `copilot-headless` feature for ACP-based communication with SDK-managed tool calling:
-
-```toml
-[dependencies]
-embacle = { version = "0.28", features = ["copilot-headless"] }
-```
-
-```rust
-use embacle::{CopilotHeadlessRunner, CopilotHeadlessConfig};
-use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
-
-#[tokio::main]
-async fn main() -> Result<(), embacle::types::RunnerError> {
-    // Reads COPILOT_HEADLESS_MODEL, COPILOT_GITHUB_TOKEN, etc. from env
-    let runner = CopilotHeadlessRunner::from_env();
-
-    let request = ChatRequest::new(vec![
-        ChatMessage::user("Explain Rust ownership"),
-    ]);
-
-    let response = runner.complete(&request).await?;
-    println!("{}", response.content);
-    Ok(())
-}
-```
-
-The headless runner keeps a small pool of warm `copilot --acp` subprocesses across calls and communicates via NDJSON-framed JSON-RPC. The CLI strips ACP's `session/new` `systemPrompt` field, so the system prompt is inlined at the top of the prompt text — the only delivery path this transport has. Conversation history from prior turns is serialized into a `<conversation-history>` block in the prompt text for multi-turn continuity. The `max_tokens` field from `ChatRequest` is forwarded to ACP's `session/prompt` as `maxTokens`.
-
-Configuration via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COPILOT_CLI_PATH` | auto-detect | Override path to copilot binary |
-| `COPILOT_HEADLESS_WORKING_DIR` | scratch dir under the system temp dir | Directory the subprocess runs in and the `cwd` of every session; copilot loads `.mcp.json`, agent files and custom instructions from it. Unset, a scratch directory rather than the host's cwd |
-| `COPILOT_HEADLESS_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
-| `COPILOT_GITHUB_TOKEN` | stored OAuth | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
-| `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
-| `COPILOT_HEADLESS_PERMISSION_POLICY` | deny | `auto_approve` lets the subprocess run its own tools (shell, git, file edits); anything else denies |
-| `COPILOT_HEADLESS_MCP_TOOL_CALLING` | `false` | Advertise `SDK_TOOL_CALLING`: the caller passes `mcp_servers` per request and copilot calls those tools natively |
-
 ## Copilot SDK (feature flag)
 
-Enable the `copilot-sdk` feature to reach the same GitHub Copilot runtime through GitHub's own Rust SDK instead of the `copilot --acp` adapter:
+Enable the `copilot-sdk` feature to reach the GitHub Copilot runtime through GitHub's own Rust SDK — the Copilot path with runtime-managed tool calling, served-model reporting and cache accounting:
 
 ```toml
 [dependencies]
@@ -601,9 +559,9 @@ async fn main() -> Result<(), embacle::types::RunnerError> {
 }
 ```
 
-`copilot --acp` is `app.js` over `runtime.node`; the SDK runner drops the JS adapter and spawns the ~400 KB Rust `copilot-runtime` wrapper (`--server --stdio`) that loads the same `runtime.node` — no Node process anywhere on this path. It opens one session per turn (the host owns the conversation, so prior turns are rendered into a `<conversation-history>` block exactly as the headless runner does), delivers the system prompt through the runtime's own system slot in `replace` mode, and reads the turn off the runtime's event stream. What that stream reports and ACP's does not: the model that actually served (`assistant.usage.model`), cache read/write token counts per call, and every tool execution with its name, arguments and result (`ObservedToolCall::{name, arguments, result}`). A model id the runtime's catalogue does not know fails with `ErrorKind::ModelUnavailable` instead of being silently served by another model; the prompt timeout aborts the session instead of killing a process.
+The SDK runner spawns the ~400 KB Rust `copilot-runtime` wrapper (`--server --stdio`), which loads `runtime.node` — the same runtime the Copilot CLI embeds, with no Node process anywhere on this path. It opens one session per turn (the host owns the conversation, so prior turns are rendered into a `<conversation-history>` block ahead of the current message), delivers the system prompt through the runtime's own system slot in `replace` mode, and reads the turn off the runtime's event stream. That stream reports the model that actually served (`assistant.usage.model`), cache read/write token counts per call, and every tool execution with its name, arguments and result (`ObservedToolCall::{name, arguments, result}`). A model id the runtime's catalogue does not know fails with `ErrorKind::ModelUnavailable` instead of being silently served by another model; the prompt timeout aborts the session instead of killing a process.
 
-Both Copilot runners implement `HeadlessTurnProvider` (`converse` / `converse_stream`), so a host names the trait, not a transport.
+The runner implements `HeadlessTurnProvider` (`converse` / `converse_stream`), the turn API a host names instead of the runner type. The trait and its types compile without the feature, so a consumer can depend on them and link the provider separately.
 
 The runtime pair is a file on disk, never a payload in the binary. Point `COPILOT_RUNTIME_PATH` at the `copilot-runtime` wrapper with `runtime.node` adjacent — the pair ships inside the `github-copilot-<version>-<platform>.tgz` release asset of `github/copilot-cli` (`prebuilds/<platform>/`), and the Copilot CLI extracts the same pair into its package cache on first run. The SDK's build script would otherwise download and embed the whole CLI (~163 MB); this workspace's `.cargo/config.toml` sets `COPILOT_SKIP_CLI_DOWNLOAD=1`, and a consumer building with this feature sets the same variable in its own build environment.
 
@@ -629,10 +587,9 @@ Embacle supports sending images alongside text prompts via the `ImagePart` type.
 
 | Provider | Vision | How |
 |----------|--------|-----|
-| Copilot Headless (ACP) | Native | Images sent as ACP `image` content blocks |
 | Copilot SDK | Native | Images written to the turn's scratch directory and attached as files |
 | OpenAI API | Native | Images sent as `image_url` parts with `data:` URIs |
-| C FFI | Native | Images forwarded to copilot headless via `image_url` content |
+| C FFI | Native | Images forwarded to the Copilot SDK runner via `image_url` content |
 | All 12 CLI runners | Tempfile | Images decoded to temp files, file paths injected into prompt |
 
 CLI runners materialize base64 images to a temp directory and append `[Attached images]` with file paths to the user message. The temp directory is kept alive until the subprocess finishes.
@@ -656,7 +613,7 @@ Send images via the standard OpenAI multipart content format:
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "copilot_headless",
+    "model": "copilot_sdk",
     "messages": [{
       "role": "user",
       "content": [
@@ -724,7 +681,9 @@ docker run --entrypoint embacle-mcp ghcr.io/dravr-ai/embacle --provider copilot
 
 ## C FFI Static Library
 
-Embacle provides a C FFI static library (`libembacle.a`) that exposes copilot chat completion to any language that can call C functions — Swift, Objective-C, Python, Go, Ruby, and more. The FFI surface is 4 functions: init, chat completion, free string, and shutdown.
+Embacle provides a C FFI static library (`libembacle.a`) that exposes Copilot chat completion to any language that can call C functions — Swift, Objective-C, Python, Go, Ruby, and more. The FFI surface is 4 functions: init, chat completion, free string, and shutdown.
+
+`embacle_init` builds the Copilot SDK runner from the environment: `COPILOT_RUNTIME_PATH` names the `copilot-runtime` wrapper (with `runtime.node` beside it), and `COPILOT_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) carries a user token with Copilot access — a fine-grained PAT with the `Copilot Requests` permission, or a `gho_` OAuth token; unset, the runtime uses its stored login. Every variable the runner reads is in the [Copilot SDK](#copilot-sdk-feature-flag) table.
 
 ### Install via Homebrew
 
@@ -819,8 +778,8 @@ Your Application
             │   ├── OpenRouterProvider    → OpenRouter gateway
             │   └── OpenAiCompatibleProvider → Ollama / vLLM / LocalAI / any local endpoint
             │
-            ├── ACP Runners (persistent connection, behind feature flag)
-            │   └── CopilotHeadlessRunner → NDJSON/JSON-RPC to `copilot --acp`
+            ├── Copilot SDK Runner (persistent runtime, behind feature flag)
+            │   └── CopilotSdkRunner      → github-copilot-sdk over stdio to `copilot-runtime`
             │
             ├── Browser Web UI Runners (headless browser, behind feature flag)
             │   └── WebUiRunner           → drives the Claude.ai web UI via dravr-browser

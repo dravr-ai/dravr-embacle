@@ -6,20 +6,19 @@
 
 //! GitHub Copilot through its Rust SDK.
 //!
-//! [`CopilotSdkRunner`] drives the same Rust runtime that `copilot --acp`
-//! wraps, minus the JS adapter in between. The SDK spawns the ~400 KB
-//! `copilot-runtime` wrapper (`--server --stdio`), which loads
-//! `runtime.node`; there is no Node process anywhere on this path.
+//! [`CopilotSdkRunner`] drives the Rust runtime behind the Copilot CLI
+//! directly. The SDK spawns the ~400 KB `copilot-runtime` wrapper
+//! (`--server --stdio`), which loads `runtime.node`; there is no Node
+//! process anywhere on this path.
 //!
 //! Why a session per turn: the host owns the conversation (history arrives
 //! on every [`ChatRequest`]), so a session carries nothing worth keeping
 //! between calls, and a fresh one guarantees a request never sees another
-//! tenant's context. Prior turns are rendered into the prompt the same way
-//! the ACP provider renders them ([`render_turn`]); the system prompt goes
-//! through the runtime's own system slot (`system_message` in `replace`
-//! mode), which the ACP adapter has no honoured field for.
+//! tenant's context. Prior turns are rendered into the prompt
+//! ([`render_turn`]); the system prompt goes through the runtime's own
+//! system slot (`system_message` in `replace` mode).
 //!
-//! What this path reports that ACP cannot: the model that actually served
+//! What the runtime's event stream reports: the model that actually served
 //! (`assistant.usage.model`), cache read/write counts per call, and tool
 //! executions with their name, arguments and result.
 
@@ -134,7 +133,7 @@ impl Inner {
         }
         // The token rides the child's environment as COPILOT_GITHUB_TOKEN —
         // the runtime's own precedence (then GH_TOKEN, GITHUB_TOKEN) — exactly
-        // as the ACP adapter hands it over, so the runtime runs the same token
+        // as the Copilot CLI hands it over, so the runtime runs the same token
         // exchange and a personal access token works. The SDK's `github_token`
         // option is a different path: it presents the value as an SDK auth
         // token, and the endpoint behind that answers a PAT with 400
@@ -219,7 +218,7 @@ impl Inner {
             .tempdir()
             .map_err(|e| RunnerError::internal(format!("{SERVICE}: scratch dir: {e}")))?;
 
-        let rendered = render_turn(request, self.config.max_history_turns, false);
+        let rendered = render_turn(request, self.config.max_history_turns);
         let attachments = write_image_attachments(scratch.path(), rendered.last_user)?;
         let session_config = self.session_config(request, &model, scratch.path());
 

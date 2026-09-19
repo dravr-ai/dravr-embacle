@@ -1,10 +1,10 @@
-// ABOUTME: The ACP permission policy must deny unless a host opts into approval
+// ABOUTME: The Copilot runtime permission policy must deny unless a host opts into approval
 // ABOUTME: An approving default gave a Dravr coaching turn shell in the service container
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-//! The copilot subprocess's own tools (shell, git, file editing) run with the
+//! The Copilot runtime's own tools (shell, git, file editing) run with the
 //! host's environment and credentials, in the session working directory — a
 //! scratch directory unless the host configures one. A host that assembles its
 //! prompt from untrusted input therefore turns an auto-approval into arbitrary
@@ -12,12 +12,8 @@
 //!
 //! These tests pin the safe side: denial is what you get unless approval is
 //! spelled out, and a misspelled value degrades to denial rather than silently
-//! granting a shell.
-
-// The module under test is feature-gated; the `//!` docs above sit before this
-// attribute deliberately, so `missing-docs` still sees them when the feature is
-// off and the crate root compiles out.
-#![cfg(feature = "copilot-headless")]
+//! granting a shell. [`PermissionPolicy`] lives in `copilot_common`, which
+//! compiles without any runner feature, so this file always runs.
 
 use embacle::PermissionPolicy;
 
@@ -33,13 +29,14 @@ fn derived_default_denies() {
 #[test]
 fn approval_requires_an_explicit_spelling() {
     // Guards the parser's fallback arm, which is the value that actually
-    // reaches production — the derived default alone would not have caught the
-    // original bug, because the env path had its own approving fallback.
+    // reaches production through `CopilotSdkConfig::from_env` — the derived
+    // default alone would not have caught the original bug, because the env
+    // path had its own approving fallback.
     for raw in [
         "", "  ", "yes", "true", "1", "allow", "deny_all", "nonsense",
     ] {
         assert_eq!(
-            policy_for(raw),
+            PermissionPolicy::parse(raw),
             PermissionPolicy::DenyAll,
             "{raw:?} must not enable auto-approval"
         );
@@ -47,19 +44,9 @@ fn approval_requires_an_explicit_spelling() {
 
     for raw in ["auto_approve", "autoapprove", "approve", "AUTO_APPROVE"] {
         assert_eq!(
-            policy_for(raw),
+            PermissionPolicy::parse(raw),
             PermissionPolicy::AutoApprove,
             "{raw:?} is an explicit opt-in and must approve"
         );
-    }
-}
-
-/// Mirrors the parser in `CopilotHeadlessConfig::from_env`. Kept in the test so
-/// the accepted spellings are asserted rather than assumed; a divergence here
-/// means the parser changed and this file has to change with it.
-fn policy_for(raw: &str) -> PermissionPolicy {
-    match raw.to_lowercase().as_str() {
-        "auto_approve" | "autoapprove" | "approve" => PermissionPolicy::AutoApprove,
-        _ => PermissionPolicy::DenyAll,
     }
 }

@@ -7,7 +7,7 @@
 //! # Copilot Model Catalog
 //!
 //! Ranked catalog of GitHub-Copilot-served models used by the Copilot CLI runner
-//! and the Copilot Headless (ACP) runner to pick a sensible default and to
+//! and the Copilot SDK runner to pick a sensible default and to
 //! self-heal when the requested model has been rotated out of the account's
 //! entitlement.
 //!

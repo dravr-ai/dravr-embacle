@@ -42,9 +42,6 @@ pub enum CliRunnerType {
     KiroCli,
     /// Kilo Code CLI (`kilo`)
     KiloCli,
-    /// GitHub Copilot Headless via ACP protocol (`copilot --acp`)
-    #[cfg(feature = "copilot-headless")]
-    CopilotHeadless,
     /// GitHub Copilot through its Rust SDK (`copilot-runtime --server --stdio`)
     #[cfg(feature = "copilot-sdk")]
     CopilotSdk,
@@ -70,8 +67,6 @@ impl CliRunnerType {
             Self::WarpCli => "oz",
             Self::KiroCli => "kiro-cli",
             Self::KiloCli => "kilo",
-            #[cfg(feature = "copilot-headless")]
-            Self::CopilotHeadless => "copilot",
             #[cfg(feature = "copilot-sdk")]
             Self::CopilotSdk => "copilot-runtime",
             #[cfg(feature = "web-ui")]
@@ -95,8 +90,6 @@ impl CliRunnerType {
             Self::WarpCli => "WARP_CLI_BINARY",
             Self::KiroCli => "KIRO_CLI_BINARY",
             Self::KiloCli => "KILO_CLI_BINARY",
-            #[cfg(feature = "copilot-headless")]
-            Self::CopilotHeadless => "COPILOT_CLI_PATH",
             #[cfg(feature = "copilot-sdk")]
             Self::CopilotSdk => "COPILOT_RUNTIME_PATH",
             #[cfg(feature = "web-ui")]
@@ -120,8 +113,6 @@ impl fmt::Display for CliRunnerType {
             Self::WarpCli => write!(f, "warp_cli"),
             Self::KiroCli => write!(f, "kiro_cli"),
             Self::KiloCli => write!(f, "kilo_cli"),
-            #[cfg(feature = "copilot-headless")]
-            Self::CopilotHeadless => write!(f, "copilot_headless"),
             #[cfg(feature = "copilot-sdk")]
             Self::CopilotSdk => write!(f, "copilot_sdk"),
             #[cfg(feature = "web-ui")]
@@ -145,7 +136,7 @@ pub struct RunnerConfig {
     pub allowed_env_keys: Vec<String>,
     /// Working directory for the subprocess
     pub working_directory: Option<PathBuf>,
-    /// Reasoning effort forwarded to runners that support it (Copilot CLI / ACP).
+    /// Reasoning effort forwarded to runners that support it (Copilot CLI).
     /// Runners that do not recognize the flag silently ignore this field.
     pub reasoning_effort: Option<ReasoningEffort>,
 }

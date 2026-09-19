@@ -1,5 +1,5 @@
-# ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools, ACP, and HTTP APIs as pluggable providers
-# ABOUTME: CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo), ACP, and HTTP (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible)
+# ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools, the Copilot SDK runtime, and HTTP APIs as pluggable providers
+# ABOUTME: CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo), Copilot SDK, and HTTP (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible)
 
 [workspace]
 members = [".", "crates/embacle-mcp", "crates/embacle-server", "crates/embacle-tool-host"]
@@ -9,7 +9,7 @@ name = "embacle"
 version = "0.28.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "LLM runner library — 12 AI CLI tools, ACP, and HTTP APIs (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
+description = "LLM runner library — 12 AI CLI tools, the Copilot SDK runtime, and HTTP APIs (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 homepage = "https://github.com/dravr-ai/dravr-embacle"
 documentation = "https://docs.rs/embacle"
@@ -100,8 +100,6 @@ default = []
 # Enable AG-UI (Agent-User Interaction) protocol event schema and emitter trait.
 # See https://github.com/ag-ui-protocol/ag-ui. Pulls in no extra dependencies.
 agui = []
-# Enable Copilot Headless provider (ACP protocol via copilot --acp)
-copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # Enable the Copilot SDK provider: GitHub's Rust runtime through github-copilot-sdk
 # over stdio (spawns the Rust `copilot-runtime` wrapper; no Node in the path).
 # `.cargo/config.toml` keeps the SDK's build script from downloading and embedding
@@ -124,8 +122,8 @@ web-ui = ["dep:dravr-browser", "dep:toml", "tokio/sync"]
 config-file = ["dep:toml", "dep:dirs"]
 # Enable OpenTelemetry metrics export
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
-# Enable C FFI static library for Swift/C integration (implies copilot-headless)
-ffi = ["copilot-headless"]
+# Enable C FFI static library for Swift/C integration (implies copilot-sdk)
+ffi = ["copilot-sdk"]
 
 [dependencies]
 async-trait = "0.1"
@@ -139,9 +137,6 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 tracing = "0.1"
 uuid = { version = "1.22", features = ["v4", "serde"] }
 which = "7"
-
-# Optional: ACP schema types for Copilot Headless (copilot --acp)
-agent-client-protocol-schema = { version = "0.12", optional = true }
 
 # Optional: GitHub's SDK for its Rust Copilot runtime (copilot-sdk feature).
 # default-features = false drops `bundled-cli`, which would embed the CLI.
@@ -198,24 +193,6 @@ path = "examples/claude_code_mcp_smoke.rs"
 name = "quota_probe"
 path = "examples/quota_probe.rs"
 required-features = ["quota-http"]
-
-[[example]]
-name = "acp_model_smoke"
-path = "examples/acp_model_smoke.rs"
-required-features = ["copilot-headless"]
-
-[[example]]
-name = "acp_usage_probe"
-required-features = ["copilot-headless"]
-
-[[example]]
-name = "acp_cache_boundary_probe"
-required-features = ["copilot-headless"]
-
-[[example]]
-name = "copilot_tool_disowning"
-path = "examples/copilot_tool_disowning.rs"
-required-features = ["copilot-headless"]
 
 [lints]
 workspace = true

@@ -6,12 +6,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The ACP adapter reports a tool call as `{id, title, status}` and nothing a
-//! host could persist as a tool round. The SDK transport reports the runtime's
-//! own `tool.execution_start` / `tool.execution_complete` events, so the
-//! observation carries the tool's name, the arguments the model passed and
-//! the result handed back. This test pins that over a real turn: a tool the
-//! host serves, called by the runtime, reported by name.
+//! The SDK transport reports the runtime's own `tool.execution_start` /
+//! `tool.execution_complete` events, so an observation carries the tool's
+//! name, the arguments the model passed and the result handed back — what a
+//! host needs to persist the call as a tool round. This test pins that over a
+//! real turn: a tool the host serves, called by the runtime, reported by name.
 
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};

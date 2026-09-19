@@ -1,4 +1,4 @@
-// ABOUTME: Standalone LLM runner library wrapping AI CLI tools and ACP as providers
+// ABOUTME: Standalone LLM runner library wrapping AI CLI tools and the Copilot SDK runtime as providers
 // ABOUTME: Re-exports runners, agent loop, fallback chains, metrics, quality gates, MCP bridge, and structured output
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -9,11 +9,11 @@
 //! Standalone library providing pluggable [`LlmProvider`](types::LlmProvider)
 //! implementations that delegate to CLI tools (Claude Code, Copilot, Cursor Agent,
 //! `OpenCode`, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo Code), an HTTP API client
-//! (OpenAI-compatible), and ACP (Copilot Headless) for LLM completions.
+//! (OpenAI-compatible), and GitHub's Copilot runtime through its Rust SDK for LLM completions.
 //!
 //! CLI runners wrap a binary, build prompts from [`ChatMessage`](types::ChatMessage)
-//! sequences, parse JSON output, and manage session continuity. The Copilot Headless
-//! runner communicates via NDJSON-framed JSON-RPC with `copilot --acp`.
+//! sequences, parse JSON output, and manage session continuity. The Copilot SDK
+//! runner speaks JSON-RPC to the `copilot-runtime` wrapper over stdio.
 //!
 //! Two companion binary crates build on this library:
 //! - **`embacle-server`** — OpenAI-compatible REST API + MCP Streamable HTTP on a single port
@@ -149,17 +149,9 @@ pub mod openai_api;
 #[cfg(feature = "web-ui")]
 pub mod web_ui;
 
-/// Types and helpers every Copilot provider shares: the permission policy,
-/// the turn API, history rendering
+/// The Copilot turn API a host names: the permission policy, tool
+/// observations, the streaming event, history rendering
 pub mod copilot_common;
-
-// Copilot Headless modules (behind feature flag)
-/// Configuration for the Copilot Headless (ACP) provider
-#[cfg(feature = "copilot-headless")]
-pub mod copilot_headless;
-/// Configuration types for the Copilot Headless provider
-#[cfg(feature = "copilot-headless")]
-pub mod copilot_headless_config;
 
 // Copilot SDK modules (behind feature flag)
 /// The Copilot SDK provider — GitHub's Rust runtime over stdio
@@ -257,17 +249,11 @@ pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
 #[cfg(feature = "web-ui")]
 pub use web_ui::{WebProviderConfig, WebUiConfig, WebUiRunner};
 
-// Copilot turn API shared by every Copilot provider
+// Copilot turn API, compiled without the copilot-sdk feature so a host can name it
 pub use copilot_common::{
     HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse, HeadlessTurnProvider,
     ObservedToolCall, PermissionPolicy, DEFAULT_MAX_HISTORY_TURNS,
 };
-
-// Copilot Headless re-exports (behind feature flag)
-#[cfg(feature = "copilot-headless")]
-pub use copilot_headless::CopilotHeadlessRunner;
-#[cfg(feature = "copilot-headless")]
-pub use copilot_headless_config::CopilotHeadlessConfig;
 
 // Copilot SDK re-exports (behind feature flag)
 #[cfg(feature = "copilot-sdk")]

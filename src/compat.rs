@@ -147,8 +147,6 @@ async fn detect_version(
         | CliRunnerType::WarpCli
         | CliRunnerType::KiroCli
         | CliRunnerType::KiloCli => "--version",
-        #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => "--version",
         #[cfg(feature = "copilot-sdk")]
         CliRunnerType::CopilotSdk => "--version",
         #[cfg(feature = "web-ui")]
@@ -223,8 +221,6 @@ const fn minimum_version(runner_type: CliRunnerType) -> (u32, u32, u32) {
         CliRunnerType::WarpCli => parse_const_version(WARP_CLI_MIN_VERSION),
         CliRunnerType::KiroCli => parse_const_version(KIRO_CLI_MIN_VERSION),
         CliRunnerType::KiloCli => parse_const_version(KILO_CLI_MIN_VERSION),
-        #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => parse_const_version(COPILOT_MIN_VERSION),
         // The SDK runner talks to a runtime whose version the protocol
         // handshake checks; the wrapper binary's own version is not a floor.
         #[cfg(feature = "copilot-sdk")]
@@ -301,11 +297,6 @@ const fn capabilities_for_runner(runner_type: CliRunnerType) -> CliFeatureFlags 
         CliRunnerType::CodexCli => CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::STREAMING),
         // Kiro CLI: plain text output (no JSON), no streaming, session resume via --resume
         CliRunnerType::KiroCli => CliFeatureFlags::SESSION_RESUME,
-        // Copilot Headless: ACP protocol, not a CLI runner — capabilities managed by LlmProvider
-        #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => CliFeatureFlags::JSON_OUTPUT
-            .union(CliFeatureFlags::STREAMING)
-            .union(CliFeatureFlags::SYSTEM_PROMPT),
         // Copilot SDK: JSON-RPC to the runtime, not a CLI runner — capabilities managed by LlmProvider
         #[cfg(feature = "copilot-sdk")]
         CliRunnerType::CopilotSdk => CliFeatureFlags::JSON_OUTPUT

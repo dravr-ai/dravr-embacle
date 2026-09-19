@@ -27,12 +27,8 @@ use crate::{
 pub async fn create_runner(
     runner_type: CliRunnerType,
 ) -> Result<Box<dyn LlmProvider>, RunnerError> {
-    // CopilotHeadless uses its own config (env-based), not RunnerConfig
-    #[cfg(feature = "copilot-headless")]
-    if runner_type == CliRunnerType::CopilotHeadless {
-        return Ok(Box::new(crate::CopilotHeadlessRunner::from_env()));
-    }
-    // CopilotSdk likewise: the runtime is resolved by the SDK, not discovered
+    // CopilotSdk uses its own config (env-based), not RunnerConfig: the
+    // runtime is resolved by the SDK, not discovered on PATH
     #[cfg(feature = "copilot-sdk")]
     if runner_type == CliRunnerType::CopilotSdk {
         return Ok(Box::new(crate::CopilotSdkRunner::from_env()));
@@ -64,8 +60,6 @@ pub async fn create_runner(
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
-        #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => unreachable!("handled above"),
         #[cfg(feature = "copilot-sdk")]
         CliRunnerType::CopilotSdk => unreachable!("handled above"),
         #[cfg(feature = "web-ui")]
@@ -102,9 +96,6 @@ pub async fn create_runner_with_config(
         CliRunnerType::WarpCli => Box::new(WarpCliRunner::new(config)),
         CliRunnerType::KiroCli => Box::new(KiroCliRunner::new(config)),
         CliRunnerType::KiloCli => Box::new(KiloCliRunner::new(config)),
-        // CopilotHeadless ignores RunnerConfig — uses env-based config
-        #[cfg(feature = "copilot-headless")]
-        CliRunnerType::CopilotHeadless => Box::new(crate::CopilotHeadlessRunner::from_env()),
         // CopilotSdk ignores RunnerConfig — uses env-based config
         #[cfg(feature = "copilot-sdk")]
         CliRunnerType::CopilotSdk => Box::new(crate::CopilotSdkRunner::from_env()),
@@ -122,13 +113,11 @@ pub async fn create_runner_with_config(
 
 /// All provider types supported by embacle, in discovery priority order.
 ///
-/// One list, with the feature-gated Copilot transports slotted in behind the
+/// One list, with the feature-gated Copilot SDK runner slotted in behind the
 /// Copilot CLI: a `const` slice cannot carry `#[cfg]` on its elements, and a
 /// list per feature combination would drift.
 pub static ALL_PROVIDERS: LazyLock<Vec<CliRunnerType>> = LazyLock::new(|| {
     let mut providers = vec![CliRunnerType::ClaudeCode, CliRunnerType::Copilot];
-    #[cfg(feature = "copilot-headless")]
-    providers.push(CliRunnerType::CopilotHeadless);
     #[cfg(feature = "copilot-sdk")]
     providers.push(CliRunnerType::CopilotSdk);
     providers.extend([
@@ -166,10 +155,6 @@ pub fn parse_runner_type(s: &str) -> Option<CliRunnerType> {
         "warp" | "warp_cli" | "warpcli" | "warp-cli" | "oz" => Some(CliRunnerType::WarpCli),
         "kiro" | "kiro_cli" | "kirocli" | "kiro-cli" => Some(CliRunnerType::KiroCli),
         "kilo" | "kilo_cli" | "kilocli" | "kilo-cli" | "kilocode" => Some(CliRunnerType::KiloCli),
-        #[cfg(feature = "copilot-headless")]
-        "copilot_headless" | "copilot-headless" | "copilotheadless" | "headless" => {
-            Some(CliRunnerType::CopilotHeadless)
-        }
         #[cfg(feature = "copilot-sdk")]
         "copilot_sdk" | "copilot-sdk" | "copilotsdk" => Some(CliRunnerType::CopilotSdk),
         #[cfg(feature = "web-ui")]
@@ -272,9 +257,7 @@ mod tests {
 
     #[test]
     fn all_providers_count() {
-        let expected = 12
-            + usize::from(cfg!(feature = "copilot-headless"))
-            + usize::from(cfg!(feature = "copilot-sdk"));
+        let expected = 12 + usize::from(cfg!(feature = "copilot-sdk"));
         assert_eq!(ALL_PROVIDERS.len(), expected);
     }
 

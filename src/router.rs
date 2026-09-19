@@ -64,12 +64,12 @@ pub struct Backend {
     /// Reads this provider's remaining budget. `None` means unmetered: the
     /// router will never step aside from it proactively, only on a refusal.
     pub checker: Option<Box<dyn LimitChecker>>,
-    /// The concrete ACP runner behind `provider`, when this backend is one.
+    /// The concrete Copilot SDK runner behind `provider`, when this backend is one.
     ///
     /// A `Box<dyn LlmProvider>` cannot be downcast, and the platform's
     /// SDK-tool-calling path needs the concrete runner to reach `converse()`.
     /// Carrying the `Arc` here is what lets [`RouterProvider::active_runner`]
-    /// answer honestly: the ACP path is available exactly while this backend
+    /// answer honestly: the turn API is available exactly while this backend
     /// is the one answering, and not a turn longer.
     headless: Option<Arc<dyn HeadlessTurnProvider>>,
 }
@@ -95,11 +95,11 @@ impl Backend {
         }
     }
 
-    /// Record the concrete ACP runner this backend wraps.
+    /// Record the concrete Copilot SDK runner this backend wraps.
     ///
-    /// Pass the same `Arc` the provider was built from. The runner pools
-    /// subprocesses and caches its observed model list, so cloning the `Arc`
-    /// is the point — a second runner would throw both away.
+    /// Pass the same `Arc` the provider was built from. The runner keeps one
+    /// warm runtime client, so cloning the `Arc` is the point — a second runner
+    /// would spawn another runtime.
     #[must_use]
     pub fn with_headless(mut self, runner: Arc<dyn HeadlessTurnProvider>) -> Self {
         self.headless = Some(runner);
@@ -278,9 +278,9 @@ impl RouterProvider {
             .min(self.backends.len() - 1)
     }
 
-    /// The concrete ACP runner behind the backend that is currently answering.
+    /// The concrete Copilot SDK runner behind the backend that is currently answering.
     ///
-    /// `None` when the live backend is not a Copilot Headless one — which is
+    /// `None` when the live backend is not a Copilot SDK one — which is
     /// the correct answer, not a missing feature. The platform's dispatch reads
     /// this to decide between the SDK tool-calling loop and the CLI text loop,
     /// and a stale `Some` would run the wrong loop against the wrong provider.
@@ -714,7 +714,7 @@ mod tests {
                     Box::new(TestProvider::ok("claude-code")),
                     Box::new(FakeChecker::at_percent("c", 10.0, 9_999_999_999)),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
@@ -741,38 +741,36 @@ mod tests {
                     )),
                     Box::new(FakeChecker::at_percent("c", 95.0, 9_999_999_999)),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
         .unwrap(); // Safe: test assertion
 
         let r = router.complete(&request()).await.unwrap(); // Safe: test assertion
-        assert_eq!(r.content, "answered by copilot_headless");
+        assert_eq!(r.content, "answered by copilot_sdk");
         assert_eq!(
             primary_calls.load(Ordering::Relaxed),
             0,
             "the exhausted provider must never be asked at all — stepping aside AFTER a \
              failed turn is what the reactive path already did, and it costs an athlete a wait"
         );
-        assert_eq!(router.name(), "copilot_headless");
+        assert_eq!(router.name(), "copilot_sdk");
     }
 
-    #[cfg(feature = "copilot-headless")]
+    #[cfg(feature = "copilot-sdk")]
     #[tokio::test]
-    async fn the_acp_runner_is_reachable_only_while_its_backend_answers() {
+    async fn the_sdk_runner_is_reachable_only_while_its_backend_answers() {
         use std::ptr;
 
-        use crate::copilot_headless::CopilotHeadlessRunner;
-        use crate::copilot_headless_config::CopilotHeadlessConfig;
+        use crate::copilot_sdk::CopilotSdkRunner;
+        use crate::copilot_sdk_config::CopilotSdkConfig;
 
         // The platform's dispatch chooses between the SDK tool-calling loop and
         // the CLI text loop by asking for this runner. Answering `Some` while a
-        // different backend is live would run the ACP loop against a provider
-        // that is not answering the turn.
-        let headless = Arc::new(CopilotHeadlessRunner::with_config(
-            CopilotHeadlessConfig::default(),
-        ));
+        // different backend is live would run the tool-calling loop against a
+        // provider that is not answering the turn.
+        let headless = Arc::new(CopilotSdkRunner::with_config(CopilotSdkConfig::default()));
 
         let claude_is_live = RouterProvider::new(
             vec![
@@ -780,7 +778,7 @@ mod tests {
                     Box::new(TestProvider::ok("claude-code")),
                     Box::new(FakeChecker::at_percent("c", 5.0, 9_999_999_999)),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk")))
                     .with_headless(headless.clone()),
             ],
             Box::new(PreferInOrder),
@@ -791,7 +789,7 @@ mod tests {
         assert_eq!(r.content, "answered by claude-code");
         assert!(
             claude_is_live.active_runner().is_none(),
-            "claude-code is answering, so the ACP path must not be offered"
+            "claude-code is answering, so the SDK path must not be offered"
         );
 
         // Same backends, but the primary's window is full, so the router steps
@@ -802,7 +800,7 @@ mod tests {
                     Box::new(TestProvider::ok("claude-code")),
                     Box::new(FakeChecker::at_percent("c", 95.0, 9_999_999_999)),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless")))
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk")))
                     .with_headless(headless.clone()),
             ],
             Box::new(PreferInOrder),
@@ -810,15 +808,15 @@ mod tests {
         .unwrap(); // Safe: test assertion
 
         let r = copilot_is_live.complete(&request()).await.unwrap(); // Safe: test assertion
-        assert_eq!(r.content, "answered by copilot_headless");
+        assert_eq!(r.content, "answered by copilot_sdk");
 
         let live = copilot_is_live
             .active_runner()
-            .expect("copilot_headless is answering, so the ACP path must be offered"); // Safe: test assertion
+            .expect("copilot_sdk is answering, so the SDK path must be offered"); // Safe: test assertion
         assert!(
             ptr::addr_eq(Arc::as_ptr(&live), Arc::as_ptr(&headless)),
             "it must hand back the SAME runner the backend was built from — a second \
-             CopilotHeadlessRunner would drop the subprocess pool and the cached model list"
+             CopilotSdkRunner would spawn another runtime"
         );
     }
 
@@ -839,15 +837,15 @@ mod tests {
                     Box::new(primary),
                     Box::new(FakeChecker::at_percent("c", 5.0, 9_999_999_999)),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
         .unwrap(); // Safe: test assertion
 
         let r = router.complete(&request()).await.unwrap(); // Safe: test assertion
-        assert_eq!(r.content, "answered by copilot_headless");
-        assert_eq!(router.name(), "copilot_headless");
+        assert_eq!(r.content, "answered by copilot_sdk");
+        assert_eq!(router.name(), "copilot_sdk");
     }
 
     #[tokio::test]
@@ -861,7 +859,7 @@ mod tests {
                 "stream closed",
             ))],
         );
-        let secondary = TestProvider::ok("copilot_headless");
+        let secondary = TestProvider::ok("copilot_sdk");
         let router = RouterProvider::new(
             vec![
                 Backend::unmetered(Box::new(primary)),
@@ -883,7 +881,7 @@ mod tests {
                     Box::new(TestProvider::ok("claude-code")),
                     Box::new(FakeChecker::failing("c")),
                 ),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
@@ -903,7 +901,7 @@ mod tests {
         let router = RouterProvider::new(
             vec![
                 Backend::metered(Box::new(TestProvider::ok("claude-code")), Box::new(checker)),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
@@ -962,7 +960,7 @@ mod tests {
         let router = RouterProvider::new(
             vec![
                 Backend::unmetered(Box::new(TestProvider::ok("claude-code"))),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
@@ -971,7 +969,7 @@ mod tests {
 
         let r = router.complete(&request()).await.unwrap(); // Safe: test assertion
         assert_eq!(
-            r.content, "answered by copilot_headless",
+            r.content, "answered by copilot_sdk",
             "the router must act on state it did not gather, or a shared store buys nothing"
         );
     }
@@ -981,14 +979,14 @@ mod tests {
         let router = RouterProvider::new(
             vec![
                 Backend::unmetered(Box::new(TestProvider::ok("claude-code"))),
-                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_sdk"))),
             ],
             Box::new(PreferInOrder),
         )
         .unwrap(); // Safe: test assertion
         assert_eq!(
             router.available_models(),
-            ["claude-code-model", "copilot_headless-model"]
+            ["claude-code-model", "copilot_sdk-model"]
         );
     }
 }

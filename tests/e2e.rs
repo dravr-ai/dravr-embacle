@@ -81,9 +81,7 @@ fn resolve_or_skip(runner_type: CliRunnerType) -> PathBuf {
 /// keeps CI honest: a stale credential reports as "skipped", not "broken".
 fn is_auth_unavailable<E: fmt::Display>(err: &E) -> bool {
     let msg = err.to_string();
-    msg.contains("Authentication required")
-        || msg.contains("authentication failed")
-        || msg.contains("-32000")
+    msg.contains("Authentication required") || msg.contains("authentication failed")
 }
 
 /// Run the standard battery of tests against any `LlmProvider`.
@@ -378,124 +376,6 @@ async fn e2e_kilo_cli() {
     let runner = embacle::KiloCliRunner::new(config);
     test_provider_complete(&runner).await;
     test_provider_stream(&runner).await;
-}
-
-// ============================================================================
-// Copilot Headless (ACP) tests — requires copilot-headless feature
-// ============================================================================
-
-#[cfg(feature = "copilot-headless")]
-mod headless {
-    use super::*;
-    use embacle::CopilotHeadlessRunner;
-
-    #[tokio::test]
-    async fn e2e_copilot_headless_complete() {
-        if !runner_enabled("copilot_headless") {
-            eprintln!("SKIP e2e_copilot_headless_complete (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
-            return;
-        }
-        let runner = CopilotHeadlessRunner::from_env();
-        test_provider_complete(&runner).await;
-    }
-
-    #[tokio::test]
-    async fn e2e_copilot_headless_stream() {
-        if !runner_enabled("copilot_headless") {
-            eprintln!("SKIP e2e_copilot_headless_stream (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
-            return;
-        }
-        let runner = CopilotHeadlessRunner::from_env();
-        test_provider_stream(&runner).await;
-    }
-
-    #[tokio::test]
-    async fn e2e_copilot_headless_converse() {
-        if !runner_enabled("copilot_headless") {
-            eprintln!("SKIP e2e_copilot_headless_converse (set EMBACLE_E2E_COPILOT_HEADLESS=1)");
-            return;
-        }
-        let runner = CopilotHeadlessRunner::from_env();
-
-        let request = ChatRequest::new(vec![
-            ChatMessage::system("You are a test bot. Follow instructions exactly."),
-            ChatMessage::user("Respond with exactly: CONVERSE_OK. Nothing else."),
-        ])
-        .with_max_tokens(20);
-
-        let response = match runner.converse(&request).await {
-            Ok(r) => r,
-            Err(e) if is_auth_unavailable(&e) => {
-                eprintln!("SKIP e2e_copilot_headless_converse: backend auth unavailable: {e}");
-                return;
-            }
-            Err(e) => panic!("converse() failed: {e}"),
-        };
-
-        assert!(
-            !response.content.is_empty(),
-            "copilot_headless converse: empty content"
-        );
-        eprintln!("  headless converse content: {:?}", response.content);
-        eprintln!("  headless converse model:   {:?}", response.model);
-        eprintln!("  headless converse usage:   {:?}", response.usage);
-        eprintln!(
-            "  headless converse tools:   {} observed",
-            response.tool_calls.len()
-        );
-        for tc in &response.tool_calls {
-            eprintln!("    tool: {} ({})", tc.title, tc.status);
-        }
-        eprintln!("  headless converse finish:  {:?}", response.finish_reason);
-    }
-
-    #[tokio::test]
-    async fn e2e_copilot_headless_converse_with_tools() {
-        if !runner_enabled("copilot_headless") {
-            eprintln!(
-                "SKIP e2e_copilot_headless_converse_with_tools (set EMBACLE_E2E_COPILOT_HEADLESS=1)"
-            );
-            return;
-        }
-        let runner = CopilotHeadlessRunner::from_env();
-
-        // Ask something that should trigger tool use (file read)
-        let request = ChatRequest::new(vec![ChatMessage::user(
-            "Read the file Cargo.toml in the current directory and tell me the package name.",
-        )])
-        .with_max_tokens(100);
-
-        let response = match runner.converse(&request).await {
-            Ok(r) => r,
-            Err(e) if is_auth_unavailable(&e) => {
-                eprintln!(
-                    "SKIP e2e_copilot_headless_converse_with_tools: backend auth unavailable: {e}"
-                );
-                return;
-            }
-            Err(e) => panic!("converse() with tools failed: {e}"),
-        };
-
-        assert!(
-            !response.content.is_empty(),
-            "copilot_headless converse_with_tools: empty content"
-        );
-        eprintln!(
-            "  headless tools content: {:?}",
-            &response.content[..response.content.len().min(200)]
-        );
-        eprintln!(
-            "  headless tools observed: {} tool calls",
-            response.tool_calls.len()
-        );
-        for tc in &response.tool_calls {
-            eprintln!("    tool: {} [{}] ({})", tc.title, tc.id, tc.status);
-        }
-        // We expect at least one tool call for reading Cargo.toml
-        if response.tool_calls.is_empty() {
-            eprintln!("  WARNING: expected tool calls but got none");
-        }
-    }
 }
 
 // ============================================================================

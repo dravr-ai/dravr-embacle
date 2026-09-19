@@ -252,7 +252,7 @@ pub enum AgUiEvent {
     Raw {
         /// Run identifier.
         run_id: String,
-        /// Provider label, e.g. `"gemini"`, `"groq"`, `"copilot_headless"`.
+        /// Provider label, e.g. `"gemini"`, `"groq"`, `"copilot_sdk"`.
         source: String,
         /// Raw payload as an opaque JSON value.
         payload: Value,

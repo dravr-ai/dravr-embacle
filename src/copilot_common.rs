@@ -4,13 +4,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-//! The turn API both Copilot providers implement.
+//! The turn API the Copilot SDK provider implements.
 //!
-//! Two providers reach GitHub's Copilot runtime — one through the `copilot
-//! --acp` adapter, one through `github-copilot-sdk` — and the host speaks to
-//! both through the same turn API. Everything here is transport-neutral and
-//! compiles without either feature, so a consumer can name the trait and its
-//! types regardless of which provider it links.
+//! `CopilotSdkRunner` reaches GitHub's Copilot runtime through
+//! `github-copilot-sdk`, and a host speaks to it through this turn API.
+//! Everything here is transport-neutral and compiles without the
+//! `copilot-sdk` feature, so a consumer can name the trait and its types
+//! whether or not it links the provider.
 
 use std::env;
 use std::pin::Pin;
@@ -81,10 +81,10 @@ pub fn resolve_github_token() -> Option<String> {
 
 /// A tool call observed during a turn.
 ///
-/// `id`, `title` and `status` are what every transport reports. `name`,
-/// `arguments` and `result` are what the SDK transport reports and the ACP
-/// adapter does not — it carries a display title and a status, nothing the
-/// host could persist as a tool round.
+/// `id`, `title` and `status` are on every observation. `name`, `arguments`
+/// and `result` are filled from the runtime's `tool.execution_start` and
+/// `tool.execution_complete` events, so a host can persist the observation
+/// as a tool round; each stays `None` until the event that carries it arrives.
 #[derive(Debug, Clone, Default)]
 pub struct ObservedToolCall {
     /// Tool call ID as the runtime assigned it.
@@ -165,8 +165,7 @@ pub trait HeadlessTurnProvider: LlmProvider {
 
 /// The system prompt of a request, if it carries one.
 ///
-/// Only the first `System` message counts; the Copilot transports have one
-/// system slot each.
+/// Only the first `System` message counts; the runtime has one system slot.
 #[must_use]
 pub fn system_prompt(request: &ChatRequest) -> Option<&str> {
     request
@@ -179,8 +178,7 @@ pub fn system_prompt(request: &ChatRequest) -> Option<&str> {
 /// A turn rendered for a provider that opens a fresh session per call.
 #[derive(Debug)]
 pub struct RenderedTurn<'a> {
-    /// The prompt text: optional system text, the history block, the current
-    /// user message.
+    /// The prompt text: the history block, then the current user message.
     pub text: String,
     /// The user message the turn answers, for attachments the text cannot
     /// carry (images).
@@ -193,15 +191,10 @@ pub struct RenderedTurn<'a> {
 /// history; a session that starts empty gets the prior turns serialized into
 /// a `<conversation-history>` block ahead of the current user message, capped
 /// to the most recent `max_history_turns` messages (`0` disables history).
-/// When `inline_system` is set the system prompt is written at the top of the
-/// text — for a transport with no system slot of its own; a transport that
-/// delivers the system prompt natively passes `false` so it is not sent twice.
+/// The system prompt is not part of the text: the runtime has a system slot of
+/// its own, which [`system_prompt`] feeds, so it is never sent twice.
 #[must_use]
-pub fn render_turn(
-    request: &ChatRequest,
-    max_history_turns: usize,
-    inline_system: bool,
-) -> RenderedTurn<'_> {
+pub fn render_turn(request: &ChatRequest, max_history_turns: usize) -> RenderedTurn<'_> {
     let non_system: Vec<&ChatMessage> = request
         .messages
         .iter()
@@ -252,14 +245,7 @@ pub fn render_turn(
         buf
     };
 
-    let mut text = String::new();
-    if inline_system {
-        if let Some(sys) = system_prompt(request) {
-            text.push_str(sys);
-            text.push_str("\n\n");
-        }
-    }
-    text.push_str(&history_block);
+    let mut text = history_block;
     text.push_str(user_text);
 
     RenderedTurn { text, last_user }
@@ -295,25 +281,25 @@ mod tests {
     }
 
     #[test]
-    fn render_inlines_system_history_and_user_in_order() {
+    fn render_puts_history_ahead_of_the_current_user_message() {
         let req = request(vec![
             ChatMessage::system("SYS"),
             ChatMessage::user("first"),
             ChatMessage::assistant("reply"),
             ChatMessage::user("second"),
         ]);
-        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS, true);
+        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS);
         assert_eq!(
             turn.text,
-            "SYS\n\n<conversation-history>\nUser: first\nAssistant: reply\n</conversation-history>\n\nsecond"
+            "<conversation-history>\nUser: first\nAssistant: reply\n</conversation-history>\n\nsecond"
         );
         assert_eq!(turn.last_user.map(|m| m.content.as_str()), Some("second"));
     }
 
     #[test]
-    fn render_without_inline_system_leaves_the_system_slot_to_the_transport() {
+    fn render_leaves_the_system_slot_to_the_transport() {
         let req = request(vec![ChatMessage::system("SYS"), ChatMessage::user("hi")]);
-        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS, false);
+        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS);
         assert_eq!(turn.text, "hi");
         assert_eq!(system_prompt(&req), Some("SYS"));
     }
@@ -327,19 +313,19 @@ mod tests {
             ChatMessage::assistant("a2"),
             ChatMessage::user("u3"),
         ]);
-        let turn = render_turn(&req, 2, false);
+        let turn = render_turn(&req, 2);
         assert_eq!(
             turn.text,
             "<conversation-history>\nUser: u2\nAssistant: a2\n</conversation-history>\n\nu3"
         );
-        let none = render_turn(&req, 0, false);
+        let none = render_turn(&req, 0);
         assert_eq!(none.text, "u3");
     }
 
     #[test]
     fn render_with_no_user_message_yields_history_only() {
         let req = request(vec![ChatMessage::assistant("a1")]);
-        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS, false);
+        let turn = render_turn(&req, DEFAULT_MAX_HISTORY_TURNS);
         assert_eq!(
             turn.text,
             "<conversation-history>\nAssistant: a1\n</conversation-history>\n\n"

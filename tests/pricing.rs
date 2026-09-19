@@ -124,7 +124,7 @@ fn test_every_default_model_has_pricing() {
 fn anthropic_cache_read_bills_at_ten_percent() {
     // 1M prompt tokens, all served from cache, no output.
     let counts = TokenCounts::new(1_000_000, 0).with_cache(1_000_000, 0);
-    let cost = calculate_cost_for("copilot_headless", "claude-opus-4", &counts);
+    let cost = calculate_cost_for("copilot_sdk", "claude-opus-4", &counts);
 
     // $15/M input x 0.10 = $1.50, NOT the $3.75 a flat 0.25x would charge.
     assert!(
@@ -141,8 +141,8 @@ fn anthropic_cache_write_bills_above_fresh_input() {
     let written = TokenCounts::new(1_000_000, 0).with_cache(0, 1_000_000);
     let fresh = TokenCounts::new(1_000_000, 0);
 
-    let write_cost = calculate_cost_for("copilot_headless", "claude-opus-4", &written);
-    let fresh_cost = calculate_cost_for("copilot_headless", "claude-opus-4", &fresh);
+    let write_cost = calculate_cost_for("copilot_sdk", "claude-opus-4", &written);
+    let fresh_cost = calculate_cost_for("copilot_sdk", "claude-opus-4", &fresh);
 
     // $15/M x 1.25 = $18.75 against $15.00 fresh.
     assert!(
@@ -163,8 +163,8 @@ fn reasoning_tokens_bill_at_the_output_rate() {
     let without = TokenCounts::new(0, 1_000_000);
     let with = TokenCounts::new(0, 1_000_000).with_reasoning(1_000_000);
 
-    let cost_without = calculate_cost_for("copilot_headless", "claude-opus-4", &without);
-    let cost_with = calculate_cost_for("copilot_headless", "claude-opus-4", &with);
+    let cost_without = calculate_cost_for("copilot_sdk", "claude-opus-4", &without);
+    let cost_with = calculate_cost_for("copilot_sdk", "claude-opus-4", &with);
 
     // $75/M output: 1M completion = $75, plus 1M reasoning = $150 total.
     assert!(
@@ -184,7 +184,7 @@ fn cache_read_rate_is_per_provider() {
     let counts = TokenCounts::new(1_000_000, 0).with_cache(1_000_000, 0);
 
     // Anthropic 0.10x of $15/M = $1.50
-    let anthropic = calculate_cost_for("copilot_headless", "claude-opus-4", &counts);
+    let anthropic = calculate_cost_for("copilot_sdk", "claude-opus-4", &counts);
     // OpenAI 0.50x of $2.50/M = $1.25
     let openai = calculate_cost_for("openai_api", "gpt-4o", &counts);
     // Gemini 0.25x of $0.075/M = $0.01875
@@ -196,12 +196,12 @@ fn cache_read_rate_is_per_provider() {
 }
 
 /// A turn reporting reads AND writes bills three prompt segments at three
-/// different rates. Shaped on a real Copilot ACP payload: 15,320 read +
-/// 12,540 written out of 27,862 prompt tokens.
+/// different rates. Shaped on a real Copilot runtime usage payload: 15,320
+/// read + 12,540 written out of 27,862 prompt tokens.
 #[test]
-fn real_acp_turn_splits_prompt_across_three_rates() {
+fn real_copilot_turn_splits_prompt_across_three_rates() {
     let counts = TokenCounts::new(27_862, 4).with_cache(15_320, 12_540);
-    let cost = calculate_cost_for("copilot_headless", "claude-opus-4", &counts);
+    let cost = calculate_cost_for("copilot_sdk", "claude-opus-4", &counts);
 
     let input = 15.0 / 1_000_000.0;
     let fresh = f64::from(27_862 - 15_320 - 12_540) * input;
@@ -217,11 +217,7 @@ fn real_acp_turn_splits_prompt_across_three_rates() {
 
     // The naive all-fresh imputation is a different number — this is the
     // whole point of carrying the counts.
-    let naive = calculate_cost_for(
-        "copilot_headless",
-        "claude-opus-4",
-        &TokenCounts::new(27_862, 4),
-    );
+    let naive = calculate_cost_for("copilot_sdk", "claude-opus-4", &TokenCounts::new(27_862, 4));
     assert!(
         (cost - naive).abs() > 1e-9,
         "cache-aware and all-fresh imputation must differ; both were {cost}"
@@ -233,7 +229,7 @@ fn real_acp_turn_splits_prompt_across_three_rates() {
 #[test]
 fn cache_counts_are_clamped_to_the_prompt() {
     let counts = TokenCounts::new(1_000, 0).with_cache(900, 900);
-    let cost = calculate_cost_for("copilot_headless", "claude-opus-4", &counts);
+    let cost = calculate_cost_for("copilot_sdk", "claude-opus-4", &counts);
 
     let input = 15.0 / 1_000_000.0;
     // 900 read, then only 100 left to count as written, then 0 fresh.

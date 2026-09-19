@@ -59,12 +59,10 @@ jobs:
     name: Tests (Linux)
     runs-on: ubuntu-latest
     env:
-      HAS_COPILOT_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
       # The Rust runtime resolves its token itself and wants a user token with
-      # Copilot access (a fine-grained PAT needs the `Copilot Requests`
-      # permission; a `gho_` OAuth token works); the ACP adapter's own token
-      # exchange accepts the PAT COPILOT_GITHUB_TOKEN holds, which the runtime
-      # answers "Not authenticated". Two shapes, two secrets.
+      # Copilot access: a fine-grained PAT with the `Copilot Requests`
+      # permission, or a `gho_` OAuth token. A classic PAT is answered "Not
+      # authenticated".
       HAS_COPILOT_SDK_TOKEN: ${{ secrets.COPILOT_SDK_GITHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
@@ -79,31 +77,26 @@ jobs:
       # asks every runner for its name, so it needs every runner feature. No
       # secrets — the live cases in these files are env-gated and skip.
       - name: HTTP API provider tests
-        run: cargo test --workspace --features http-api,openai-api,copilot-headless,copilot-sdk,web-ui
+        run: cargo test --workspace --features http-api,openai-api,copilot-sdk,web-ui
+      # The SDK runner needs the runtime pair (copilot-runtime + runtime.node),
+      # which the Copilot CLI extracts into the SEA's package cache on its
+      # first run — `copilot --version` is that run.
       - name: Install Copilot CLI
-        if: env.HAS_COPILOT_TOKEN == 'true'
+        if: env.HAS_COPILOT_SDK_TOKEN == 'true'
         run: |
           npm install -g @github/copilot-linux-x64
           NPM_PREFIX="$(npm prefix -g)"
           ln -sf "$NPM_PREFIX/bin/copilot-linux-x64" /usr/local/bin/copilot
           copilot --version
-      - name: Copilot Headless E2E
-        if: env.HAS_COPILOT_TOKEN == 'true'
-        run: cargo test --workspace --features copilot-headless
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          EMBACLE_E2E_COPILOT_HEADLESS: "1"
-      # The SDK runner needs the runtime pair (copilot-runtime + runtime.node),
-      # which the `copilot --version` above extracted into the SEA's package
-      # cache. `test -x` fails the job closed when the pair is not where the
+      # `test -x` fails the job closed when the runtime pair is not where the
       # loader put it, rather than letting the gated tests skip silently.
       - name: Copilot SDK E2E
-        if: env.HAS_COPILOT_TOKEN == 'true' && env.HAS_COPILOT_SDK_TOKEN == 'true'
+        if: env.HAS_COPILOT_SDK_TOKEN == 'true'
         run: |
           RUNTIME="$(ls -d "$HOME"/.cache/copilot/pkg/linux-x64/*/prebuilds/linux-x64/copilot-runtime | sort -V | tail -1)"
           test -x "$RUNTIME"
           echo "runtime: $RUNTIME"
-          COPILOT_RUNTIME_PATH="$RUNTIME" cargo test --workspace --features copilot-headless,copilot-sdk
+          COPILOT_RUNTIME_PATH="$RUNTIME" cargo test --workspace --features copilot-sdk
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_SDK_GITHUB_TOKEN }}
           EMBACLE_E2E_COPILOT_SDK: "1"

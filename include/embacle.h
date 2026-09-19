@@ -19,10 +19,12 @@ extern "C" {
 #endif
 
 /*
- * Initialize the tokio runtime and copilot headless runner.
+ * Initialize the tokio runtime and the Copilot SDK runner.
  *
- * Reads copilot auth tokens from ~/.config/github-copilot/ and env vars
- * (COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN).
+ * Configured from the environment: COPILOT_RUNTIME_PATH names the
+ * copilot-runtime wrapper (runtime.node beside it); the GitHub token comes
+ * from COPILOT_GITHUB_TOKEN, GH_TOKEN or GITHUB_TOKEN — a user token with
+ * Copilot access — or the runtime's stored login when none is set.
  *
  * Returns:
  *   0  success

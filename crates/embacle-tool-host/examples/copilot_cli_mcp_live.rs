@@ -1,4 +1,4 @@
-// ABOUTME: Live proof that plain `copilot` (NO ACP) calls a caller's tools via MCP
+// ABOUTME: Live proof that the plain `copilot` CLI calls a caller's tools via MCP
 // ABOUTME: The tool becomes part of Copilot's REAL toolset, not prose in a prompt
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -10,7 +10,7 @@
 // answers "that tool isn't part of my real toolset". This registers the host as an
 // MCP server via `--additional-mcp-config`, so the tool IS part of that toolset.
 //
-// Same secret-number probe as the ACP test: a value the model cannot know unless it
+// Same secret-number probe as the SDK live test: a value the model cannot know unless it
 // actually called the tool.
 
 use std::path::PathBuf;
@@ -110,7 +110,7 @@ async fn main() {
             println!("calls_served (host)  : {}", session.calls_served());
             println!("secret in the answer : {}", resp.content.contains(SECRET));
             if executed >= 1 && resp.content.contains(SECRET) {
-                println!("PASS: CopilotRunner (no ACP) called the caller's tool over MCP.");
+                println!("PASS: CopilotRunner called the caller's tool over MCP.");
             } else {
                 println!("FAIL: the tool was not reached.");
             }
