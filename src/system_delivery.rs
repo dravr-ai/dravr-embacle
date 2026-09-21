@@ -139,63 +139,81 @@ mod tests {
         );
     }
 
+    /// Generates the runner list and an exhaustive `match` over the same
+    /// tokens, so the list cannot fall behind the enum.
+    ///
+    /// These tests used to carry two hand-written arrays. `CopilotSdk` was added
+    /// to the enum with a `SeparateChannel` declaration and to neither array, so
+    /// the assertion that exactly one runner uses a separate channel kept
+    /// passing while a second one shipped. A variant missing from the list below
+    /// is now a non-exhaustive `match` in `is_listed`: it does not compile.
+    macro_rules! runner_list {
+        ($( $(#[$gate:meta])* $variant:ident ),* $(,)?) => {
+            const ALL_RUNNERS: &[CliRunnerType] = &[
+                $( $(#[$gate])* CliRunnerType::$variant ),*
+            ];
+
+            const fn is_listed(runner: CliRunnerType) -> bool {
+                match runner {
+                    $( $(#[$gate])* CliRunnerType::$variant => true ),*
+                }
+            }
+        };
+    }
+
+    runner_list![
+        ClaudeCode,
+        CursorAgent,
+        OpenCode,
+        Copilot,
+        GeminiCli,
+        CodexCli,
+        GooseCli,
+        ClineCli,
+        ContinueCli,
+        WarpCli,
+        KiroCli,
+        KiloCli,
+        #[cfg(feature = "copilot-headless")]
+        CopilotHeadless,
+        #[cfg(feature = "copilot-sdk")]
+        CopilotSdk,
+        #[cfg(feature = "web-ui")]
+        ClaudeWeb,
+    ];
+
     /// Every runner must have a declared delivery mode. The match in
     /// `system_delivery` is exhaustive, so this passing means no variant was
-    /// added without a decision.
+    /// added without a decision — and `ALL_RUNNERS` is held to the enum by
+    /// `is_listed`, so no variant is skipped here either.
     #[test]
     fn every_runner_declares_a_delivery_mode() {
-        for runner in [
-            CliRunnerType::ClaudeCode,
-            CliRunnerType::CursorAgent,
-            CliRunnerType::OpenCode,
-            CliRunnerType::Copilot,
-            CliRunnerType::GeminiCli,
-            CliRunnerType::CodexCli,
-            CliRunnerType::GooseCli,
-            CliRunnerType::ClineCli,
-            CliRunnerType::ContinueCli,
-            CliRunnerType::WarpCli,
-            CliRunnerType::KiroCli,
-            CliRunnerType::KiloCli,
-            #[cfg(feature = "copilot-headless")]
-            CliRunnerType::CopilotHeadless,
-            #[cfg(feature = "web-ui")]
-            CliRunnerType::ClaudeWeb,
-        ] {
+        for runner in ALL_RUNNERS {
+            assert!(is_listed(*runner));
             let _ = runner.system_delivery();
         }
     }
 
-    /// Exactly one runner may exclude, and only because it has `--system-prompt`.
+    /// A runner may exclude the System message only because it has a dedicated
+    /// slot to deliver it through. Two do: Claude Code's `--system-prompt`, and
+    /// the Copilot SDK's `session.create` `systemMessage { mode: "replace" }`.
     /// If a future runner declares [`SystemDelivery::SeparateChannel`], this test
     /// forces the author to justify it here rather than in a silent import choice.
     #[test]
-    fn only_claude_code_uses_a_separate_channel() {
-        let separate: Vec<CliRunnerType> = [
-            CliRunnerType::ClaudeCode,
-            CliRunnerType::CursorAgent,
-            CliRunnerType::OpenCode,
-            CliRunnerType::Copilot,
-            CliRunnerType::GeminiCli,
-            CliRunnerType::CodexCli,
-            CliRunnerType::GooseCli,
-            CliRunnerType::ClineCli,
-            CliRunnerType::ContinueCli,
-            CliRunnerType::WarpCli,
-            CliRunnerType::KiroCli,
-            CliRunnerType::KiloCli,
-            #[cfg(feature = "copilot-headless")]
-            CliRunnerType::CopilotHeadless,
-            #[cfg(feature = "web-ui")]
-            CliRunnerType::ClaudeWeb,
-        ]
-        .into_iter()
-        .filter(|r| r.system_delivery() == SystemDelivery::SeparateChannel)
-        .collect();
+    fn only_runners_with_a_system_slot_use_a_separate_channel() {
+        let separate: Vec<CliRunnerType> = ALL_RUNNERS
+            .iter()
+            .copied()
+            .filter(|r| r.system_delivery() == SystemDelivery::SeparateChannel)
+            .collect();
 
+        let expected = vec![
+            CliRunnerType::ClaudeCode,
+            #[cfg(feature = "copilot-sdk")]
+            CliRunnerType::CopilotSdk,
+        ];
         assert_eq!(
-            separate,
-            vec![CliRunnerType::ClaudeCode],
+            separate, expected,
             "a runner may only exclude the System message if it has a dedicated \
              channel to deliver it through; add the justification in \
              system_delivery() before changing this"
