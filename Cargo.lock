@@ -883,7 +883,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "embacle"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-tool-host"
-version = "0.28.1"
+version = "0.28.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1687,9 +1687,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libredox"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6480ccc157a1389bb2e4891b24751b0f798ba640d22386f23143fbcc89da195a"
+checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
 dependencies = [
  "libc",
 ]
