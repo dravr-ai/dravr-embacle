@@ -631,6 +631,49 @@ mod tests {
         }
     }
 
+    /// A tier that has spent its quota cannot serve this request; the next
+    /// tier, on its own account, can. Under the strict policy the chain moves
+    /// on instead of handing the athlete the first tier's quota refusal.
+    #[tokio::test]
+    async fn strict_policy_falls_through_on_a_tiers_rate_limit() {
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(TestProvider::failing_with_kind(
+                "quota",
+                ErrorKind::RateLimit,
+            )),
+            Box::new(TestProvider::ok("second", "served by second")),
+        ];
+        let fallback = FallbackProvider::new(providers)
+            .expect("non-empty") // Safe: test assertion
+            .with_fallthrough(ResponsePolicy::strict());
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+        let response = fallback
+            .complete(&request)
+            .await
+            .expect("second tier answers"); // Safe: test assertion
+        assert_eq!(response.content, "served by second");
+    }
+
+    /// The request's own fault still propagates under the strict policy: the
+    /// next tier would only produce its own version of the same rejection.
+    #[tokio::test]
+    async fn strict_policy_propagates_an_invalid_request() {
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(TestProvider::failing_with_kind(
+                "first",
+                ErrorKind::InvalidRequest,
+            )),
+            Box::new(TestProvider::ok("second", "never asked")),
+        ];
+        let fallback = FallbackProvider::new(providers)
+            .expect("non-empty") // Safe: test assertion
+            .with_fallthrough(ResponsePolicy::strict());
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+        let err = fallback.complete(&request).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        assert_eq!(err.message, "first: down");
+    }
+
     fn make_response(content: &str) -> ChatResponse {
         ChatResponse {
             content: content.to_owned(),

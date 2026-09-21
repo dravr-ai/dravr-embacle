@@ -109,13 +109,14 @@ impl ErrorKind {
     ///
     /// This is the fall-through predicate a [`FallbackProvider`] uses under
     /// [`FallThrough::ProviderFault`]: a timeout, an upstream failure, a
-    /// rejected credential, a missing binary, an unavailable model or an
-    /// internal fault are all reasons to ask the next tier. `Config`,
-    /// `Guardrail`, `ContextLength`, `RateLimit` and `InvalidRequest` are the
-    /// request's or the operator's problem and propagate unchanged: rerouting
-    /// them would hide the real diagnostic behind another provider's version
-    /// of the same rejection, and a quota refusal is a reason to switch
-    /// deliberately, not to cascade blindly.
+    /// rejected credential, a missing binary, an unavailable model, a spent
+    /// quota or rate limit, or an internal fault are all reasons to ask the
+    /// next tier — each tier holds its own account, so the one that has spent
+    /// its quota cannot serve this request while its neighbour can. `Config`,
+    /// `Guardrail`, `ContextLength` and `InvalidRequest` are the request's or
+    /// the operator's problem and propagate unchanged: rerouting them would
+    /// hide the real diagnostic behind another provider's version of the same
+    /// rejection.
     ///
     /// Wider than [`Self::is_transient`] on purpose: an auth failure is not
     /// worth retrying in place, but it is exactly the case where the next
@@ -133,6 +134,7 @@ impl ErrorKind {
                 | Self::Internal
                 | Self::BinaryNotFound
                 | Self::ModelUnavailable
+                | Self::RateLimit
         )
     }
 }
@@ -1010,6 +1012,7 @@ mod tests {
             ErrorKind::Internal,
             ErrorKind::BinaryNotFound,
             ErrorKind::ModelUnavailable,
+            ErrorKind::RateLimit,
         ];
         for kind in provider_faults {
             assert!(kind.is_provider_fault(), "{kind:?} is the provider's fault");
@@ -1018,7 +1021,6 @@ mod tests {
             ErrorKind::Config,
             ErrorKind::Guardrail,
             ErrorKind::ContextLength,
-            ErrorKind::RateLimit,
             ErrorKind::InvalidRequest,
         ];
         for kind in request_side {
@@ -1036,6 +1038,11 @@ mod tests {
         }
         assert!(ErrorKind::AuthFailure.is_provider_fault());
         assert!(!ErrorKind::AuthFailure.is_transient());
+        // A spent quota moves the request to the next tier but is never
+        // retried in place: the window resets on the provider's clock, not
+        // a backoff's.
+        assert!(ErrorKind::RateLimit.is_provider_fault());
+        assert!(!ErrorKind::RateLimit.is_transient());
     }
 
     #[test]

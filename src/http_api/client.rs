@@ -364,7 +364,10 @@ mod tests {
             "Quota exceeded. Please retry in 6.406453963s.",
         );
         assert_eq!(err.kind, ErrorKind::RateLimit);
-        assert!(!err.kind.is_provider_fault());
+        // The vendor's 429 is the vendor failing to serve: a chain moves on,
+        // and nobody sleeps on the wait it names.
+        assert!(err.kind.is_provider_fault());
+        assert!(!err.kind.is_transient());
         assert!(
             err.message.contains("try again in 7 seconds"),
             "{}",
