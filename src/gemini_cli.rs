@@ -58,6 +58,10 @@ const FALLBACK_MODELS: &[&str] = &["gemini-2.5-flash", "gemini-2.5-pro", "gemini
 /// Implements `LlmProvider` by delegating to the `gemini` binary
 /// with `-o json` for complete responses and `-o stream-json` for
 /// streaming. Uses `-y` (yolo mode) to auto-approve tool usage.
+/// The variables the `gemini` binary reads its API key from, let through the sandbox by
+/// the constructor; the readiness probe in `auth` looks for the same ones.
+pub const CREDENTIAL_ENV_KEYS: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+
 pub struct GeminiCliRunner {
     base: CliRunnerBase,
 }
@@ -67,7 +71,11 @@ impl GeminiCliRunner {
     #[must_use]
     pub fn new(config: RunnerConfig) -> Self {
         Self {
-            base: CliRunnerBase::new(config, DEFAULT_MODEL, FALLBACK_MODELS),
+            base: CliRunnerBase::new(
+                config.allowing_env_keys(CREDENTIAL_ENV_KEYS),
+                DEFAULT_MODEL,
+                FALLBACK_MODELS,
+            ),
         }
     }
 

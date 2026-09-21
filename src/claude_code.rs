@@ -131,6 +131,15 @@ fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
 /// Default model for Claude Code
 const DEFAULT_MODEL: &str = "opus";
 
+/// The variables the `claude` binary reads its login from.
+///
+/// [`ClaudeCodeRunner::new`] lets them through the sandbox. Without them a
+/// headless deployment that holds its token in the environment answers every
+/// turn with `Not logged in · Please run /login` (exit 1, no API call) while
+/// the `--version` health check keeps passing — the shape of the
+/// dravr-platform outage of 2026-09-21.
+pub const CREDENTIAL_ENV_KEYS: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
 /// Fallback model list when no runtime override is available
 const FALLBACK_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
 
@@ -140,6 +149,14 @@ struct ClaudeResponse {
     result: Option<String>,
     #[serde(default)]
     is_error: bool,
+    /// `success`, or the failure class (`error_during_execution`,
+    /// `error_max_turns`, …). Carried into the error message so a log line
+    /// says which one it was.
+    #[serde(default)]
+    subtype: Option<String>,
+    /// HTTP status of the API error behind a failed turn, when there was one.
+    #[serde(default)]
+    api_error_status: Option<u16>,
     /// Why the CLI stopped. `"prompt_too_long"` marks a permanent context-window
     /// overflow (vs a transient upstream failure) so we can surface it as a
     /// non-retryable 400 instead of a retryable 502.
@@ -179,7 +196,11 @@ impl ClaudeCodeRunner {
     #[must_use]
     pub fn new(config: RunnerConfig) -> Self {
         Self {
-            base: CliRunnerBase::new(config, DEFAULT_MODEL, FALLBACK_MODELS),
+            base: CliRunnerBase::new(
+                config.allowing_env_keys(CREDENTIAL_ENV_KEYS),
+                DEFAULT_MODEL,
+                FALLBACK_MODELS,
+            ),
         }
     }
 
@@ -268,47 +289,73 @@ impl ClaudeCodeRunner {
         cmd
     }
 
-    /// Parse a Claude Code JSON response into a `ChatResponse`
-    fn parse_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    /// Read the CLI's `--output-format json` result document, whatever it says.
+    fn parse_result_document(raw: &[u8]) -> Result<ClaudeResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("Claude Code output is not valid UTF-8: {e}"))
         })?;
 
-        let parsed: ClaudeResponse = serde_json::from_str(text).map_err(|e| {
+        serde_json::from_str(text).map_err(|e| {
             RunnerError::internal(format!("Failed to parse Claude Code JSON response: {e}"))
-        })?;
+        })
+    }
 
-        if parsed.is_error {
-            let message = parsed
-                .result
-                .as_deref()
-                .unwrap_or("Unknown error from Claude Code");
-            // A context-window overflow is permanent for the identical prompt:
-            // classify it as ContextLength (HTTP 400, non-transient) so the caller
-            // shrinks the request instead of retrying the same oversized blob.
-            // Detect via the CLI's structured `terminal_reason` first, falling back
-            // to the human-readable message.
-            let is_context_overflow = parsed
-                .terminal_reason
-                .as_deref()
-                .is_some_and(|r| r.eq_ignore_ascii_case("prompt_too_long"))
-                || message.to_ascii_lowercase().contains("prompt is too long");
-            if is_context_overflow {
-                // Phrase includes "context length" so OpenAI-compatible clients that
-                // classify by message (not just HTTP status) recognise the overflow.
-                return Err(RunnerError::context_length(format!(
-                    "claude-code: context length exceeded — {message}"
-                )));
+    /// The failure a result document reports, classified; `None` when it
+    /// reports success.
+    ///
+    /// The CLI writes the reason in `result`, the last field of a ~2 KB
+    /// document, with `subtype` and `api_error_status` beside it. Reading
+    /// them here is what tells a spent quota (`RateLimit`) from a context
+    /// overflow (`ContextLength`) from a broken pipe (`ExternalService`).
+    fn failure_of(parsed: &ClaudeResponse) -> Option<RunnerError> {
+        if !parsed.is_error {
+            return None;
+        }
+        let reason = parsed
+            .result
+            .as_deref()
+            .unwrap_or("Unknown error from Claude Code");
+        let message = match (parsed.subtype.as_deref(), parsed.api_error_status) {
+            (Some(subtype), Some(status)) => {
+                format!("{reason} (subtype: {subtype}, api_error_status: {status})")
             }
-            // A quota refusal is not a fault: the provider is working and will
-            // answer again once the window resets. Classifying it as
-            // ExternalService made it indistinguishable from a flaky CLI, and
-            // is_transient() then told every retry loop to keep hammering a
-            // wall it cannot pass.
-            if is_quota_refusal(parsed.terminal_reason.as_deref(), message) {
-                return Err(RunnerError::rate_limit("claude-code", message));
-            }
-            return Err(RunnerError::external_service("claude-code", message));
+            (Some(subtype), None) => format!("{reason} (subtype: {subtype})"),
+            (None, _) => reason.to_owned(),
+        };
+        // A context-window overflow is permanent for the identical prompt:
+        // classify it as ContextLength (HTTP 400, non-transient) so the caller
+        // shrinks the request instead of retrying the same oversized blob.
+        // Detect via the CLI's structured `terminal_reason` first, falling back
+        // to the human-readable message.
+        let is_context_overflow = parsed
+            .terminal_reason
+            .as_deref()
+            .is_some_and(|r| r.eq_ignore_ascii_case("prompt_too_long"))
+            || reason.to_ascii_lowercase().contains("prompt is too long");
+        if is_context_overflow {
+            // Phrase includes "context length" so OpenAI-compatible clients that
+            // classify by message (not just HTTP status) recognise the overflow.
+            return Some(RunnerError::context_length(format!(
+                "claude-code: context length exceeded — {message}"
+            )));
+        }
+        // A quota refusal is not a fault: the provider is working and will
+        // answer again once the window resets. Classifying it as
+        // ExternalService made it indistinguishable from a flaky CLI, and
+        // is_transient() then told every retry loop to keep hammering a
+        // wall it cannot pass.
+        if is_quota_refusal(parsed.terminal_reason.as_deref(), reason) {
+            return Some(RunnerError::rate_limit("claude-code", message));
+        }
+        Some(RunnerError::external_service("claude-code", message))
+    }
+
+    /// Turn a parsed result document into the response, or its classified failure.
+    fn response_from(
+        parsed: ClaudeResponse,
+    ) -> Result<(ChatResponse, Option<String>), RunnerError> {
+        if let Some(failure) = Self::failure_of(&parsed) {
+            return Err(failure);
         }
 
         let content = parsed.result.unwrap_or_default();
@@ -324,6 +371,70 @@ impl ClaudeCodeRunner {
         };
 
         Ok((response, parsed.session_id))
+    }
+
+    /// Map one `stream-json` line to a chunk, or to the failure a `result`
+    /// line reports.
+    fn stream_line_to_chunk(line: &str) -> Result<StreamChunk, RunnerError> {
+        if line.trim().is_empty() {
+            return Ok(StreamChunk {
+                delta: String::new(),
+                is_final: false,
+                finish_reason: None,
+            });
+        }
+
+        let value: Value = serde_json::from_str(line)
+            .map_err(|e| RunnerError::internal(format!("Invalid JSON in claude stream: {e}")))?;
+
+        let chunk_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match chunk_type {
+            "result" => {
+                // The final line is the same document `--output-format json`
+                // prints; an `is_error` result used to end the stream as a
+                // clean stop with no text, so the caller saw an empty answer
+                // and never the reason.
+                let parsed: ClaudeResponse = serde_json::from_value(value).map_err(|e| {
+                    RunnerError::internal(format!("Invalid result in claude stream: {e}"))
+                })?;
+                if let Some(failure) = Self::failure_of(&parsed) {
+                    return Err(failure);
+                }
+                Ok(StreamChunk {
+                    delta: String::new(),
+                    is_final: true,
+                    finish_reason: Some("stop".to_owned()),
+                })
+            }
+            "assistant" => {
+                // Extract text from content array: message.content[].text where type == "text"
+                let text = value
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|item| {
+                                item.get("type").and_then(|t| t.as_str()) == Some("text")
+                            })
+                            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                Ok(StreamChunk {
+                    delta: text,
+                    is_final: false,
+                    finish_reason: None,
+                })
+            }
+            // system, rate_limit_event, and other event types are ignored
+            _ => Ok(StreamChunk {
+                delta: String::new(),
+                is_final: false,
+                finish_reason: None,
+            }),
+        }
     }
 }
 
@@ -368,9 +479,26 @@ impl LlmProvider for ClaudeCodeRunner {
         );
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
-        self.base.check_exit_code(&output, "claude-code")?;
 
-        let (response, session_id) = Self::parse_response(&output.stdout)?;
+        // The CLI reports every failure it understands as a result document
+        // with `is_error: true` and exit 1, the reason in its last field.
+        // Judging the exit code first kept the document's first 500 chars
+        // (cost and token counts) as the diagnostic and skipped the
+        // classification, so a spent quota reached callers as a generic
+        // fault with no reason. The exit code only speaks when stdout is not
+        // a result document, or when a document claims success on a
+        // non-zero exit.
+        let parsed = match Self::parse_result_document(&output.stdout) {
+            Ok(parsed) => parsed,
+            Err(not_a_document) => {
+                self.base.check_exit_code(&output, "claude-code")?;
+                return Err(not_a_document);
+            }
+        };
+        if output.exit_code != 0 && !parsed.is_error {
+            self.base.check_exit_code(&output, "claude-code")?;
+        }
+        let (response, session_id) = Self::response_from(parsed)?;
 
         if let Some(sid) = session_id {
             if let Some(model) = &request.model {
@@ -423,55 +551,7 @@ impl LlmProvider for ClaudeCodeRunner {
         let stream = lines.map(move |line_result: Result<String, io::Error>| {
             let line = line_result
                 .map_err(|e| RunnerError::internal(format!("Error reading claude stream: {e}")))?;
-
-            if line.trim().is_empty() {
-                return Ok(StreamChunk {
-                    delta: String::new(),
-                    is_final: false,
-                    finish_reason: None,
-                });
-            }
-
-            let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                RunnerError::internal(format!("Invalid JSON in claude stream: {e}"))
-            })?;
-
-            let chunk_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match chunk_type {
-                "result" => Ok(StreamChunk {
-                    delta: String::new(),
-                    is_final: true,
-                    finish_reason: Some("stop".to_owned()),
-                }),
-                "assistant" => {
-                    // Extract text from content array: message.content[].text where type == "text"
-                    let text = value
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter(|item| {
-                                    item.get("type").and_then(|t| t.as_str()) == Some("text")
-                                })
-                                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                                .collect::<Vec<_>>()
-                                .join("")
-                        })
-                        .unwrap_or_default();
-                    Ok(StreamChunk {
-                        delta: text,
-                        is_final: false,
-                        finish_reason: None,
-                    })
-                }
-                // system, rate_limit_event, and other event types are ignored
-                _ => Ok(StreamChunk {
-                    delta: String::new(),
-                    is_final: false,
-                    finish_reason: None,
-                }),
-            }
+            Self::stream_line_to_chunk(&line)
         });
 
         Ok(Box::pin(GuardedStream::new(stream, child, stderr_task)))
@@ -481,13 +561,18 @@ impl LlmProvider for ClaudeCodeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ErrorKind;
-    use crate::types::McpHeader;
+    use crate::types::{ErrorKind, McpHeader};
+    use std::path::PathBuf;
+
+    /// Parse a result document straight through to the response, as `complete` does.
+    fn parse_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+        ClaudeCodeRunner::response_from(ClaudeCodeRunner::parse_result_document(raw)?)
+    }
 
     #[test]
     fn test_parse_response_valid_json() {
         let json = br#"{"result":"Hello world","is_error":false,"session_id":"abc123","usage":{"input_tokens":10,"output_tokens":5}}"#;
-        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let (response, session_id) = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "Hello world");
         assert_eq!(session_id, Some("abc123".to_owned()));
@@ -504,7 +589,7 @@ mod tests {
         // The fixture used to say "rate limited", which now classifies as a
         // quota refusal — see the tests below.
         let json = br#"{"result":"stream closed unexpectedly","is_error":true}"#;
-        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        let err = parse_response(json).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::ExternalService);
         assert!(err.kind.is_transient(), "a broken pipe is worth retrying");
@@ -520,7 +605,7 @@ mod tests {
         let json = br#"{"result":"ok","is_error":false,"usage":{
             "input_tokens":2,"output_tokens":7,
             "cache_read_input_tokens":18483,"cache_creation_input_tokens":19681}}"#;
-        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
         let usage = response.usage.expect("usage present"); // Safe: test assertion
 
         assert_eq!(
@@ -546,7 +631,7 @@ mod tests {
         // or it would inflate every uncached turn.
         let json =
             br#"{"result":"ok","is_error":false,"usage":{"input_tokens":500,"output_tokens":50}}"#;
-        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
         let usage = response.usage.expect("usage present"); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 500);
         assert_eq!(usage.total_tokens, 550);
@@ -561,7 +646,7 @@ mod tests {
         // "usage limit reached" is Claude Code's own phrase — its internal
         // classifier keys on exactly this string.
         let json = br#"{"result":"Claude usage limit reached","is_error":true}"#;
-        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        let err = parse_response(json).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::RateLimit);
         assert!(
@@ -577,8 +662,135 @@ mod tests {
             br#"{"result":"{\"type\":\"rate_limit_error\"}","is_error":true}"#.as_slice(),
             br#"{"result":"{\"type\":\"billing_error\"}","is_error":true}"#.as_slice(),
         ] {
-            let err = ClaudeCodeRunner::parse_response(body).unwrap_err();
+            let err = parse_response(body).unwrap_err();
             assert_eq!(err.kind, ErrorKind::RateLimit, "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn new_lets_the_cli_credentials_through_the_sandbox() {
+        let runner = ClaudeCodeRunner::new(RunnerConfig::new(PathBuf::from("/bin/true")));
+        let keys = &runner.base.config.allowed_env_keys;
+        for key in CREDENTIAL_ENV_KEYS {
+            assert!(keys.iter().any(|k| k == key), "{key} must reach the child");
+        }
+        assert!(keys.iter().any(|k| k == "HOME"), "the defaults stay");
+    }
+
+    #[test]
+    fn the_subtype_and_status_ride_the_message() {
+        let json = br#"{"is_error":true,"subtype":"error_during_execution","api_error_status":529,"result":"API Error: 529 overloaded"}"#;
+        let err = parse_response(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ExternalService);
+        assert_eq!(
+            err.message,
+            "claude-code: API Error: 529 overloaded (subtype: error_during_execution, api_error_status: 529)"
+        );
+    }
+
+    #[test]
+    fn a_result_line_that_is_an_error_fails_the_stream() {
+        let line = r#"{"type":"result","is_error":true,"subtype":"error_during_execution","result":"Claude usage limit reached"}"#;
+        let err = ClaudeCodeRunner::stream_line_to_chunk(line).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert!(err.message.contains("usage limit reached"));
+
+        let ok = ClaudeCodeRunner::stream_line_to_chunk(
+            r#"{"type":"result","is_error":false,"result":"pong"}"#,
+        )
+        .unwrap(); // Safe: test assertion
+        assert!(ok.is_final);
+    }
+
+    /// The runner driven end to end against a shell script standing in for
+    /// `claude`; the script needs a Unix shell and an executable bit.
+    #[cfg(unix)]
+    mod with_a_fake_binary {
+        use super::*;
+        use crate::types::ChatMessage;
+        use std::fs;
+        use std::path::Path;
+
+        /// A `claude` stand-in: prints the given stdout and exits with the given code.
+        fn fake_claude(dir: &Path, stdout: &str, exit_code: i32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("claude");
+            let script =
+                format!("#!/bin/sh\ncat <<'CLAUDE_EOF'\n{stdout}\nCLAUDE_EOF\nexit {exit_code}\n");
+            fs::write(&path, script).unwrap(); // Safe: test setup inside a fresh tempdir
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap(); // Safe: test setup
+            path
+        }
+
+        #[tokio::test]
+        async fn an_error_document_outranks_the_exit_code() {
+            // Measured on the deployed image 2026-09-21: the CLI exits 1 with the
+            // reason in `result`, the LAST field of a ~1.8 KB document. Judging
+            // the exit code first surfaced the first 500 chars (cost and token
+            // counts) and never classified the failure.
+            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+            let padding = "x".repeat(600);
+            let doc = format!(
+                r#"{{"duration_api_ms":6681,"session_id":"{padding}","usage":{{"input_tokens":8,"output_tokens":4}},"is_error":true,"subtype":"error_during_execution","api_error_status":429,"result":"Claude usage limit reached"}}"#
+            );
+            let binary = fake_claude(dir.path(), &doc, 1);
+            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
+
+            let err = runner
+                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::RateLimit, "{}", err.message);
+            assert!(
+                err.message.contains("usage limit reached"),
+                "{}",
+                err.message
+            );
+            assert!(
+                err.message.contains("api_error_status: 429"),
+                "{}",
+                err.message
+            );
+            assert!(!err.message.contains("duration_api_ms"), "{}", err.message);
+        }
+
+        #[tokio::test]
+        async fn a_non_document_on_a_failed_exit_keeps_the_exit_diagnostic() {
+            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+            let binary = fake_claude(dir.path(), "Not logged in · Please run /login", 1);
+            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
+
+            let err = runner
+                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::ExternalService);
+            assert!(
+                err.message.contains("exited with code 1"),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains("Not logged in"), "{}", err.message);
+        }
+
+        #[tokio::test]
+        async fn a_success_document_on_a_failed_exit_is_still_a_failure() {
+            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
+            let binary = fake_claude(dir.path(), r#"{"is_error":false,"result":"pong"}"#, 3);
+            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
+
+            let err = runner
+                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.message.contains("exited with code 3"),
+                "{}",
+                err.message
+            );
         }
     }
 
@@ -606,7 +818,7 @@ mod tests {
         // 400), not ExternalService (transient 502) — otherwise the caller retries
         // the identical oversized prompt. Detected via structured terminal_reason.
         let json = br#"{"result":"Prompt is too long","is_error":true,"terminal_reason":"prompt_too_long"}"#;
-        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        let err = parse_response(json).unwrap_err();
         assert_eq!(err.kind, ErrorKind::ContextLength);
         assert!(!err.kind.is_transient());
         assert!(err.message.contains("Prompt is too long"));
@@ -616,14 +828,14 @@ mod tests {
     fn test_parse_response_prompt_too_long_via_message_fallback() {
         // Same classification when terminal_reason is absent but the message says so.
         let json = br#"{"result":"Prompt is too long","is_error":true}"#;
-        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        let err = parse_response(json).unwrap_err();
         assert_eq!(err.kind, ErrorKind::ContextLength);
     }
 
     #[test]
     fn test_parse_response_missing_optional_fields() {
         let json = br#"{"result":"hi","is_error":false}"#;
-        let (response, session_id) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let (response, session_id) = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "hi");
         assert!(session_id.is_none());
@@ -633,14 +845,14 @@ mod tests {
     #[test]
     fn test_parse_response_null_result() {
         let json = br#"{"is_error":false}"#;
-        let (response, _) = ClaudeCodeRunner::parse_response(json).unwrap(); // Safe: test assertion
+        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
         assert_eq!(response.content, "");
     }
 
     #[test]
     fn test_parse_response_invalid_json() {
         let json = b"not json at all";
-        let err = ClaudeCodeRunner::parse_response(json).unwrap_err();
+        let err = parse_response(json).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Internal);
     }
 

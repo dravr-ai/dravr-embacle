@@ -37,6 +37,10 @@ const FALLBACK_MODELS: &[&str] = &["o4-mini", "o3", "gpt-4.1"];
 /// Implements `LlmProvider` by delegating to the `codex` binary with
 /// `exec` subcommand for non-interactive mode. Uses `--json` for JSONL
 /// output and `--full-auto` for automatic sandbox approval.
+/// The variables the `codex` binary reads its API key from, let through the sandbox by
+/// the constructor; the readiness probe in `auth` looks for the same ones.
+pub const CREDENTIAL_ENV_KEYS: &[&str] = &["OPENAI_API_KEY"];
+
 pub struct CodexCliRunner {
     base: CliRunnerBase,
 }
@@ -46,7 +50,11 @@ impl CodexCliRunner {
     #[must_use]
     pub fn new(config: RunnerConfig) -> Self {
         Self {
-            base: CliRunnerBase::new(config, DEFAULT_MODEL, FALLBACK_MODELS),
+            base: CliRunnerBase::new(
+                config.allowing_env_keys(CREDENTIAL_ENV_KEYS),
+                DEFAULT_MODEL,
+                FALLBACK_MODELS,
+            ),
         }
     }
 

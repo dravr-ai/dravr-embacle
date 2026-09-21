@@ -62,6 +62,10 @@ pub fn copilot_fallback_models() -> Vec<String> {
 /// the Copilot CLI selects the highest-ranked model the authenticated account
 /// is entitled to. This avoids surfacing hardcoded defaults (e.g. an Opus
 /// variant) to accounts that aren't entitled to them.
+/// The variables the `copilot` binary reads its GitHub token from, in its own
+/// precedence order, let through the sandbox by the constructor.
+pub const CREDENTIAL_ENV_KEYS: &[&str] = &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
+
 pub struct CopilotRunner {
     base: CliRunnerBase,
 }
@@ -113,7 +117,11 @@ impl CopilotRunner {
     pub fn new(config: RunnerConfig) -> Self {
         let catalog = catalog_ids();
         let fallback_slice: Vec<&str> = catalog.iter().map(String::as_str).collect();
-        let base = CliRunnerBase::new(config, AUTO_MODEL_SENTINEL, &fallback_slice);
+        let base = CliRunnerBase::new(
+            config.allowing_env_keys(CREDENTIAL_ENV_KEYS),
+            AUTO_MODEL_SENTINEL,
+            &fallback_slice,
+        );
         Self { base }
     }
 

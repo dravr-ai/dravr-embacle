@@ -193,6 +193,24 @@ impl RunnerConfig {
         self
     }
 
+    /// Let the named environment variables through the sandbox as well.
+    ///
+    /// A runner's own credential (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+    /// …) is not a leak from the host: without it the child answers "not
+    /// logged in" while its `--version` health check keeps passing. Each CLI
+    /// runner calls this from its constructor with the variables its binary
+    /// reads, so a caller keeps the default allowlist and still gets a
+    /// signed-in child. Keys already present are not repeated.
+    #[must_use]
+    pub fn allowing_env_keys(mut self, keys: &[&str]) -> Self {
+        for key in keys {
+            if !self.allowed_env_keys.iter().any(|k| k == key) {
+                self.allowed_env_keys.push((*key).to_owned());
+            }
+        }
+        self
+    }
+
     /// Set the working directory for the subprocess
     #[must_use]
     pub fn with_working_directory(mut self, dir: PathBuf) -> Self {
@@ -276,6 +294,24 @@ mod tests {
         assert!(keys.contains(&"USER".to_owned()));
         assert!(keys.contains(&"LANG".to_owned()));
         assert_eq!(keys.len(), 5);
+    }
+
+    #[test]
+    fn allowing_env_keys_appends_without_repeating() {
+        let config = RunnerConfig::new(PathBuf::from("/bin/true")).allowing_env_keys(&[
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ]);
+        let keys = &config.allowed_env_keys;
+        assert_eq!(keys.iter().filter(|k| *k == "HOME").count(), 1);
+        assert_eq!(
+            keys.iter()
+                .filter(|k| *k == "CLAUDE_CODE_OAUTH_TOKEN")
+                .count(),
+            1
+        );
+        assert_eq!(keys.len(), 6, "the five defaults plus the one credential");
     }
 
     #[test]
