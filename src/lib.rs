@@ -273,4 +273,4 @@ pub use copilot_headless_config::CopilotHeadlessConfig;
 #[cfg(feature = "copilot-sdk")]
 pub use copilot_sdk::CopilotSdkRunner;
 #[cfg(feature = "copilot-sdk")]
-pub use copilot_sdk_config::CopilotSdkConfig;
+pub use copilot_sdk_config::{CopilotSdkConfig, CopilotSdkProvider};

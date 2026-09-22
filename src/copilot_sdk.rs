@@ -43,8 +43,8 @@ use github_copilot_sdk::{
     Attachment, CliProgram, Client, ClientMode, ClientOptions, Error as SdkError,
     ErrorKind as SdkErrorKind, EventSubscription, IndexMap, LogLevel, McpHttpServerConfig,
     McpServerConfig, McpStdioServerConfig, MessageOptions, PermissionRequestData,
-    PermissionRequestKind, ProtocolErrorKind, RequestId, SessionConfig, SessionErrorKind,
-    SessionEvent, SessionId, SystemMessageConfig, Transport,
+    PermissionRequestKind, ProtocolErrorKind, ProviderConfig, RequestId, SessionConfig,
+    SessionErrorKind, SessionEvent, SessionId, SystemMessageConfig, Transport,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -58,10 +58,10 @@ use crate::copilot_common::{
     HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
 };
 use crate::copilot_models::catalog_ids;
-use crate::copilot_sdk_config::CopilotSdkConfig;
+use crate::copilot_sdk_config::{CopilotSdkConfig, CopilotSdkProvider};
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpTransport,
-    RunnerError, StreamChunk, TokenUsage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
+    McpTransport, RunnerError, StreamChunk, TokenUsage,
 };
 
 /// Service name on every `RunnerError::external_service` this module raises.
@@ -185,12 +185,20 @@ impl Inner {
     /// know, so a typo would serve the wrong model with no error anywhere —
     /// the failure that once put production on a model nobody chose. The
     /// catalogue is cached by the client after its first fetch.
+    ///
+    /// A configured [`CopilotSdkProvider`] is outside that catalogue — it
+    /// lists Copilot's models, and fetching it needs the GitHub login a
+    /// provider session runs without — so the id goes to the endpoint as
+    /// given, and the endpoint refuses one it does not serve.
     async fn validated_model(
         &self,
         client: &Client,
         requested: Option<&str>,
     ) -> Result<String, RunnerError> {
         let model = requested.map_or_else(|| self.config.model.clone(), str::to_owned);
+        if self.config.provider.is_some() {
+            return Ok(model);
+        }
         let catalogue = client.list_models().await.map_err(|e| map_sdk_error(&e))?;
         if catalogue.iter().any(|m| m.id == model) {
             Ok(model)
@@ -261,7 +269,7 @@ impl Inner {
             time::timeout(self.config.prompt_timeout, collect_turn(&mut events, sink)).await;
         let result = match outcome {
             Ok(Ok(acc)) => Ok(acc.finish(model)),
-            Ok(Err(e)) => Err(e),
+            Ok(Err(e)) => Err(naming_model(e, &model)),
             Err(_) => {
                 // The session stays usable after `abort`, but this one is
                 // over; the disconnect below releases it.
@@ -300,6 +308,10 @@ impl Inner {
             .with_streaming(true)
             .with_working_directory(scratch)
             .with_client_name(concat!("embacle/", env!("CARGO_PKG_VERSION")));
+
+        if let Some(provider) = &self.config.provider {
+            config = config.with_provider(provider_config(provider));
+        }
 
         if let Some(system) = system_prompt(request) {
             config = config.with_system_message(
@@ -382,6 +394,22 @@ impl PermissionHandler for RegisteredMcpHandler {
             DenyAllHandler.handle(session_id, request_id, data).await
         }
     }
+}
+
+/// The configured provider, in the SDK's shape. The session's model is the
+/// name the runtime sends the endpoint.
+fn provider_config(provider: &CopilotSdkProvider) -> ProviderConfig {
+    let mut config = ProviderConfig::new(provider.base_url.clone());
+    if let Some(provider_type) = &provider.provider_type {
+        config = config.with_provider_type(provider_type.clone());
+    }
+    if let Some(api_key) = &provider.api_key {
+        config = config.with_api_key(api_key.clone());
+    }
+    if let Some(max) = provider.max_prompt_tokens {
+        config = config.with_max_prompt_tokens(max);
+    }
+    config
 }
 
 /// An MCP server on the request, in the SDK's shape.
@@ -629,6 +657,12 @@ async fn collect_turn(
 ///
 /// During a turn the runtime reports authentication, quota, rate-limit and
 /// context failures as events with an `error_type`, not as RPC errors.
+///
+/// A model endpoint's 404 is a model it does not serve: a configured
+/// provider answers one for an unknown id, and the runtime relays it as a
+/// `query` error carrying the status (measured against Ollama, runtime
+/// 1.0.86). The runtime's message names the model and the endpoint, so it is
+/// kept whole.
 fn map_session_error(event: &SessionEvent) -> RunnerError {
     let Some(data) = event.typed_data::<SessionErrorData>() else {
         return RunnerError::external_service(SERVICE, format!("session.error: {}", event.data));
@@ -639,12 +673,28 @@ fn map_session_error(event: &SessionEvent) -> RunnerError {
         message.push_str(code);
         message.push(')');
     }
+    if data.status_code == Some(404) {
+        return RunnerError {
+            kind: ErrorKind::ModelUnavailable,
+            message: format!("{SERVICE}: {message}"),
+        };
+    }
     match data.error_type.as_str() {
         "authentication" | "authorization" => RunnerError::auth_failure(message),
         "quota" | "rate_limit" => RunnerError::rate_limit(SERVICE, message),
         "context_limit" => RunnerError::context_length(message),
         _ => RunnerError::external_service(SERVICE, message),
     }
+}
+
+/// A model-unavailable error that says which model. The runtime's own text
+/// for a provider's 404 names the endpoint and, depending on how the model
+/// was resolved, not always the id that was refused.
+fn naming_model(mut error: RunnerError, model: &str) -> RunnerError {
+    if error.kind == ErrorKind::ModelUnavailable && !error.message.contains(model) {
+        error.message = format!("{} (model {model:?})", error.message);
+    }
+    error
 }
 
 /// An SDK error as the error the host understands.
@@ -896,6 +946,39 @@ mod tests {
             };
             assert!(matched, "{error_type} -> {kind}");
         }
+    }
+
+    #[test]
+    fn a_provider_404_is_a_model_nobody_serves() {
+        let err = map_session_error(&event(
+            "session.error",
+            json!({
+                "errorType": "query",
+                "statusCode": 404,
+                "message": "Model 'no-such-model' not found on provider at http://localhost:11434/v1 (HTTP 404).",
+            }),
+        ));
+        assert_eq!(err.kind, ErrorKind::ModelUnavailable, "{err}");
+        assert!(err.to_string().contains("no-such-model"), "{err}");
+        assert!(err.to_string().contains("localhost:11434"), "{err}");
+    }
+
+    #[test]
+    fn an_unavailable_model_is_named_once() {
+        let generic = RunnerError {
+            kind: ErrorKind::ModelUnavailable,
+            message: "Resource not found on provider (HTTP 404).".to_owned(),
+        };
+        let named = naming_model(generic, "qwen2.5:3b");
+        assert!(named.message.ends_with("(model \"qwen2.5:3b\")"), "{named}");
+        assert_eq!(
+            naming_model(named.clone(), "qwen2.5:3b").message,
+            named.message,
+            "a message that already names the model is left alone"
+        );
+
+        let other = naming_model(RunnerError::timeout("slow"), "qwen2.5:3b");
+        assert!(!other.message.contains("qwen"), "only this kind: {other}");
     }
 
     #[test]

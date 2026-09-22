@@ -72,7 +72,7 @@ async fn copilot_sdk_calls_the_hosted_tool_and_reports_it_by_name() {
 
     let mut config = CopilotSdkConfig::from_env();
     config.mcp_tool_calling = true;
-    config.model = "claude-haiku-4.5".to_owned();
+    config.model = env::var("COPILOT_SDK_MODEL").unwrap_or_else(|_| "claude-haiku-4.5".to_owned());
     let runner = CopilotSdkRunner::with_config(config);
 
     let mut request = ChatRequest::new(vec![

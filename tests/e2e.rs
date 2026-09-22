@@ -12,7 +12,6 @@
 )]
 
 use std::env;
-use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -73,17 +72,16 @@ fn resolve_or_skip(runner_type: CliRunnerType) -> PathBuf {
 // Shared test harness
 // ============================================================================
 
-/// Whether an error means the provider's backend auth is unavailable
-/// (e.g. an expired/missing Copilot token in CI) rather than a real defect.
-///
-/// These E2E tests drive live external services; when auth genuinely cannot be
-/// established the test SKIPS (returns) instead of failing the build. This
-/// keeps CI honest: a stale credential reports as "skipped", not "broken".
-fn is_auth_unavailable<E: fmt::Display>(err: &E) -> bool {
-    let msg = err.to_string();
-    msg.contains("Authentication required")
-        || msg.contains("authentication failed")
-        || msg.contains("-32000")
+/// Whether `haystack` carries every needle, in the order given.
+fn contains_in_order(haystack: &str, needles: &[&str]) -> bool {
+    let mut rest = haystack;
+    for needle in needles {
+        match rest.find(needle) {
+            Some(at) => rest = &rest[at + needle.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Run the standard battery of tests against any `LlmProvider`.
@@ -105,32 +103,25 @@ async fn test_provider_complete(runner: &dyn LlmProvider) {
     );
 
     // -- health check --
-    let healthy = match runner.health_check().await {
-        Ok(h) => h,
-        Err(e) if is_auth_unavailable(&e) => {
-            eprintln!("SKIP {name}: backend auth unavailable: {e}");
-            return;
-        }
-        Err(e) => panic!("{name}: health_check failed: {e}"),
-    };
+    let healthy = runner
+        .health_check()
+        .await
+        .unwrap_or_else(|e| panic!("{name}: health_check failed: {e}"));
     assert!(healthy, "{name}: health_check returned false");
 
     // -- simple completion --
     let request = ping_request();
-    let response = match runner.complete(&request).await {
-        Ok(r) => r,
-        Err(e) if is_auth_unavailable(&e) => {
-            eprintln!("SKIP {name}: backend auth unavailable: {e}");
-            return;
-        }
-        Err(e) => panic!("{name}: complete() failed: {e}"),
-    };
+    let response = runner
+        .complete(&request)
+        .await
+        .unwrap_or_else(|e| panic!("{name}: complete() failed: {e}"));
 
-    assert!(
-        !response.content.is_empty(),
-        "{name}: complete() returned empty content"
-    );
     eprintln!("  {name} complete: {:?}", response.content);
+    assert!(
+        response.content.to_uppercase().contains("PONG"),
+        "{name}: the model answered the ping: {:?}",
+        response.content
+    );
     eprintln!("  {name} model:    {:?}", response.model);
     eprintln!("  {name} usage:    {:?}", response.usage);
 }
@@ -145,26 +136,15 @@ async fn test_provider_stream(runner: &dyn LlmProvider) {
     }
 
     let request = stream_request();
-    let mut stream = match runner.complete_stream(&request).await {
-        Ok(s) => s,
-        Err(e) if is_auth_unavailable(&e) => {
-            eprintln!("SKIP {name}: backend auth unavailable: {e}");
-            return;
-        }
-        Err(e) => panic!("{name}: complete_stream() failed: {e}"),
-    };
+    let mut stream = runner
+        .complete_stream(&request)
+        .await
+        .unwrap_or_else(|e| panic!("{name}: complete_stream() failed: {e}"));
 
     let mut chunk_count: u32 = 0;
     let mut full_content = String::new();
     while let Some(result) = stream.next().await {
-        let chunk = match result {
-            Ok(c) => c,
-            Err(e) if is_auth_unavailable(&e) => {
-                eprintln!("SKIP {name}: backend auth unavailable mid-stream: {e}");
-                return;
-            }
-            Err(e) => panic!("{name}: stream chunk error: {e}"),
-        };
+        let chunk = result.unwrap_or_else(|e| panic!("{name}: stream chunk error: {e}"));
         if !chunk.delta.is_empty() {
             full_content.push_str(&chunk.delta);
             chunk_count += 1;
@@ -175,11 +155,11 @@ async fn test_provider_stream(runner: &dyn LlmProvider) {
         chunk_count > 0,
         "{name}: streaming produced 0 non-empty chunks"
     );
-    assert!(
-        !full_content.is_empty(),
-        "{name}: streaming produced empty content"
-    );
     eprintln!("  {name} stream: {chunk_count} chunks, content: {full_content:?}");
+    assert!(
+        contains_in_order(&full_content, &["1", "2", "3"]),
+        "{name}: the stream spelled the count: {full_content:?}"
+    );
 }
 
 // ============================================================================
@@ -423,20 +403,17 @@ mod headless {
         ])
         .with_max_tokens(20);
 
-        let response = match runner.converse(&request).await {
-            Ok(r) => r,
-            Err(e) if is_auth_unavailable(&e) => {
-                eprintln!("SKIP e2e_copilot_headless_converse: backend auth unavailable: {e}");
-                return;
-            }
-            Err(e) => panic!("converse() failed: {e}"),
-        };
+        let response = runner
+            .converse(&request)
+            .await
+            .unwrap_or_else(|e| panic!("converse() failed: {e}"));
 
-        assert!(
-            !response.content.is_empty(),
-            "copilot_headless converse: empty content"
-        );
         eprintln!("  headless converse content: {:?}", response.content);
+        assert!(
+            response.content.contains("CONVERSE_OK"),
+            "copilot_headless converse: the model answered as told: {:?}",
+            response.content
+        );
         eprintln!("  headless converse model:   {:?}", response.model);
         eprintln!("  headless converse usage:   {:?}", response.usage);
         eprintln!(
@@ -465,16 +442,10 @@ mod headless {
         )])
         .with_max_tokens(100);
 
-        let response = match runner.converse(&request).await {
-            Ok(r) => r,
-            Err(e) if is_auth_unavailable(&e) => {
-                eprintln!(
-                    "SKIP e2e_copilot_headless_converse_with_tools: backend auth unavailable: {e}"
-                );
-                return;
-            }
-            Err(e) => panic!("converse() with tools failed: {e}"),
-        };
+        let response = runner
+            .converse(&request)
+            .await
+            .unwrap_or_else(|e| panic!("converse() with tools failed: {e}"));
 
         assert!(
             !response.content.is_empty(),
@@ -491,10 +462,11 @@ mod headless {
         for tc in &response.tool_calls {
             eprintln!("    tool: {} [{}] ({})", tc.title, tc.id, tc.status);
         }
-        // We expect at least one tool call for reading Cargo.toml
-        if response.tool_calls.is_empty() {
-            eprintln!("  WARNING: expected tool calls but got none");
-        }
+        assert!(
+            !response.tool_calls.is_empty(),
+            "reading a file is a tool call, and it is observed: {:?}",
+            response.content
+        );
     }
 }
 
@@ -546,8 +518,15 @@ mod sdk {
 
     const CODEWORD: &str = "DRAVR-COACH-7741";
 
-    /// A cheap, catalogued model for the live turns.
-    const MODEL: &str = "claude-haiku-4.5";
+    /// The model the live turns run on: `COPILOT_SDK_MODEL`, which a lane
+    /// routing to its own provider sets to a model that provider serves, or a
+    /// cheap catalogued Copilot model.
+    fn model() -> String {
+        env::var("COPILOT_SDK_MODEL").unwrap_or_else(|_| "claude-haiku-4.5".to_owned())
+    }
+
+    /// An id no catalogue and no provider serves.
+    const UNKNOWN_MODEL: &str = "embacle-e2e-no-such-model";
 
     fn skipped(test: &str) -> bool {
         if runner_enabled("copilot_sdk") {
@@ -561,7 +540,7 @@ mod sdk {
         let mut request =
             ChatRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
                 .with_max_tokens(60);
-        request.model = Some(MODEL.to_owned());
+        request.model = Some(model());
         request
     }
 
@@ -648,7 +627,8 @@ mod sdk {
             .await
             .unwrap_or_else(|e| panic!("converse() failed: {e}"));
         assert_eq!(
-            response.model, MODEL,
+            response.model,
+            model(),
             "the model that served is the one asked for"
         );
         let usage = response.usage.expect("assistant.usage was reported");
@@ -667,8 +647,9 @@ mod sdk {
         );
     }
 
-    /// A model the catalogue lacks fails loudly instead of being served by
-    /// whatever the runtime substitutes.
+    /// A model nothing serves fails loudly instead of being served by
+    /// whatever the runtime substitutes — refused by the catalogue check under
+    /// Copilot's routing, and by the endpoint itself under a provider.
     #[tokio::test]
     async fn e2e_copilot_sdk_unknown_model_fails_loudly() {
         if skipped("e2e_copilot_sdk_unknown_model_fails_loudly") {
@@ -676,13 +657,13 @@ mod sdk {
         }
         let runner = CopilotSdkRunner::from_env();
         let mut turn = request("You are a test bot.", "Respond with exactly: PONG.");
-        turn.model = Some("claude-sonnet-4.6".to_owned());
+        turn.model = Some(UNKNOWN_MODEL.to_owned());
         let err = runner
             .converse(&turn)
             .await
             .expect_err("an unknown model id is refused");
         assert_eq!(err.kind, ErrorKind::ModelUnavailable, "{err}");
-        assert!(err.to_string().contains("claude-sonnet-4.6"), "{err}");
+        assert!(err.to_string().contains(UNKNOWN_MODEL), "{err}");
     }
 
     /// Streaming delivers text deltas and ends with the aggregated response.
@@ -720,7 +701,7 @@ mod sdk {
             done.content, streamed,
             "Done carries the text the deltas spelled"
         );
-        assert_eq!(done.model, MODEL);
+        assert_eq!(done.model, model());
         assert!(done.usage.is_some(), "usage rides on Done");
     }
 }

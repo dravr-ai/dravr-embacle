@@ -615,11 +615,24 @@ Configuration via environment variables:
 | `COPILOT_SDK_HOME` | per-process dir under the system temp dir | The runtime's home (`COPILOT_HOME`): session state, credential store, logs |
 | `COPILOT_SDK_MODEL` | top entry of ranked catalog (see `copilot_models::CATALOG`) | Default model for completions |
 | `COPILOT_GITHUB_TOKEN` | stored login | GitHub auth token (falls back to `GH_TOKEN`, `GITHUB_TOKEN`) |
+| `COPILOT_PROVIDER_BASE_URL` | unset | Route sessions to this model provider (OpenAI-compatible, Azure, Anthropic, or local such as Ollama at `http://localhost:11434/v1`) instead of GitHub Copilot. No GitHub login is needed, and the Copilot catalogue check is skipped: the endpoint refuses a model it does not serve |
+| `COPILOT_PROVIDER_TYPE` | `openai` | `openai`, `azure` or `anthropic` |
+| `COPILOT_PROVIDER_API_KEY` | unset | API key for the provider; local endpoints take none |
+| `COPILOT_PROVIDER_MAX_PROMPT_TOKENS` | runtime default | Prompt-token ceiling for a model the runtime has no limits for |
 | `COPILOT_SDK_PERMISSION_POLICY` | deny | `auto_approve` lets the runtime run its own tools; anything else denies |
 | `COPILOT_SDK_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
 | `COPILOT_SDK_MCP_TOOL_CALLING` | `false` | Advertise `SDK_TOOL_CALLING`: the caller passes `mcp_servers` per request and the runtime calls those tools natively |
 | `EMBACLE_SDK_PROMPT_TIMEOUT_SECS` | `300` | Bound on one turn, prompt sent to session idle; the session is aborted on expiry |
 | `EMBACLE_SDK_SESSION_TIMEOUT_SECS` | `60` | Bound on starting the runtime and opening a session |
+
+The `COPILOT_PROVIDER_*` names are the Copilot CLI's own, so one environment routes both Copilot runners: `copilot --acp` reads them itself (add `COPILOT_OFFLINE=true` to cut every other GitHub call), and the ACP runner's child inherits them. This is how CI runs the live Copilot tests — the real binaries, a model on the runner, no account:
+
+```bash
+ollama serve &   # OLLAMA_CONTEXT_LENGTH=32768: the default 4096 silently truncates Copilot's prompt
+export COPILOT_OFFLINE=true COPILOT_PROVIDER_BASE_URL=http://localhost:11434/v1
+export COPILOT_HEADLESS_MODEL=qwen2.5:3b COPILOT_SDK_MODEL=qwen2.5:3b
+EMBACLE_E2E_COPILOT_HEADLESS=1 cargo test --features copilot-headless --test e2e -- headless:: --test-threads=1
+```
 
 ## Vision / Image Support
 
