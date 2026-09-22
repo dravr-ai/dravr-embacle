@@ -41,12 +41,17 @@ fn ping_request() -> ChatRequest {
     .with_max_tokens(20)
 }
 
+/// The streamed turn's instruction, worded as a verbatim reply.
+///
+/// Not "Count from 1 to 3": the Copilot CLI lists its skills in the system
+/// prompt, and a 3B model once read "Count" as one and answered "I can't find
+/// the \"counting\" skill". Every "Respond with exactly" prompt here held on
+/// the same runners.
+const STREAM_PROMPT: &str = "Respond with exactly these three lines and nothing else:\n1\n2\n3";
+
 /// Build a streaming request.
 fn stream_request() -> ChatRequest {
-    ChatRequest::new(vec![ChatMessage::user(
-        "Count from 1 to 3, each number on its own line. Nothing else.",
-    )])
-    .with_max_tokens(30)
+    ChatRequest::new(vec![ChatMessage::user(STREAM_PROMPT)]).with_max_tokens(30)
 }
 
 /// Standard timeout for E2E tests (CLI tools can be slow on first invocation).
@@ -675,7 +680,7 @@ mod sdk {
         let runner = CopilotSdkRunner::from_env();
         let turn = request(
             "You are a test bot. Follow instructions exactly.",
-            "Count from 1 to 3, each number on its own line. Nothing else.",
+            STREAM_PROMPT,
         );
         let mut stream = runner
             .converse_stream(&turn)
