@@ -78,10 +78,7 @@ impl OpenCodeRunner {
             cmd.arg(arg);
         }
 
-        if let Ok(policy) = build_policy(
-            self.base.config.working_directory.as_deref(),
-            &self.base.config.allowed_env_keys,
-        ) {
+        if let Ok(policy) = build_policy(&self.base.config) {
             apply_sandbox(&mut cmd, &policy);
         }
 

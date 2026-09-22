@@ -330,17 +330,27 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
 /// after its own lookup misses.
 #[must_use]
 pub fn lookup_pricing(provider: &str, model: &str) -> Option<ModelPricing> {
+    let provider = pool_family(provider);
     PRICING_TABLE
         .iter()
         .find(|(p, prefix, _)| *p == provider && model.starts_with(prefix))
         .map(|(_, _, pricing)| *pricing)
 }
 
+/// The provider a pooled tier prices as: `claude-code#2` is a second Claude
+/// account, billed like the first. See [`crate::pool`].
+#[must_use]
+pub fn pool_family(provider: &str) -> &str {
+    provider
+        .split_once('#')
+        .map_or(provider, |(family, _)| family)
+}
+
 /// True when a provider bills via flat-rate subscription or self-hosting, so a
 /// \$0 per-token cost is correct rather than a missing-price undercount.
 #[must_use]
 pub fn is_not_per_token_metered(provider: &str) -> bool {
-    NOT_PER_TOKEN_METERED_PROVIDERS.contains(&provider)
+    NOT_PER_TOKEN_METERED_PROVIDERS.contains(&pool_family(provider))
 }
 
 /// Log the resolution of a (provider, model) pair that has no `PRICING_TABLE`

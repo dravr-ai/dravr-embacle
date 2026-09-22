@@ -143,6 +143,12 @@ pub struct RunnerConfig {
     pub extra_args: Vec<String>,
     /// Environment variable keys passed through to the subprocess
     pub allowed_env_keys: Vec<String>,
+    /// Variables set on the subprocess explicitly, after the sandbox has
+    /// cleared its environment and re-injected the allowed keys. This is how
+    /// a runner is handed its own credential rather than reading the process
+    /// environment: two runners of one type with two tokens are two tiers of
+    /// a chain, one per account (see [`crate::pool`]).
+    pub env: Vec<(String, String)>,
     /// Working directory for the subprocess
     pub working_directory: Option<PathBuf>,
     /// Reasoning effort forwarded to runners that support it (Copilot CLI / ACP).
@@ -160,9 +166,23 @@ impl RunnerConfig {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_args: Vec::new(),
             allowed_env_keys: default_allowed_env_keys(),
+            env: Vec::new(),
             working_directory: None,
             reasoning_effort: None,
         }
+    }
+
+    /// Set a variable on the subprocess explicitly, surviving the sandbox.
+    ///
+    /// The last value wins for a repeated key. A value set here is never
+    /// read from the host environment, so a pool of runners can each carry
+    /// a different credential under the same variable name.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        self.env.retain(|(k, _)| *k != key);
+        self.env.push((key, value.into()));
+        self
     }
 
     /// Set the model to use

@@ -100,6 +100,8 @@ pub mod mcp_tool_bridge;
 pub mod metrics;
 /// `OpenCode` CLI runner
 pub mod opencode;
+
+pub mod pool;
 /// Per-token price table keyed on each provider's `name()`
 pub mod pricing;
 /// Subprocess spawning with safety limits

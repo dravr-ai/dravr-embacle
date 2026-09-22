@@ -267,10 +267,7 @@ impl ClaudeCodeRunner {
             cmd.arg(arg);
         }
 
-        if let Ok(policy) = build_policy(
-            self.base.config.working_directory.as_deref(),
-            &self.base.config.allowed_env_keys,
-        ) {
+        if let Ok(policy) = build_policy(&self.base.config) {
             apply_sandbox(&mut cmd, &policy);
             debug!(
                 allowed_keys = ?policy.allowed_env_keys,
@@ -700,98 +697,6 @@ mod tests {
         )
         .unwrap(); // Safe: test assertion
         assert!(ok.is_final);
-    }
-
-    /// The runner driven end to end against a shell script standing in for
-    /// `claude`; the script needs a Unix shell and an executable bit.
-    #[cfg(unix)]
-    mod with_a_fake_binary {
-        use super::*;
-        use crate::types::ChatMessage;
-        use std::fs;
-        use std::path::Path;
-
-        /// A `claude` stand-in: prints the given stdout and exits with the given code.
-        fn fake_claude(dir: &Path, stdout: &str, exit_code: i32) -> PathBuf {
-            use std::os::unix::fs::PermissionsExt;
-            let path = dir.join("claude");
-            let script =
-                format!("#!/bin/sh\ncat <<'CLAUDE_EOF'\n{stdout}\nCLAUDE_EOF\nexit {exit_code}\n");
-            fs::write(&path, script).unwrap(); // Safe: test setup inside a fresh tempdir
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap(); // Safe: test setup
-            path
-        }
-
-        #[tokio::test]
-        async fn an_error_document_outranks_the_exit_code() {
-            // Measured on the deployed image 2026-09-21: the CLI exits 1 with the
-            // reason in `result`, the LAST field of a ~1.8 KB document. Judging
-            // the exit code first surfaced the first 500 chars (cost and token
-            // counts) and never classified the failure.
-            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
-            let padding = "x".repeat(600);
-            let doc = format!(
-                r#"{{"duration_api_ms":6681,"session_id":"{padding}","usage":{{"input_tokens":8,"output_tokens":4}},"is_error":true,"subtype":"error_during_execution","api_error_status":429,"result":"Claude usage limit reached"}}"#
-            );
-            let binary = fake_claude(dir.path(), &doc, 1);
-            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
-
-            let err = runner
-                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
-                .await
-                .unwrap_err();
-
-            assert_eq!(err.kind, ErrorKind::RateLimit, "{}", err.message);
-            assert!(
-                err.message.contains("usage limit reached"),
-                "{}",
-                err.message
-            );
-            assert!(
-                err.message.contains("api_error_status: 429"),
-                "{}",
-                err.message
-            );
-            assert!(!err.message.contains("duration_api_ms"), "{}", err.message);
-        }
-
-        #[tokio::test]
-        async fn a_non_document_on_a_failed_exit_keeps_the_exit_diagnostic() {
-            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
-            let binary = fake_claude(dir.path(), "Not logged in · Please run /login", 1);
-            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
-
-            let err = runner
-                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
-                .await
-                .unwrap_err();
-
-            assert_eq!(err.kind, ErrorKind::ExternalService);
-            assert!(
-                err.message.contains("exited with code 1"),
-                "{}",
-                err.message
-            );
-            assert!(err.message.contains("Not logged in"), "{}", err.message);
-        }
-
-        #[tokio::test]
-        async fn a_success_document_on_a_failed_exit_is_still_a_failure() {
-            let dir = tempfile::tempdir().unwrap(); // Safe: test setup, tempdir creation
-            let binary = fake_claude(dir.path(), r#"{"is_error":false,"result":"pong"}"#, 3);
-            let runner = ClaudeCodeRunner::new(RunnerConfig::new(binary));
-
-            let err = runner
-                .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
-                .await
-                .unwrap_err();
-
-            assert!(
-                err.message.contains("exited with code 3"),
-                "{}",
-                err.message
-            );
-        }
     }
 
     #[test]

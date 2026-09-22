@@ -44,8 +44,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::time;
@@ -243,7 +243,19 @@ pub struct FallbackProvider {
     /// Shared with whoever else holds the breaker or the metrics the observer
     /// writes to; the chain only reads through it.
     observer: Option<Arc<dyn FallbackObserver>>,
+    /// How long a tier that refused on quota is passed over before it is
+    /// asked again. See [`FallbackProvider::with_quota_cooldown`].
+    quota_cooldown: Duration,
+    /// Per tier: the instant until which it is passed over, set when it
+    /// refused on quota. A `std` mutex: held for a read or a write of one
+    /// slot, never across an await.
+    cooldown_until: Mutex<Vec<Option<Instant>>>,
 }
+
+/// A refused account is asked again after this long, unless the chain says
+/// otherwise. Long enough that a burst of turns does not pay a refusal each,
+/// short enough that a window that reset is noticed within the quarter hour.
+const DEFAULT_QUOTA_COOLDOWN: Duration = Duration::from_mins(15);
 
 impl FallbackProvider {
     /// Create a fallback chain from a non-empty list of providers.
@@ -290,6 +302,7 @@ impl FallbackProvider {
             }
         }
 
+        let tiers = providers.len();
         Ok(Self {
             providers,
             display_name,
@@ -297,7 +310,61 @@ impl FallbackProvider {
             retry_config,
             policy: ResponsePolicy::permissive(),
             observer: None,
+            quota_cooldown: DEFAULT_QUOTA_COOLDOWN,
+            cooldown_until: Mutex::new(vec![None; tiers]),
         })
+    }
+
+    /// How long a tier that answered with a quota refusal
+    /// ([`ErrorKind::RateLimit`]) is passed over before it is asked again.
+    ///
+    /// A spent account refuses every turn until its window resets, and every
+    /// refusal is a round-trip paid before the next tier is reached. With a
+    /// cooldown the chain goes straight to the next tier for that long, then
+    /// asks the refused one again — a reset is discovered by asking, which
+    /// costs one refusal per cooldown rather than one per turn, and needs no
+    /// parsing of a reset time out of vendor prose. The last tier is never
+    /// passed over: a chain with nowhere else to go asks it and returns its
+    /// answer. Default: 15 minutes.
+    #[must_use]
+    pub const fn with_quota_cooldown(mut self, cooldown: Duration) -> Self {
+        self.quota_cooldown = cooldown;
+        self
+    }
+
+    /// Whether `position` is being passed over after a quota refusal.
+    fn in_cooldown(&self, position: usize) -> bool {
+        let slots = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        slots
+            .get(position)
+            .copied()
+            .flatten()
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Note a quota refusal from `position`: pass it over for the cooldown.
+    fn start_cooldown(&self, position: usize) {
+        let mut slots = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = slots.get_mut(position) {
+            *slot = Some(Instant::now() + self.quota_cooldown);
+        }
+    }
+
+    /// A tier answered: whatever cooldown it carried is over.
+    fn end_cooldown(&self, position: usize) {
+        let mut slots = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = slots.get_mut(position) {
+            *slot = None;
+        }
     }
 
     /// Choose what moves a request from one tier to the next.
@@ -418,7 +485,12 @@ impl FallbackProvider {
             let has_successor = position < last;
 
             if has_successor {
-                if let Attempt::Skip(reason) = self.before_attempt(tier) {
+                let verdict = if self.in_cooldown(position) {
+                    Attempt::Skip("quota cooldown")
+                } else {
+                    self.before_attempt(tier)
+                };
+                if let Attempt::Skip(reason) = verdict {
                     self.on_fallthrough(
                         tier,
                         self.tier(position + 1),
@@ -447,6 +519,7 @@ impl FallbackProvider {
                     self.forwarded(request, &mut held);
                 }
                 Ok(value) => {
+                    self.end_cooldown(position);
                     self.on_success(tier);
                     return Ok(value);
                 }
@@ -454,6 +527,9 @@ impl FallbackProvider {
                     return Err(err);
                 }
                 Err(err) if has_successor => {
+                    if err.kind == ErrorKind::RateLimit {
+                        self.start_cooldown(position);
+                    }
                     warn!(
                         provider = tier.provider.name(),
                         error = %err,
@@ -467,6 +543,9 @@ impl FallbackProvider {
                     self.forwarded(request, &mut held);
                 }
                 Err(err) => {
+                    if err.kind == ErrorKind::RateLimit {
+                        self.start_cooldown(position);
+                    }
                     warn!(
                         provider = tier.provider.name(),
                         error = %err,

@@ -6,12 +6,12 @@
 
 use std::env;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio::process::Command;
 use tracing::debug;
 
-use crate::config::default_allowed_env_keys;
+use crate::config::{default_allowed_env_keys, RunnerConfig};
 
 /// Policy controlling the subprocess execution environment
 #[derive(Debug, Clone)]
@@ -20,6 +20,9 @@ pub struct SandboxPolicy {
     pub allowed_env_keys: Vec<String>,
     /// Working directory for the subprocess
     pub working_directory: PathBuf,
+    /// Variables set explicitly after the allowlist, from
+    /// [`RunnerConfig::env`]: a runner's own credential, never the host's.
+    pub env_overrides: Vec<(String, String)>,
 }
 
 impl SandboxPolicy {
@@ -29,6 +32,7 @@ impl SandboxPolicy {
         Self {
             allowed_env_keys: default_allowed_env_keys(),
             working_directory,
+            env_overrides: Vec::new(),
         }
     }
 
@@ -59,6 +63,10 @@ pub fn apply_sandbox(cmd: &mut Command, policy: &SandboxPolicy) {
         }
     }
 
+    for (key, value) in &policy.env_overrides {
+        cmd.env(key, value);
+    }
+
     cmd.current_dir(&policy.working_directory);
 
     debug!(
@@ -77,15 +85,14 @@ pub fn apply_sandbox(cmd: &mut Command, policy: &SandboxPolicy) {
 ///
 /// Returns an `io::Error` if neither the provided path nor the
 /// current directory can be resolved.
-pub fn build_policy(
-    working_dir: Option<&Path>,
-    allowed_env_keys: &[String],
-) -> io::Result<SandboxPolicy> {
-    let dir = match working_dir {
+pub fn build_policy(config: &RunnerConfig) -> io::Result<SandboxPolicy> {
+    let dir = match config.working_directory.as_deref() {
         Some(p) if p.exists() => p.to_path_buf(),
         _ => env::current_dir()?,
     };
-    Ok(SandboxPolicy::new(dir).with_env_keys(allowed_env_keys.to_vec()))
+    let mut policy = SandboxPolicy::new(dir).with_env_keys(config.allowed_env_keys.clone());
+    policy.env_overrides.clone_from(&config.env);
+    Ok(policy)
 }
 
 #[cfg(test)]
@@ -109,16 +116,24 @@ mod tests {
     #[test]
     fn test_build_policy_fallback_to_cwd() {
         let keys = vec!["HOME".to_owned()];
-        let policy = build_policy(None, &keys).unwrap(); // Safe: test assertion
-                                                         // With None, should fall back to current directory
+        let policy = build_policy(
+            &RunnerConfig::new(PathBuf::from("/bin/true")).with_allowed_env_keys(keys),
+        )
+        .unwrap(); // Safe: test assertion
+                   // With None, should fall back to current directory
         assert_eq!(policy.working_directory, env::current_dir().unwrap()); // Safe: test assertion
     }
 
     #[test]
     fn test_build_policy_nonexistent_dir_falls_back() {
         let keys = vec!["HOME".to_owned()];
-        let policy = build_policy(Some(Path::new("/nonexistent/path/xyz123")), &keys).unwrap(); // Safe: test assertion
-                                                                                                // Nonexistent path should fall back to cwd
+        let policy = build_policy(
+            &RunnerConfig::new(PathBuf::from("/bin/true"))
+                .with_allowed_env_keys(keys)
+                .with_working_directory(PathBuf::from("/nonexistent/path/xyz123")),
+        )
+        .unwrap(); // Safe: test assertion
+                   // Nonexistent path should fall back to cwd
         assert_eq!(policy.working_directory, env::current_dir().unwrap()); // Safe: test assertion
     }
 
@@ -126,7 +141,12 @@ mod tests {
     fn test_build_policy_existing_dir() {
         let keys = vec!["HOME".to_owned()];
         let dir = env::temp_dir();
-        let policy = build_policy(Some(&dir), &keys).unwrap(); // Safe: test assertion
+        let policy = build_policy(
+            &RunnerConfig::new(PathBuf::from("/bin/true"))
+                .with_allowed_env_keys(keys)
+                .with_working_directory(dir.clone()),
+        )
+        .unwrap(); // Safe: test assertion
         assert_eq!(policy.working_directory, dir);
         assert_eq!(policy.allowed_env_keys, vec!["HOME"]);
     }

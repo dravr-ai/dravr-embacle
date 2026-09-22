@@ -25,6 +25,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::sleep;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -48,6 +51,8 @@ enum Scripted {
     ProviderFault,
     /// Fail with a deterministic rejection the policy refuses to reroute.
     InvalidRequest,
+    /// Refuse on quota: the account is spent until its window resets.
+    QuotaRefusal,
 }
 
 /// A tier whose every call is decided in advance and counted.
@@ -125,6 +130,9 @@ impl LlmProvider for Fake {
             Scripted::InvalidRequest => Err(RunnerError::invalid_request(
                 "the request body was malformed",
             )),
+            Scripted::QuotaRefusal => {
+                Err(RunnerError::rate_limit(self.label, "usage limit reached"))
+            }
         }
     }
 
@@ -465,4 +473,82 @@ fn a_real_reply_is_not_empty() {
         "Tu as couru 42 km ce mois-ci.",
         None
     )));
+}
+
+// ---------------------------------------------------------------------------
+// Quota cooldown: a refused account is passed over, then asked again
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_tier_that_refused_on_quota_is_passed_over_until_its_cooldown_ends() {
+    let (spent, spent_calls) = Fake::scripted("claude-code", Scripted::QuotaRefusal);
+    let (second, second_calls) = Fake::scripted("claude-code#2", Scripted::Says("pong"));
+    let chain = FallbackProvider::new(vec![spent, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_quota_cooldown(Duration::from_millis(200));
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    // Turn 1: the spent account refuses, the second answers.
+    let first = chain.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(first.content, "pong");
+    assert_eq!(spent_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+
+    // Turns 2 and 3, inside the cooldown: the spent account is not asked.
+    for _ in 0..2 {
+        chain.complete(&request).await.unwrap(); // Safe: test assertion
+    }
+    assert_eq!(
+        spent_calls.load(Ordering::SeqCst),
+        1,
+        "a refused account is not asked again on every turn"
+    );
+    assert_eq!(second_calls.load(Ordering::SeqCst), 3);
+
+    // After the cooldown the spent account is asked again — that is how a
+    // reset window is discovered.
+    sleep(Duration::from_millis(250)).await;
+    chain.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(spent_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn the_last_tier_is_asked_even_in_cooldown() {
+    let (only, calls) = Fake::scripted("claude-code", Scripted::QuotaRefusal);
+    let chain = FallbackProvider::new(vec![only])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_quota_cooldown(Duration::from_hours(1));
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    for _ in 0..2 {
+        let err = chain.complete(&request).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "nowhere else to go: it is asked"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_fault_is_not_a_cooldown() {
+    let (flaky, flaky_calls) = Fake::scripted("claude-code", Scripted::ProviderFault);
+    let (second, _) = Fake::scripted("gemini", Scripted::Says("pong"));
+    let chain = FallbackProvider::new(vec![flaky, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_quota_cooldown(Duration::from_hours(1));
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    for _ in 0..3 {
+        chain.complete(&request).await.unwrap(); // Safe: test assertion
+    }
+    assert_eq!(
+        flaky_calls.load(Ordering::SeqCst),
+        3,
+        "a fault may clear on the next turn; only a quota refusal is held off"
+    );
 }
