@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.0] — 2026-09-22
+
+### Added
+
+- feat(pool): N accounts of one CLI runner as ordered chain tiers
+- feat(ci): live Copilot tests run on a runner-local model, not an account
+
+### Other
+
+- test(delivery): the runner list is held to the enum, the SDK is named
+
+
+
 ## [0.28.2] — 2026-09-21
 
 

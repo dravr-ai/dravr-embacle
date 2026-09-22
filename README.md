@@ -82,7 +82,7 @@ docker run -p 3000:3000 ghcr.io/dravr-ai/embacle --provider copilot
 
 ```toml
 [dependencies]
-embacle = "0.28"
+embacle = "0.29"
 ```
 
 ## Supported Runners
@@ -413,7 +413,7 @@ Enable the `openai-api` feature for HTTP-based communication with any OpenAI-com
 
 ```toml
 [dependencies]
-embacle = { version = "0.28", features = ["openai-api"] }
+embacle = { version = "0.29", features = ["openai-api"] }
 ```
 
 ```rust
@@ -451,7 +451,7 @@ Enable the `http-api` feature for providers that call a vendor's HTTP API direct
 
 ```toml
 [dependencies]
-embacle = { version = "0.28", features = ["http-api"] }
+embacle = { version = "0.29", features = ["http-api"] }
 ```
 
 ```rust
@@ -508,7 +508,7 @@ progress to user-facing clients.
 
 ```toml
 [dependencies]
-embacle = { version = "0.28", features = ["agui"] }
+embacle = { version = "0.29", features = ["agui"] }
 ```
 
 The module is deliberately transport-agnostic: it ships the event enum
@@ -536,7 +536,7 @@ Enable the `copilot-headless` feature for ACP-based communication with SDK-manag
 
 ```toml
 [dependencies]
-embacle = { version = "0.28", features = ["copilot-headless"] }
+embacle = { version = "0.29", features = ["copilot-headless"] }
 ```
 
 ```rust
@@ -578,7 +578,7 @@ Enable the `copilot-sdk` feature to reach the same GitHub Copilot runtime throug
 
 ```toml
 [dependencies]
-embacle = { version = "0.28", features = ["copilot-sdk"] }
+embacle = { version = "0.29", features = ["copilot-sdk"] }
 ```
 
 ```rust
