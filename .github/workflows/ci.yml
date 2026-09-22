@@ -77,11 +77,12 @@ jobs:
   # `copilot-runtime` pair the SDK loads — against a model this job provisions
   # on the runner. No GitHub account is involved and no secret is read.
   #
-  # They used to run on a real Copilot subscription, on every push. That
-  # subscription was the one the dev deployment served athletes from, and CI
-  # spent its quota (2026-09-21). What these tests verify is embacle's wiring
-  # to the Copilot binaries — the ACP handshake, streaming, usage, the system
-  # slot, tool calls — and none of that depends on whose model answers.
+  # They used to run on a real Copilot subscription, on every push — the one
+  # the dev deployment serves athletes from, so every push spent premium
+  # requests out of the budget athletes are answered from. What these tests
+  # verify is embacle's wiring to the Copilot binaries — the ACP handshake,
+  # streaming, usage, the system slot, tool calls — and none of that depends
+  # on whose model answers.
   #
   # The Copilot CLI routes to a custom provider when COPILOT_PROVIDER_BASE_URL
   # is set and needs no GitHub authentication then; COPILOT_OFFLINE=true cuts
