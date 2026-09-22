@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{self, Path, PathBuf};
 use std::process::{self, Stdio};
@@ -1082,6 +1083,9 @@ impl StderrRing {
 struct TurnAccumulator {
     content: String,
     tool_calls: Vec<ObservedToolCall>,
+    /// What the CLI itself wrote into the reply stream; never part of
+    /// `content`.
+    notices: Vec<CliNotice>,
 }
 
 impl TurnAccumulator {
@@ -1089,7 +1093,126 @@ impl TurnAccumulator {
         Self {
             content: String::new(),
             tool_calls: Vec::new(),
+            notices: Vec::new(),
         }
+    }
+
+    /// The turn as an error, when the CLI answered it and the model did not.
+    ///
+    /// A turn with model text keeps it: a notice beside a real answer is the
+    /// CLI commenting on the turn, not replacing it.
+    fn failure(&self) -> Option<RunnerError> {
+        if !self.content.trim().is_empty() {
+            return None;
+        }
+        let errors: Vec<&str> = self
+            .notices
+            .iter()
+            .filter(|n| n.level == NoticeLevel::Error)
+            .map(|n| n.message.as_str())
+            .collect();
+        if errors.is_empty() {
+            return None;
+        }
+        let mut message = format!(
+            "copilot-acp: the CLI answered the turn itself, with no model text: {}",
+            errors.join(" / ")
+        );
+        for other in self
+            .notices
+            .iter()
+            .filter(|n| n.level != NoticeLevel::Error)
+        {
+            let _ = write!(message, " ({}: {})", other.level.label(), other.message);
+        }
+        Some(notice_error(&errors.join(" "), message))
+    }
+}
+
+/// How severe a [`CliNotice`] is, from the prefix the CLI gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeLevel {
+    Error,
+    Warning,
+    Info,
+}
+
+impl NoticeLevel {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+}
+
+/// A notice the Copilot CLI wrote into the reply stream.
+///
+/// The CLI's ACP adapter renders the runtime's `session.error`,
+/// `session.warning` and `session.info` events as ordinary
+/// `agent_message_chunk` text — `Error: …`, `Warning: …`, `Info: …` — and
+/// still ends the turn with `end_turn` (read from its adapter, and observed on
+/// the wire with CLI 1.0.86/1.0.87). Nothing else marks them as the CLI's.
+/// Taken as model text they reached the athlete as the coach's reply — "Error:
+/// No response was returned. Send your message again to retry." — and a turn
+/// the runtime had failed (spent quota, rate limit, lost login, a prompt over
+/// the model's context budget) looked like a success, so no fallback tier was
+/// ever asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliNotice {
+    level: NoticeLevel,
+    message: String,
+}
+
+/// The notice a chunk carries, if the chunk is one.
+///
+/// Recognised by the adapter's rendering: the chunk opens with the whole
+/// prefix. The adapter sends each notice as one chunk, while a model's reply
+/// streams as deltas, so a reply that mentions an error mid-sentence is left
+/// alone.
+fn cli_notice(text: &str) -> Option<CliNotice> {
+    [
+        ("Error: ", NoticeLevel::Error),
+        ("Warning: ", NoticeLevel::Warning),
+        ("Info: ", NoticeLevel::Info),
+    ]
+    .into_iter()
+    .find_map(|(prefix, level)| {
+        text.strip_prefix(prefix).map(|message| CliNotice {
+            level,
+            message: message.trim().to_owned(),
+        })
+    })
+}
+
+/// The error a CLI-answered turn becomes.
+///
+/// Every kind returned here is a provider fault, so a fallback chain asks its
+/// next tier. The text is all ACP carries — the runtime's own error type does
+/// not survive the adapter — so quota and login failures are told apart by
+/// their wording, which matters only for how long a router rests the tier.
+fn notice_error(errors: &str, message: String) -> RunnerError {
+    let lower = errors.to_lowercase();
+    let mentions = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if mentions(&[
+        "rate limit",
+        "rate-limit",
+        "quota",
+        "premium request",
+        "too many requests",
+    ]) {
+        RunnerError::rate_limit("copilot-acp", message)
+    } else if mentions(&[
+        "authenticat",
+        "/login",
+        "copilot access",
+        "token may be expired",
+        "sign in",
+    ]) {
+        RunnerError::auth_failure(message)
+    } else {
+        RunnerError::external_service("copilot-acp", message)
     }
 }
 
@@ -1127,6 +1250,15 @@ fn process_notification_inner(
     match &notif.update {
         schema::SessionUpdate::AgentMessageChunk(chunk) => {
             if let schema::ContentBlock::Text(text) = &chunk.content {
+                if let Some(notice) = cli_notice(&text.text) {
+                    warn!(
+                        level = notice.level.label(),
+                        message = %notice.message,
+                        "ACP: the CLI wrote a notice into the reply stream; kept out of the reply"
+                    );
+                    acc.notices.push(notice);
+                    return;
+                }
                 acc.content.push_str(&text.text);
                 if let Some(tx) = event_tx {
                     let _ = tx.send(Ok(HeadlessStreamEvent::TextDelta(text.text.clone())));
@@ -1335,6 +1467,10 @@ async fn collect_complete(
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn");
 
+            if let Some(err) = acc.failure() {
+                return Err(err);
+            }
+
             let usage = extract_usage(&msg);
 
             debug!(
@@ -1384,6 +1520,10 @@ async fn collect_streaming(
                 ));
             }
 
+            if let Some(err) = acc.failure() {
+                return Err(err);
+            }
+
             let stop_reason = msg
                 .pointer("/result/stopReason")
                 .and_then(Value::as_str)
@@ -1413,6 +1553,12 @@ async fn collect_streaming(
                         {
                             if let schema::SessionUpdate::AgentMessageChunk(chunk) = &notif.update {
                                 if let schema::ContentBlock::Text(text) = &chunk.content {
+                                    // A CLI notice is recorded below and never
+                                    // streamed as reply text.
+                                    if cli_notice(&text.text).is_some() {
+                                        process_notification(params, &mut acc);
+                                        continue;
+                                    }
                                     let _ = chunk_tx.send(Ok(StreamChunk {
                                         delta: text.text.clone(),
                                         is_final: false,
@@ -1552,6 +1698,10 @@ async fn collect_streaming_with_tools(
                     "copilot-acp",
                     format!("Prompt failed: {error}"),
                 ));
+            }
+
+            if let Some(err) = acc.failure() {
+                return Err(err);
             }
 
             let stop_reason = msg
@@ -2470,7 +2620,7 @@ impl LlmProvider for CopilotHeadlessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ChatMessage;
+    use crate::types::{ChatMessage, ErrorKind};
     use serde_json::json;
 
     /// A pool of two serves two completions at once.
@@ -3668,6 +3818,108 @@ mod tests {
         expect_text_delta(&mut rx, "Hello, ");
         expect_text_delta(&mut rx, "world!");
         assert!(rx.try_recv().is_err(), "expected no more events");
+    }
+
+    /// The two chunks the CLI sent, verbatim, for a prompt over the model's
+    /// context budget (CLI 1.0.87, provider mode): a warning, then the
+    /// runtime's error, and no model text at all.
+    const CONTEXT_BUDGET_WARNING: &str = "Warning: Static system messages and tool definitions \
+        exceed the model's usable context budget. Reduce static context or switch to a \
+        larger-context model.";
+    const NO_RESPONSE_ERROR: &str =
+        "Error: No response was returned. Send your message again to retry.";
+
+    #[test]
+    fn a_turn_the_cli_answered_alone_is_an_error_not_a_reply() {
+        let mut acc = TurnAccumulator::new();
+        process_notification(
+            &make_text_chunk_notification(CONTEXT_BUDGET_WARNING),
+            &mut acc,
+        );
+        process_notification(&make_text_chunk_notification(NO_RESPONSE_ERROR), &mut acc);
+
+        assert_eq!(acc.content, "", "the CLI's text is not the model's reply");
+        let err = acc.failure().unwrap(); // Safe: test assertion — a CLI-answered turn fails
+        assert_eq!(err.kind, ErrorKind::ExternalService, "{err}");
+        assert!(
+            err.kind.is_provider_fault(),
+            "a fallback chain asks its next tier"
+        );
+        let text = err.to_string();
+        assert!(text.contains("No response was returned"), "{text}");
+        assert!(
+            text.contains("usable context budget"),
+            "the warning is kept for diagnosis: {text}"
+        );
+    }
+
+    #[test]
+    fn a_notice_beside_a_real_answer_is_dropped_and_the_answer_kept() {
+        let mut acc = TurnAccumulator::new();
+        process_notification(
+            &make_text_chunk_notification(
+                "Info: Rate limited. Switching to auto mode to continue.",
+            ),
+            &mut acc,
+        );
+        process_notification(&make_text_chunk_notification("Your FTP is "), &mut acc);
+        process_notification(&make_text_chunk_notification("250 W."), &mut acc);
+
+        assert_eq!(acc.content, "Your FTP is 250 W.");
+        assert_eq!(acc.notices.len(), 1);
+        assert!(acc.failure().is_none(), "the model answered");
+    }
+
+    #[test]
+    fn a_reply_that_mentions_an_error_is_the_model_speaking() {
+        let mut acc = TurnAccumulator::new();
+        process_notification(
+            &make_text_chunk_notification("The watch logged an Error: sensor dropout at km 12."),
+            &mut acc,
+        );
+        assert_eq!(
+            acc.content,
+            "The watch logged an Error: sensor dropout at km 12."
+        );
+        assert!(acc.notices.is_empty());
+    }
+
+    #[test]
+    fn a_cli_error_is_classified_by_its_wording() {
+        let cases = [
+            ("Error: You have exceeded your premium request quota.", ErrorKind::RateLimit),
+            ("Error: Rate limit exceeded, retry later.", ErrorKind::RateLimit),
+            (
+                "Error: Your authentication token may be expired. Start 'copilot' and run the '/login' command to re-authenticate",
+                ErrorKind::AuthFailure,
+            ),
+            (NO_RESPONSE_ERROR, ErrorKind::ExternalService),
+        ];
+        for (chunk, expected) in cases {
+            let mut acc = TurnAccumulator::new();
+            process_notification(&make_text_chunk_notification(chunk), &mut acc);
+            let err = acc.failure().unwrap(); // Safe: test assertion — an error-only turn fails
+            assert_eq!(err.kind, expected, "{chunk}");
+            assert!(err.kind.is_provider_fault(), "{chunk}: falls through");
+        }
+    }
+
+    #[test]
+    fn a_cli_notice_is_never_streamed_as_reply_text() {
+        let mut acc = TurnAccumulator::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_notification_streaming(
+            &make_text_chunk_notification(CONTEXT_BUDGET_WARNING),
+            &mut acc,
+            &tx,
+        );
+        process_notification_streaming(
+            &make_text_chunk_notification(NO_RESPONSE_ERROR),
+            &mut acc,
+            &tx,
+        );
+        assert!(rx.try_recv().is_err(), "no delta reached the stream");
+        assert!(acc.failure().is_some());
     }
 
     #[test]
