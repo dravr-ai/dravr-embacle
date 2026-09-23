@@ -70,8 +70,11 @@ jobs:
       # the --all-features clippy lane and never execute. The price-key check
       # asks every runner for its name, so it needs every runner feature. No
       # secrets — the live cases in these files are env-gated and skip.
+      # `agui` and `quota-http` are here for tests/agui.rs and tests/e2e_router.rs,
+      # which gate on them and never ran before 2026-09-23 (19 tests in all);
+      # both features pull no extra dependency.
       - name: HTTP API provider tests
-        run: cargo test --workspace --features http-api,openai-api,copilot-headless,copilot-sdk,web-ui
+        run: cargo test --workspace --features http-api,openai-api,copilot-headless,copilot-sdk,web-ui,agui,quota-http
 
   # The live Copilot tests drive the REAL binaries — `copilot --acp` and the
   # `copilot-runtime` pair the SDK loads — against a model this job provisions
