@@ -68,7 +68,7 @@ https://github.com/dravr-ai/dravr-build-config — never use a local `.githooks/
 cargo fmt --all
 
 # 2. Clippy with warnings as errors
-cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets
 
 # 3. Architectural validation (MUST exit 0)
 .build/validation/validate.sh
@@ -89,7 +89,7 @@ The validation checks: placeholder code, forbidden anyhow usage, problematic unw
 | Tier | When | Commands |
 |------|------|----------|
 | Quick | During dev iteration | `cargo check --quiet && cargo test <pattern>` |
-| Pre-commit | Before each commit | `cargo fmt --all && RUSTFLAGS=-Dwarnings cargo clippy --all-targets -- -D warnings` |
+| Pre-commit | Before each commit | `cargo fmt --all && CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets` |
 | Full | Before push (see above) | `cargo fmt + clippy + .build/validation/validate.sh` |
 
 ### Test Output Verification — MANDATORY

@@ -12,7 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  CARGO_BUILD_WARNINGS: deny
 
 jobs:
   check:
@@ -41,7 +41,7 @@ jobs:
       # behind a non-default feature are never compiled here and accumulate
       # lints invisibly — agui.rs carried a map().unwrap_or() violation that
       # only ever appeared when someone happened to lint locally with the flag.
-      - run: cargo clippy --workspace --all-targets --all-features --quiet -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --quiet
 
   fmt:
     name: Format

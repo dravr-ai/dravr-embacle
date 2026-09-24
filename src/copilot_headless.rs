@@ -115,9 +115,12 @@ const ACP_POOL_BUDGET_MB: usize = 1024;
 /// closes it. Once `initialize` has returned, the child has read its
 /// configuration, so a later writer cannot change the model under it.
 ///
-/// Spawns are rare (only on discard: exit, model change, session ceiling), so
-/// serializing them costs little; a turn that reuses a warm subprocess never
-/// touches this.
+/// Both spawn paths take it: [`AcpProcess::spawn_and_initialize`] for the
+/// pool and [`setup_session`] for streamed turns. Pooled spawns are rare (only
+/// on discard: exit, model change, session ceiling), and a turn that reuses a
+/// warm subprocess never touches this. A streamed turn spawns every time, so
+/// concurrent streams queue here for the length of one handshake each — the
+/// price of each one running on the model it asked for.
 static MODEL_ROUTING_GATE: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
 /// Resident memory the STREAMING paths may occupy between them.
@@ -524,16 +527,9 @@ impl AcpTransport {
 /// Errors are the caller's to downgrade to a warning: a config write failure must
 /// never abort a turn — it just leaves the previous/default model in effect.
 ///
-/// LIMITATION(registre#134): settings.json is process-global and this write is
-/// unsynchronized, while the child reads it asynchronously AFTER exec. Two
-/// spawns for different models can interleave — A writes X, B writes Y, A's
-/// child reads Y — and A's turn then runs on the wrong model with nothing
-/// downstream able to notice, since the response reports the model we asked
-/// for rather than the one that served it. Serializing write-and-spawn narrows
-/// the window without closing it; the real fix is a per-child config location,
-/// which is entangled with credential storage under the same directory. The
-/// pool reduces the exposure — spawns now happen only on discard rather than
-/// once per call — but does not remove it.
+/// settings.json is process-global and the child reads it AFTER exec, so this
+/// write is safe only under [`MODEL_ROUTING_GATE`], held until the child's
+/// `initialize` returns. Every caller of [`spawn_copilot`] takes it.
 fn ensure_copilot_settings_model(model: &str) -> Result<PathBuf, RunnerError> {
     let home = env::var_os("HOME").ok_or_else(|| {
         RunnerError::internal("HOME is not set; cannot locate copilot settings.json")
@@ -695,6 +691,10 @@ async fn setup_session(
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
 ) -> Result<(AcpTransport, Child, StderrRing, String, Option<Vec<String>>), RunnerError> {
+    // Held until the handshake completes: see MODEL_ROUTING_GATE. A streamed
+    // turn spawns a child every time, so skipping the gate here would race
+    // every concurrent stream, and every pooled spawn, for settings.json.
+    let routing_gate = MODEL_ROUTING_GATE.lock().await;
     let mut child = spawn_copilot(cli_path, github_token, model, session_cwd)?;
     let stderr_ring = StderrRing::drain(child.stderr.take());
 
@@ -729,6 +729,10 @@ async fn setup_session(
         let init_resp = transport.read_response(init_id).await?;
         info!("ACP: initialize handshake complete");
         debug!(response = %init_resp, "ACP initialize response");
+        // The child has read its configuration, so a later writer can no longer
+        // change the model under it. An error or timeout before this point
+        // drops the guard with this future.
+        drop(routing_gate);
 
         // Create session with model, working directory, optional system
         // prompt, and any MCP servers the model should call tools from.

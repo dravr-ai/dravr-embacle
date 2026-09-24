@@ -16,12 +16,12 @@ Run this skill before every commit and after refactoring.
 
 ### Standard Strict Check
 ```bash
-cargo clippy --all-targets -- -D warnings
+CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets
 ```
 
 ### Fix Auto-Fixable Issues
 ```bash
-cargo clippy --fix --all-targets --allow-dirty -- -D warnings
+CARGO_BUILD_WARNINGS=deny cargo clippy --fix --all-targets --allow-dirty
 ```
 
 ## Linting Configuration
