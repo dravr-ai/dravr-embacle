@@ -15,7 +15,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::env;
-use std::fs;
+use std::fs::{self, Metadata};
 use std::hash::{Hash, Hasher};
 use std::path::{Path as FsPath, PathBuf};
 
@@ -27,10 +27,11 @@ use axum::Json;
 use serde::Serialize;
 
 use super::error::UhpFailure;
+use super::state::UhpState;
+use super::tasks::is_session_id;
 
 /// Environment variable naming where session working folders live.
 pub const WORKDIR_ENV: &str = "UHP_WORKDIR";
-use super::state::UhpState;
 
 /// One artifact a session produced.
 #[derive(Debug, Clone, Serialize)]
@@ -63,9 +64,46 @@ pub struct ArtifactList {
 /// wrote".
 #[must_use]
 pub fn session_workdir(session_id: &str) -> PathBuf {
-    let base =
-        env::var(WORKDIR_ENV).map_or_else(|_| env::temp_dir().join("embacle-uhp"), PathBuf::from);
-    base.join(session_id)
+    workdir_base().join(session_id)
+}
+
+/// The folder every session's working folder sits directly inside.
+fn workdir_base() -> PathBuf {
+    env::var(WORKDIR_ENV).map_or_else(|_| env::temp_dir().join("embacle-uhp"), PathBuf::from)
+}
+
+/// Whether a session id a request carried names a session this server holds.
+///
+/// The shape is checked before the store is consulted, so an id that could
+/// never have been minted is refused on sight.
+fn holds_session(state: &UhpState, session_id: &str) -> bool {
+    is_session_id(session_id) && state.store.session_turns(session_id).is_some()
+}
+
+/// A held session's working folder, resolved through every symlink, when it is
+/// a real folder sitting directly inside the resolved workdir base.
+///
+/// Comparing against the base joined with the id, rather than checking a
+/// prefix, also refuses a session folder that is itself a link — to another
+/// session's folder as much as to anywhere else.
+fn confined_root(session_id: &str) -> Option<PathBuf> {
+    let base = fs::canonicalize(workdir_base()).ok()?;
+    let root = fs::canonicalize(base.join(session_id)).ok()?;
+    (root == base.join(session_id)).then_some(root)
+}
+
+/// `path` resolved through every symlink, with its metadata, when it lands on
+/// a regular file inside `root`, which must itself be resolved.
+///
+/// A harness writes links as easily as files, so a name inside the session
+/// folder proves nothing about where its bytes live.
+fn confined_file(path: &FsPath, root: &FsPath) -> Option<(PathBuf, Metadata)> {
+    let resolved = fs::canonicalize(path).ok()?;
+    if !resolved.starts_with(root) {
+        return None;
+    }
+    let metadata = fs::metadata(&resolved).ok()?;
+    metadata.is_file().then_some((resolved, metadata))
 }
 
 /// A stable id for an artifact, derived from its path inside the session.
@@ -79,9 +117,17 @@ fn artifact_id(relative: &str) -> String {
 }
 
 /// Every file a session's tasks wrote, walked from its working folder.
+///
+/// Only what lives inside the folder counts. A link to a folder is never
+/// descended into, since it could lead anywhere and a link cycle would multiply
+/// the walk exponentially, and a link to a file is listed only when it resolves
+/// to a regular file inside the same folder.
 fn walk(root: &FsPath, session_id: &str) -> Vec<Artifact> {
     let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let Ok(root) = fs::canonicalize(root) else {
+        return found;
+    };
+    let mut stack = vec![root.clone()];
 
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -89,11 +135,18 @@ fn walk(root: &FsPath, session_id: &str) -> Vec<Artifact> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type` does not follow a link, unlike `Path::is_dir`.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(relative) = path.strip_prefix(root) else {
+            let Some((_, metadata)) = confined_file(&path, &root) else {
+                continue;
+            };
+            let Ok(relative) = path.strip_prefix(&root) else {
                 continue;
             };
             // Forward slashes on the wire, whatever the host separator. The
@@ -106,13 +159,12 @@ fn walk(root: &FsPath, session_id: &str) -> Vec<Artifact> {
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            let bytes = entry.metadata().map_or(0, |m| m.len());
             found.push(Artifact {
                 id: artifact_id(&relative),
                 object: "file",
                 container_id: session_id.to_owned(),
                 filename: relative,
-                bytes,
+                bytes: metadata.len(),
             });
         }
     }
@@ -137,46 +189,53 @@ pub async fn session_files(
     State(state): State<UhpState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ArtifactList>, UhpFailure> {
-    if state.store.session_turns(&session_id).is_none() {
+    if !holds_session(&state, &session_id) {
         return Err(UhpFailure::not_found(
             "session_not_found",
             "no session with that id exists",
         ));
     }
-    let root = session_workdir(&session_id);
-    let files = if root.is_dir() {
-        walk(&root, &session_id)
-    } else {
-        Vec::new()
-    };
+    let files = confined_root(&session_id).map_or_else(Vec::new, |root| walk(&root, &session_id));
     Ok(Json(ArtifactList { session_id, files }))
 }
 
 /// Handle `GET /v1/containers/{container_id}/files/{file_id}/content`.
 ///
+/// A container is a session's working folder, so the container id is held to
+/// everything a session id is: the shape this server mints, a session it
+/// holds, and a real folder inside the workdir base. The file is then served
+/// only if it still resolves inside that folder when it is read.
+///
 /// # Errors
 ///
 /// Answers `404 file_not_found` when the container holds no artifact with that
-/// id — including when the session was deleted, since its folder went with it.
+/// id — including when the session was deleted, since its folder went with it,
+/// and when the container id names no session this server holds. Every refusal
+/// is the same answer, so a probe learns nothing about what exists.
 pub async fn container_file(
+    State(state): State<UhpState>,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, UhpFailure> {
-    let root = session_workdir(&container_id);
+    let not_found = || UhpFailure::not_found("file_not_found", "no artifact with that id exists");
+    if !holds_session(&state, &container_id) {
+        return Err(not_found());
+    }
+    let root = confined_root(&container_id).ok_or_else(not_found)?;
     let artifact = walk(&root, &container_id)
         .into_iter()
         .find(|a| a.id == file_id)
-        .ok_or_else(|| {
-            UhpFailure::not_found("file_not_found", "no artifact with that id exists")
-        })?;
+        .ok_or_else(not_found)?;
 
     // The stored name is wire-shaped, so rebuild the host path from its
     // segments rather than joining a string that carries forward slashes.
-    let mut path = root;
+    let mut path = root.clone();
     for segment in artifact.filename.split('/') {
         path.push(segment);
     }
-    let bytes = fs::read(&path)
-        .map_err(|_| UhpFailure::not_found("file_not_found", "no artifact with that id exists"))?;
+    // Resolved again at read time: a link swapped in after the walk must not
+    // carry the read outside the folder.
+    let (resolved, _) = confined_file(&path, &root).ok_or_else(not_found)?;
+    let bytes = fs::read(&resolved).map_err(|_| not_found())?;
 
     Ok((download_headers(&artifact.filename), bytes))
 }

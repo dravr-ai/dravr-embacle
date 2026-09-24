@@ -122,6 +122,12 @@ curl http://localhost:3000/uhp/v1/sessions/$SID/files -H "Authorization: Bearer 
 curl http://localhost:3000/uhp/v1/containers/$SID/files/$FID/content -H "Authorization: Bearer $KEY"
 ```
 
+A container id is its session's id, and a download never reaches outside that session's folder. The
+id must have the shape the server mints and name a session this server holds, and the folder must be
+a real folder inside `UHP_WORKDIR`; anything else answers `404 file_not_found`, the same answer as a
+missing file. A symlink the harness wrote counts as an artifact only when it resolves to a regular
+file inside the same folder, and a link to a folder is never followed.
+
 Downloads carry `X-Content-Type-Options: nosniff`, `Content-Type: application/octet-stream` and
 `Content-Disposition: attachment`. An artifact is content a model was steered into producing, so it
 must never render as a page on this origin.
