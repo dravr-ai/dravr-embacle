@@ -36,7 +36,7 @@ Execute all validations simultaneously using background tasks:
 
 1. **Execute Strict Clippy Validation** (Background):
    ```bash
-   cargo clippy --tests -- -W clippy::all -W clippy::pedantic -W clippy::nursery -D warnings
+   CARGO_BUILD_WARNINGS=deny cargo clippy --tests -- -W clippy::all -W clippy::pedantic -W clippy::nursery
    ```
 
 2. **Run Comprehensive Test Suite** (Background):
@@ -68,7 +68,7 @@ Execute all validations simultaneously using background tasks:
 
 1. **Launch All Validations in Parallel** (use Bash tool with `run_in_background: true`):
    ```
-   Task A: cargo clippy --tests -- -W clippy::all -W clippy::pedantic -W clippy::nursery -D warnings
+   Task A: CARGO_BUILD_WARNINGS=deny cargo clippy --tests -- -W clippy::all -W clippy::pedantic -W clippy::nursery
    Task B: cargo test --release
    Task C: rg "unwrap\(\)|expect\(\)|panic!|anyhow!" src/ --type rust
    Task D: ./scripts/ci/architectural-validation.sh

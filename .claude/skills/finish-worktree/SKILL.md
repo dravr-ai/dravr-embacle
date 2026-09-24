@@ -46,7 +46,7 @@ Fix the issues locally, then:
 ```bash
 # Make fixes
 cargo fmt
-cargo clippy --all-targets -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery
+CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets -- -D clippy::all -D clippy::pedantic -D clippy::nursery
 
 # Amend or add commit
 git add .

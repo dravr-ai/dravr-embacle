@@ -25,7 +25,7 @@ echo ""
 
 # Tier 1: Clippy
 echo "━━━ Tier 1: Clippy ━━━"
-if ! RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets -- -D warnings 2>&1; then
+if ! CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets 2>&1; then
     echo "❌ Clippy failed"
     exit 1
 fi
