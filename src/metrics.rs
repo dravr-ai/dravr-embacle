@@ -428,7 +428,11 @@ mod tests {
         assert_eq!(report.total_completion_tokens, 0);
         assert_eq!(report.total_tokens, 0);
         assert_eq!(report.errors_count, 0);
-        assert!(report.total_cost == 0.0);
+        assert!(
+            report.total_cost.abs() < f64::EPSILON,
+            "{}",
+            report.total_cost
+        );
         assert_eq!(report.provider_name, "test");
     }
 
@@ -531,7 +535,11 @@ mod tests {
         assert_eq!(report.call_count, 0);
         assert_eq!(report.total_tokens, 0);
         assert_eq!(report.errors_count, 0);
-        assert!(report.total_cost == 0.0);
+        assert!(
+            report.total_cost.abs() < f64::EPSILON,
+            "{}",
+            report.total_cost
+        );
     }
 
     // ========================================================================
@@ -588,7 +596,11 @@ mod tests {
         metered.complete(&request).await.expect("call"); // Safe: test assertion
 
         let report = metered.report().unwrap(); // Safe: test assertion
-        assert!(report.total_cost == 0.0);
+        assert!(
+            report.total_cost.abs() < f64::EPSILON,
+            "{}",
+            report.total_cost
+        );
     }
 
     #[tokio::test]
@@ -609,7 +621,11 @@ mod tests {
         metered.complete(&request).await.expect("call"); // Safe: test assertion
 
         let report = metered.report().unwrap(); // Safe: test assertion
-        assert!(report.total_cost == 0.0);
+        assert!(
+            report.total_cost.abs() < f64::EPSILON,
+            "{}",
+            report.total_cost
+        );
     }
 
     #[tokio::test]
@@ -696,6 +712,7 @@ mod tests {
         assert!(metered.report().unwrap().total_cost > 0.0); // Safe: test assertion
 
         metered.reset().unwrap(); // Safe: test assertion
-        assert!(metered.report().unwrap().total_cost == 0.0); // Safe: test assertion
+        let cost = metered.report().unwrap().total_cost; // Safe: test assertion
+        assert!(cost.abs() < f64::EPSILON, "{cost}");
     }
 }
