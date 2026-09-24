@@ -278,7 +278,7 @@ fn append_property_lines(catalog: &mut String, schema: &Value, depth: usize) {
         .unwrap_or_default();
 
     let indent = "  ".repeat(depth);
-    for (name, prop) in props_obj {
+    for (name, prop) in sorted_properties(props_obj) {
         let type_str = prop.get("type").and_then(|t| t.as_str()).unwrap_or("any");
         let is_required = required.contains(&name.as_str());
         let req_label = if is_required { ", required" } else { "" };
@@ -314,6 +314,17 @@ fn append_property_lines(catalog: &mut String, schema: &Value, depth: usize) {
             append_property_lines(catalog, inner, depth + 1);
         }
     }
+}
+
+/// A schema's `properties` in key order, whatever the map's own order is.
+///
+/// A dependency can switch on `serde_json`'s `preserve_order` (feature
+/// unification makes it global), turning the map's iteration from sorted into
+/// insertion order. The catalog stays byte-identical across that switch.
+fn sorted_properties(props: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    let mut entries: Vec<_> = props.iter().collect();
+    entries.sort_unstable_by_key(|(name, _)| *name);
+    entries
 }
 
 /// The object schema a parameter expands into — itself when it is an object
@@ -381,7 +392,7 @@ fn example_for_schema(schema: &Value, depth: usize) -> Value {
                 return Value::Object(serde_json::Map::new());
             }
             let mut map = serde_json::Map::new();
-            for (name, prop) in props {
+            for (name, prop) in sorted_properties(props) {
                 map.insert(name.clone(), example_for_schema(prop, depth + 1));
             }
             Value::Object(map)
@@ -1000,7 +1011,7 @@ And some more text."#;
     fn catalog_rendering_of_a_flat_schema_is_byte_identical() {
         // The recursion must be invisible to schemas that have no nesting: the
         // tools already succeeding on every call must gain neither a token nor
-        // a behaviour change. Keys render in serde_json's sorted map order.
+        // a behaviour change. Keys render sorted, whatever the map's own order.
         let catalog = generate_tool_catalog(&[FunctionDeclaration {
             name: "get_activities".to_owned(),
             description: "Get the user's recent activities".to_owned(),

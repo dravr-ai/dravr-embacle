@@ -64,7 +64,7 @@ pub struct UhpError {
     pub message: String,
     /// Structured extra information, e.g. the versions a server does support.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<Value>,
+    pub detail: Option<Box<Value>>,
 }
 
 /// The wire envelope: an error is always nested under `error`.
@@ -105,7 +105,7 @@ impl UhpFailure {
     /// Attach structured detail, such as the list of supported versions.
     #[must_use]
     pub fn with_detail(mut self, detail: Value) -> Self {
-        self.error.detail = Some(detail);
+        self.error.detail = Some(Box::new(detail));
         self
     }
 

@@ -209,7 +209,7 @@ fn call_result_to_json(result: CallToolResult) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use rmcp::model::Content;
+    use rmcp::model::ContentBlock;
 
     use super::*;
 
@@ -222,21 +222,21 @@ mod tests {
 
     #[test]
     fn call_result_parses_json_text() {
-        let result = CallToolResult::success(vec![Content::text(r#"{"ok":true}"#)]);
+        let result = CallToolResult::success(vec![ContentBlock::text(r#"{"ok":true}"#)]);
         let value = call_result_to_json(result);
         assert_eq!(value["ok"], true);
     }
 
     #[test]
     fn call_result_falls_back_to_string() {
-        let result = CallToolResult::success(vec![Content::text("plain text answer")]);
+        let result = CallToolResult::success(vec![ContentBlock::text("plain text answer")]);
         let value = call_result_to_json(result);
         assert_eq!(value, Value::String("plain text answer".to_owned()));
     }
 
     #[test]
     fn call_result_wraps_errors() {
-        let result = CallToolResult::error(vec![Content::text("boom")]);
+        let result = CallToolResult::error(vec![ContentBlock::text("boom")]);
         let value = call_result_to_json(result);
         assert_eq!(value["error"], "boom");
     }
