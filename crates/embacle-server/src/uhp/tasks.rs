@@ -44,6 +44,7 @@ use embacle::factory::create_runner_with_config;
 use embacle::types::{ChatMessage, ChatRequest, LlmProvider, RunnerError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use uuid::fmt::Simple;
 use uuid::Uuid;
 
 use super::error::{ErrorType, UhpFailure};
@@ -331,9 +332,28 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
 }
 
+/// The prefix of every session id this server mints.
+const SESSION_PREFIX: &str = "sess_";
+
 /// A prefixed id, as the object model requires.
 fn id_with(prefix: &str) -> String {
     format!("{prefix}{}", Uuid::new_v4().simple())
+}
+
+/// Whether `id` has exactly the shape [`id_with`] mints for a session: the
+/// prefix, then a UUID in its simple form, 32 lowercase hex digits.
+///
+/// A session id doubles as its container id and names a folder on disk, so an
+/// id a request carries is held to this shape before it gets near a path, and
+/// no id carrying a separator, a `..` or an absolute path passes it.
+#[must_use]
+pub fn is_session_id(id: &str) -> bool {
+    id.strip_prefix(SESSION_PREFIX).is_some_and(|hex| {
+        hex.len() == Simple::LENGTH
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// Handle `POST /v1/responses`.
@@ -374,7 +394,7 @@ fn start_background(state: UhpState, request: CreateResponse) -> Response {
         .previous_response_id
         .as_ref()
         .and_then(|prev| state.store.session_of(prev))
-        .unwrap_or_else(|| id_with("sess_"));
+        .unwrap_or_else(|| id_with(SESSION_PREFIX));
 
     let mut metadata = request.metadata.clone().unwrap_or_default();
     metadata.insert("session_id".to_owned(), Value::String(session_id.clone()));
@@ -551,7 +571,7 @@ pub async fn prepare(state: &UhpState, request: &CreateResponse) -> Result<Prepa
         .previous_response_id
         .as_ref()
         .and_then(|prev| state.store.session_of(prev))
-        .unwrap_or_else(|| id_with("sess_"));
+        .unwrap_or_else(|| id_with(SESSION_PREFIX));
     let workdir = files::session_workdir(&session_id);
     let runner = runner_in(chosen.provider, &workdir).await.map_err(|_| {
         UhpFailure::new(
@@ -764,7 +784,26 @@ mod tests {
     #[test]
     fn ids_carry_the_prefix_the_object_model_requires() {
         assert!(id_with("resp_").starts_with("resp_"));
-        assert!(id_with("sess_").starts_with("sess_"));
+        assert!(id_with(SESSION_PREFIX).starts_with("sess_"));
+    }
+
+    #[test]
+    fn only_the_session_id_shape_this_server_mints_is_accepted() {
+        assert!(is_session_id(&id_with(SESSION_PREFIX)));
+        for refused in [
+            "..",
+            ".",
+            "",
+            "sess_",
+            "/etc",
+            "sess_0123456789abcdef0123456789abcdef/..",
+            "sess_0123456789abcdef0123456789abcde/",
+            "sess_0123456789ABCDEF0123456789ABCDEF",
+            "sess_0123456789abcdef0123456789abcdef0",
+            "resp_0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_session_id(refused), "{refused:?} is not a minted id");
+        }
     }
 
     #[test]
