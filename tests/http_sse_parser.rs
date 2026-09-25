@@ -133,6 +133,24 @@ async fn stream_ends_without_done_signal() {
     assert!(results[1].is_final);
 }
 
+/// The `OpenAI` pattern: the last data frame carries the finish reason and
+/// `[DONE]` follows it. The stream ends on the provider's own final chunk,
+/// once — the sentinel adds no second one.
+#[tokio::test]
+async fn done_after_the_providers_final_chunk_adds_no_second_final() {
+    let chunks = vec![
+        b"data: {\"content\":\"last\",\"done\":true}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+
+    let results = collect_stream_chunks(chunks, test_parse_data).await;
+
+    assert_eq!(results.len(), 1, "got: {results:?}");
+    assert_eq!(results[0].delta, "last");
+    assert!(results[0].is_final);
+    assert_eq!(results[0].finish_reason.as_deref(), Some("stop"));
+}
+
 /// A stream that closes with neither `[DONE]` nor a final chunk still ends
 /// with exactly one final chunk, so a consumer waiting on `is_final` to
 /// emit its finish reason is never left hanging.

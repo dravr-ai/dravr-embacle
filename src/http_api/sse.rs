@@ -159,7 +159,8 @@ struct SseStream<S> {
 }
 
 impl<S> SseStream<S> {
-    /// Queue what a batch of events produces, dropping empty non-final deltas.
+    /// Queue what a batch of events produces, dropping empty non-final deltas
+    /// and a `[DONE]` that follows the provider's own final chunk.
     fn queue(&mut self, events: Vec<SseEvent>) {
         for event in events {
             let item = match event {
@@ -167,6 +168,7 @@ impl<S> SseStream<S> {
                     Some(item) => item,
                     None => continue,
                 },
+                SseEvent::Done if self.final_emitted => continue,
                 SseEvent::Done => Ok(final_chunk()),
             };
             if let Ok(chunk) = &item {
