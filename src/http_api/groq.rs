@@ -37,15 +37,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{RequestBuilder, StatusCode};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
+use super::chat_completions::{self, CompletionRequest, Usage};
 use super::client::{self, with_retries, AttemptError, HttpRetryConfig, DEFAULT_TIMEOUT_SECS};
 use super::sse::create_sse_stream;
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
-    StreamChunk, TokenUsage, ToolCallRequest, ToolDefinition,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
 };
 
 /// The name this provider reports, and the price-table key its usage bills under
@@ -74,145 +72,6 @@ const AVAILABLE_MODELS: &[&str] = &[
 
 /// Base URL for the Groq API (OpenAI-compatible)
 const API_BASE_URL: &str = "https://api.groq.com/openai/v1";
-
-// ============================================================================
-// API Request/Response Types (OpenAI-compatible format)
-// ============================================================================
-
-/// Groq API request structure (OpenAI-compatible)
-#[derive(Debug, Serialize)]
-struct GroqRequest {
-    model: String,
-    messages: Vec<GroqMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<GroqTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-}
-
-/// Tool definition for Groq API (OpenAI-compatible format)
-#[derive(Debug, Clone, Serialize)]
-struct GroqTool {
-    #[serde(rename = "type")]
-    tool_type: String,
-    function: GroqFunction,
-}
-
-/// Function definition within a tool
-#[derive(Debug, Clone, Serialize)]
-struct GroqFunction {
-    name: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<Value>,
-}
-
-/// Message structure for Groq API (OpenAI-compatible): role and text only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GroqMessage {
-    role: String,
-    content: String,
-}
-
-impl From<&ChatMessage> for GroqMessage {
-    fn from(msg: &ChatMessage) -> Self {
-        Self {
-            role: msg.role.as_str().to_owned(),
-            content: msg.content.clone(),
-        }
-    }
-}
-
-/// Groq API response structure (OpenAI-compatible)
-#[derive(Debug, Deserialize)]
-struct GroqResponse {
-    choices: Vec<GroqChoice>,
-    #[serde(default)]
-    usage: Option<GroqUsage>,
-    model: String,
-}
-
-/// Choice in Groq response
-#[derive(Debug, Deserialize)]
-struct GroqChoice {
-    message: GroqResponseMessage,
-    finish_reason: Option<String>,
-}
-
-/// Message in Groq response
-#[derive(Debug, Deserialize)]
-struct GroqResponseMessage {
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<GroqToolCall>>,
-}
-
-/// Tool call in Groq response (OpenAI-compatible)
-#[derive(Debug, Clone, Deserialize)]
-struct GroqToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: GroqFunctionCall,
-}
-
-/// Function call details in Groq response
-#[derive(Debug, Clone, Deserialize)]
-struct GroqFunctionCall {
-    name: String,
-    arguments: String,
-}
-
-/// Usage statistics in Groq response
-#[derive(Debug, Deserialize)]
-struct GroqUsage {
-    #[serde(rename = "prompt_tokens")]
-    prompt: u32,
-    #[serde(rename = "completion_tokens")]
-    completion: u32,
-    #[serde(rename = "total_tokens")]
-    total: u32,
-}
-
-/// Streaming chunk structure (OpenAI-compatible)
-#[derive(Debug, Deserialize)]
-struct GroqStreamChunk {
-    choices: Vec<GroqStreamChoice>,
-}
-
-/// Choice in streaming chunk
-#[derive(Debug, Deserialize)]
-struct GroqStreamChoice {
-    delta: GroqDelta,
-    finish_reason: Option<String>,
-}
-
-/// Delta content in streaming chunk
-#[derive(Debug, Deserialize)]
-struct GroqDelta {
-    #[serde(default)]
-    content: Option<String>,
-}
-
-/// Groq API error response
-#[derive(Debug, Deserialize)]
-struct GroqErrorResponse {
-    error: GroqErrorDetail,
-}
-
-/// Error detail structure
-#[derive(Debug, Deserialize)]
-struct GroqErrorDetail {
-    message: String,
-    #[serde(rename = "type")]
-    error_type: Option<String>,
-}
 
 // ============================================================================
 // Configuration
@@ -350,118 +209,33 @@ impl GroqProvider {
         format!("{API_BASE_URL}/{endpoint}")
     }
 
-    /// Convert internal messages to Groq format
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<GroqMessage> {
-        messages.iter().map(GroqMessage::from).collect()
-    }
-
     /// Parse an error response from the Groq API: the vendor's message when
     /// the body is its JSON envelope, `HTTP <status>` otherwise; the status
     /// decides the kind.
     fn parse_error_response(status: StatusCode, body: &str) -> RunnerError {
-        let message = serde_json::from_str::<GroqErrorResponse>(body).map_or_else(
-            |_| {
-                debug!(
-                    status = status.as_u16(),
-                    body_preview = %body.chars().take(200).collect::<String>(),
-                    "Groq API returned non-JSON error response"
-                );
-                format!("HTTP {status}")
-            },
-            |e| {
-                let error_type = e.error.error_type.unwrap_or_else(|| "unknown".to_owned());
-                format!("{error_type} - {}", e.error.message)
-            },
-        );
+        let message = chat_completions::describe_error(PROVIDER_NAME, status, body);
         client::map_http_error(PROVIDER_NAME, status, &message)
     }
 
     /// Build an authenticated HTTP request to the Groq API
-    fn build_request(&self, groq_request: &GroqRequest) -> RequestBuilder {
+    fn build_request(&self, body: &CompletionRequest) -> RequestBuilder {
         self.client
             .post(Self::api_url("chat/completions"))
             .bearer_auth(&self.config.api_key)
             .header("Content-Type", "application/json")
-            .json(groq_request)
+            .json(body)
     }
 
     /// Build the request body for a `ChatRequest`
-    fn build_body(&self, request: &ChatRequest, stream: bool) -> GroqRequest {
-        let model = request.model.as_deref().unwrap_or(&self.config.model);
-        let tools = request
-            .tools
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .map(Self::convert_tools);
-        GroqRequest {
-            model: model.to_owned(),
-            messages: Self::convert_messages(&request.messages),
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: Some(stream),
-            tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
-            tools,
-        }
-    }
-
-    /// Parse a Groq SSE data payload into a `StreamChunk`
-    fn parse_stream_data(json_str: &str) -> Option<Result<StreamChunk, RunnerError>> {
-        match serde_json::from_str::<GroqStreamChunk>(json_str) {
-            Ok(chunk) => {
-                let choice = chunk.choices.into_iter().next()?;
-                let delta = choice.delta.content.unwrap_or_default();
-                let is_final = choice.finish_reason.is_some();
-                Some(Ok(StreamChunk {
-                    delta,
-                    is_final,
-                    finish_reason: choice.finish_reason,
-                }))
-            }
-            Err(e) => {
-                warn!("Failed to parse Groq stream chunk: {e}");
-                None
-            }
-        }
-    }
-
-    /// Convert tool definitions to Groq's OpenAI-compatible format
-    fn convert_tools(tools: &[ToolDefinition]) -> Vec<GroqTool> {
-        tools
-            .iter()
-            .map(|func| GroqTool {
-                tool_type: "function".to_owned(),
-                function: GroqFunction {
-                    name: func.name.clone(),
-                    description: func.description.clone(),
-                    parameters: func.parameters.clone(),
-                },
-            })
-            .collect()
-    }
-
-    /// Convert Groq tool calls to tool-call requests. Arguments arrive as a
-    /// JSON-encoded string; one that does not parse becomes `null`.
-    fn convert_tool_calls(tool_calls: &[GroqToolCall]) -> Vec<ToolCallRequest> {
-        tool_calls
-            .iter()
-            .map(|call| {
-                debug!(
-                    tool_call_id = %call.id,
-                    tool_call_type = %call.call_type,
-                    function_name = %call.function.name,
-                    "Converting Groq tool call"
-                );
-                ToolCallRequest {
-                    id: call.id.clone(),
-                    function_name: call.function.name.clone(),
-                    arguments: serde_json::from_str(&call.function.arguments).unwrap_or_default(),
-                }
-            })
-            .collect()
+    fn build_body(&self, request: &ChatRequest, stream: bool) -> CompletionRequest {
+        CompletionRequest::new(request, &self.config.model, stream, self.capabilities())
     }
 
     /// One non-streaming attempt
-    async fn attempt_complete(&self, body: &GroqRequest) -> Result<ChatResponse, AttemptError> {
+    async fn attempt_complete(
+        &self,
+        body: &CompletionRequest,
+    ) -> Result<ChatResponse, AttemptError> {
         let response = self
             .build_request(body)
             .send()
@@ -483,47 +257,17 @@ impl GroqProvider {
             ));
         }
 
-        let groq_response: GroqResponse = serde_json::from_str(&text).map_err(|e| {
-            AttemptError::permanent(RunnerError::external_service(
-                PROVIDER_NAME,
-                format!("Failed to parse response: {e}"),
-            ))
-        })?;
+        Self::read_completion(&text).map_err(AttemptError::permanent)
+    }
 
-        let choice = groq_response.choices.into_iter().next().ok_or_else(|| {
-            AttemptError::permanent(RunnerError::external_service(
-                PROVIDER_NAME,
-                "API returned no choices",
-            ))
-        })?;
-
-        let content = choice.message.content.unwrap_or_default();
-        let tool_calls = choice.message.tool_calls.map(|calls| {
-            info!("Groq returned {} tool calls", calls.len());
-            Self::convert_tool_calls(&calls)
-        });
-
-        debug!(
-            content_len = content.len(),
-            tool_calls = tool_calls.as_ref().map(Vec::len),
-            finish_reason = ?choice.finish_reason,
-            "Received response from Groq"
-        );
-
-        Ok(ChatResponse {
-            content,
-            model: groq_response.model,
-            usage: groq_response
-                .usage
-                .map(|u| TokenUsage::new(u.prompt, u.completion, u.total)),
-            finish_reason: choice.finish_reason,
-            warnings: None,
-            tool_calls,
-        })
+    /// Read a completion body. Groq bills the plain counts: the usage
+    /// breakdown is not read.
+    fn read_completion(body: &str) -> Result<ChatResponse, RunnerError> {
+        chat_completions::parse_response(PROVIDER_NAME, body, Usage::counts_only)
     }
 
     /// One attempt at opening the stream
-    async fn attempt_stream(&self, body: &GroqRequest) -> Result<ChatStream, AttemptError> {
+    async fn attempt_stream(&self, body: &CompletionRequest) -> Result<ChatStream, AttemptError> {
         let response = self
             .build_request(body)
             .send()
@@ -541,7 +285,7 @@ impl GroqProvider {
 
         Ok(create_sse_stream(
             response.bytes_stream(),
-            Self::parse_stream_data,
+            |json| chat_completions::parse_stream_frame(PROVIDER_NAME, json),
             PROVIDER_NAME,
         ))
     }
@@ -643,7 +387,11 @@ impl Debug for GroqProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ErrorKind;
+    use crate::types::{
+        ChatMessage, ErrorKind, ImagePart, ResponseFormat, ToolCallRequest, ToolChoice,
+        ToolDefinition,
+    };
+    use serde_json::json;
 
     #[test]
     fn a_429_is_a_rate_limit_carrying_the_wait() {
@@ -663,8 +411,65 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::AuthFailure);
     }
 
+    /// Tool history and `tool_choice` travel; `top_p`, `stop`,
+    /// `response_format` and image parts do not, because Groq advertises
+    /// none of `TOP_P`, `STOP_SEQUENCES`, `RESPONSE_FORMAT` or `VISION`.
     #[test]
-    fn tools_are_sent_in_the_openai_shape_with_auto_choice() {
+    fn the_body_is_the_openai_shape_without_what_groq_does_not_advertise() {
+        let provider = GroqProvider::with_client(GroqConfig::new("k"), reqwest::Client::new());
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(vec![ToolCallRequest {
+            id: "call_1".to_owned(),
+            function_name: "get_weather".to_owned(),
+            arguments: json!({"city": "Paris"}),
+        }]);
+        let image = ImagePart::new("aGVsbG8=", "image/png").expect("valid mime"); // Safe: test assertion
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("Be brief."),
+            ChatMessage::user_with_images("Describe", vec![image]),
+            assistant,
+            ChatMessage::tool("get_weather", "call_1", r#"{"temp":21}"#),
+        ])
+        .with_temperature(0.5)
+        .with_max_tokens(64)
+        .with_top_p(0.9)
+        .with_stop(vec!["END".to_owned()])
+        .with_response_format(ResponseFormat::JsonObject)
+        .with_tools(vec![ToolDefinition {
+            name: "get_weather".to_owned(),
+            description: "Weather".to_owned(),
+            parameters: Some(json!({"type": "object"})),
+        }])
+        .with_tool_choice(ToolChoice::Required);
+
+        let body = serde_json::to_value(provider.build_body(&request, false)).expect("serialises"); // Safe: test assertion
+        assert_eq!(
+            body,
+            json!({
+                "model": DEFAULT_MODEL,
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "Describe"},
+                    {"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+                    }]},
+                    {"role": "tool", "content": "{\"temp\":21}", "tool_call_id": "call_1"}
+                ],
+                "temperature": 0.5,
+                "max_tokens": 64,
+                "stream": false,
+                "tools": [{"type": "function", "function": {
+                    "name": "get_weather", "description": "Weather", "parameters": {"type": "object"}
+                }}],
+                "tool_choice": "required"
+            })
+        );
+    }
+
+    #[test]
+    fn tools_without_a_choice_ask_for_auto() {
         let provider = GroqProvider::with_client(GroqConfig::new("k"), reqwest::Client::new());
         let request =
             ChatRequest::new(vec![ChatMessage::user("hi")]).with_tools(vec![ToolDefinition {
@@ -672,27 +477,50 @@ mod tests {
                 description: "Weather".to_owned(),
                 parameters: None,
             }]);
-        let body = provider.build_body(&request, false);
-        let json = serde_json::to_value(&body).expect("serialises"); // Safe: test assertion
-        assert_eq!(json["tools"][0]["type"], "function");
-        assert_eq!(json["tools"][0]["function"]["name"], "get_weather");
-        assert_eq!(json["tool_choice"], "auto");
-        assert_eq!(json["model"], DEFAULT_MODEL);
+        let body = serde_json::to_value(provider.build_body(&request, true)).expect("serialises"); // Safe: test assertion
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["stream"], true);
+        assert_eq!(
+            body["tools"],
+            json!([{"type": "function", "function": {"name": "get_weather", "description": "Weather"}}])
+        );
     }
 
+    /// A recorded Groq answer: the tool call's arguments are decoded from
+    /// their JSON string, and usage is the plain counts even when Groq
+    /// reports a cached share.
     #[test]
-    fn tool_call_arguments_are_decoded_from_their_json_string() {
-        let calls = vec![GroqToolCall {
-            id: "call_1".to_owned(),
-            call_type: "function".to_owned(),
-            function: GroqFunctionCall {
-                name: "get_activities".to_owned(),
-                arguments: r#"{"limit":5}"#.to_owned(),
-            },
-        }];
-        let converted = GroqProvider::convert_tool_calls(&calls);
-        assert_eq!(converted[0].id, "call_1");
-        assert_eq!(converted[0].arguments["limit"], 5);
+    fn a_recorded_response_yields_its_tool_calls_and_the_plain_counts() {
+        let recorded = r#"{
+            "id": "chatcmpl-1", "object": "chat.completion", "model": "llama-3.3-70b-versatile",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_9", "type": "function",
+                    "function": {"name": "get_activities", "arguments": "{\"limit\":5}"}}]
+            }}],
+            "usage": {"prompt_tokens": 90, "completion_tokens": 12, "total_tokens": 102,
+                "prompt_tokens_details": {"cached_tokens": 64}},
+            "x_groq": {"id": "req_1"}
+        }"#;
+        let response = GroqProvider::read_completion(recorded).expect("parses"); // Safe: test assertion
+        assert_eq!(response.model, "llama-3.3-70b-versatile");
+        assert_eq!(response.content, "");
+        assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+        let calls = response.tool_calls.expect("tool calls"); // Safe: test assertion
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_9");
+        assert_eq!(calls[0].function_name, "get_activities");
+        assert_eq!(calls[0].arguments, json!({"limit": 5}));
+        let usage = response.usage.expect("usage"); // Safe: test assertion
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (90, 12, 102)
+        );
+        assert_eq!(usage.cached_read_tokens, None);
     }
 
     #[test]

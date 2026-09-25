@@ -24,7 +24,6 @@
 )]
 #![cfg(all(
     feature = "http-api",
-    feature = "openai-api",
     feature = "copilot-headless",
     feature = "copilot-sdk",
     feature = "web-ui"
@@ -44,8 +43,8 @@ use embacle::types::LlmProvider;
 use embacle::{
     ClaudeCodeRunner, CliRunnerType, ClineCliRunner, CodexCliRunner, ContinueCliRunner,
     CopilotHeadlessRunner, CopilotRunner, CopilotSdkRunner, CursorAgentRunner, GeminiCliRunner,
-    GooseCliRunner, KiloCliRunner, KiroCliRunner, OpenAiApiConfig, OpenAiApiRunner, OpenCodeRunner,
-    RunnerConfig, WarpCliRunner, WebProviderConfig, WebUiConfig, WebUiRunner,
+    GooseCliRunner, KiloCliRunner, KiroCliRunner, OpenCodeRunner, RunnerConfig, WarpCliRunner,
+    WebProviderConfig, WebUiConfig, WebUiRunner,
 };
 
 /// Every CLI runner the factory can construct. This file requires every
@@ -122,11 +121,18 @@ async fn native_provider_names() -> Vec<&'static str> {
         local_name("localai"),
         // Anything the config does not name explicitly reports as "local".
         local_name("some-self-hosted-endpoint"),
-        // Model discovery against a closed port fails fast and falls back to
-        // the configured model; the name is what matters here.
-        OpenAiApiRunner::with_client(OpenAiApiConfig::new("http://127.0.0.1:9"), client)
-            .await
-            .name(),
+        // Model discovery against a closed port fails fast and keeps the
+        // configured model; the name is what matters here.
+        OpenAiCompatibleProvider::with_client(
+            OpenAiCompatibleConfig {
+                base_url: "http://127.0.0.1:9/v1".to_owned(),
+                ..OpenAiCompatibleConfig::openai_api("gpt-4o")
+            },
+            client,
+        )
+        .with_discovered_models()
+        .await
+        .name(),
     ]
 }
 

@@ -142,11 +142,6 @@ pub mod config_file;
 #[cfg(feature = "http-api")]
 pub mod http_api;
 
-// OpenAI API module (behind feature flag)
-/// OpenAI-compatible HTTP API client runner
-#[cfg(feature = "openai-api")]
-pub mod openai_api;
-
 /// Browser-driven web-UI provider (drives Claude.ai via a headless profile)
 #[cfg(feature = "web-ui")]
 pub mod web_ui;
@@ -251,10 +246,6 @@ pub use http_api::{
     CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
 };
-
-// OpenAI API re-exports (behind feature flag)
-#[cfg(feature = "openai-api")]
-pub use openai_api::{OpenAiApiConfig, OpenAiApiRunner};
 
 #[cfg(feature = "web-ui")]
 pub use web_ui::{WebProviderConfig, WebUiConfig, WebUiRunner};

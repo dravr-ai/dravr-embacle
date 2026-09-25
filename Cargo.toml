@@ -108,12 +108,10 @@ copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # the CLI; the runtime pair is a file `COPILOT_RUNTIME_PATH` names at run time.
 copilot-sdk = ["dep:github-copilot-sdk", "tokio/sync"]
 # Enable the HTTP API providers: Gemini, Cohere, Groq, OpenRouter, and any
-# OpenAI-compatible endpoint (Ollama, vLLM, LocalAI) — reqwest-based, with the
-# shared SSE parser, retry policy and HTTP error mapping in `http_api`.
+# OpenAI-compatible endpoint (the OpenAI API, Ollama, vLLM, LocalAI) —
+# reqwest-based, with the shared SSE parser, retry policy, HTTP error mapping
+# and OpenAI wire format in `http_api`.
 http-api = ["dep:reqwest", "tokio/sync"]
-# Enable OpenAI-compatible HTTP API client runner (reqwest-based). Shares
-# http-api's client, SSE parser and error mapping.
-openai-api = ["http-api"]
 # Enable the HTTP quota checkers (Anthropic OAuth usage, GitHub rate-limit headroom).
 # The quota vocabulary and policy in `quota` are always available; this only adds
 # the checkers that reach the network.
@@ -147,7 +145,7 @@ agent-client-protocol-schema = { version = "0.12", optional = true }
 # default-features = false drops `bundled-cli`, which would embed the CLI.
 github-copilot-sdk = { version = "1.0.14", default-features = false, optional = true }
 
-# Optional: HTTP client for the http-api providers and the OpenAI API runner
+# Optional: HTTP client for the http-api providers
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
 
 # Optional: TOML config file support
@@ -178,7 +176,7 @@ path = "examples/test_claude_e2e.rs"
 [[example]]
 name = "ollama_openai_tools"
 path = "examples/ollama_openai_tools.rs"
-required-features = ["openai-api"]
+required-features = ["http-api"]
 
 [[example]]
 name = "web_login"

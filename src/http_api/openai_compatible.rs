@@ -1,5 +1,5 @@
-// ABOUTME: Generic OpenAI-compatible provider for local and self-hosted endpoints: Ollama, vLLM, LocalAI, and others
-// ABOUTME: Names itself after the endpoint it targets so a self-hosted model bills at $0 by design, not by omission
+// ABOUTME: Generic OpenAI-compatible provider: the OpenAI API itself, and self-hosted Ollama, vLLM, LocalAI and others
+// ABOUTME: Names itself after the endpoint it targets, so the OpenAI API bills as openai_api and a self-hosted model at $0
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -7,10 +7,11 @@
 //! # `OpenAI`-Compatible Provider
 //!
 //! [`LlmProvider`] over any endpoint that implements the `OpenAI` chat
-//! completions API — local LLM servers like Ollama, vLLM and `LocalAI`
-//! first of all.
+//! completions API: the `OpenAI` API itself, and local LLM servers like
+//! Ollama, vLLM and `LocalAI`. The body it sends and the answers it reads
+//! are the shared [`chat_completions`](super::chat_completions) wire format.
 //!
-//! ## Configuration
+//! ## Self-hosted endpoints
 //!
 //! [`OpenAiCompatibleProvider::from_env`] reads:
 //!
@@ -20,30 +21,49 @@
 //!
 //! The provider's `name()` is `ollama`, `vllm` or `localai` when the base
 //! URL's port identifies one of those, `local` otherwise — the names the
-//! price table lists as not per-token metered.
-//!
-//! ## Supported Backends
+//! price table lists as not per-token metered. Errors carry hints for a
+//! server that is not running or a model that was never pulled.
 //!
 //! - **Ollama**: <http://localhost:11434/v1>
 //! - **vLLM**: <http://localhost:8000/v1>
 //! - **`LocalAI`**: <http://localhost:8080/v1>
 //! - **Any `OpenAI`-compatible endpoint**
+//!
+//! ## The `OpenAI` API
+//!
+//! [`OpenAiCompatibleConfig::openai_api_from_env`] reads:
+//!
+//! - `OPENAI_API_BASE_URL`: default <https://api.openai.com>; requests go to
+//!   its `/v1` (`/v1/chat/completions`, `/v1/models`)
+//! - `OPENAI_API_KEY`: bearer token
+//! - `OPENAI_API_MODEL`: default `gpt-5.4`
+//! - `OPENAI_API_TIMEOUT_SECS`: request timeout of a client the provider
+//!   builds itself (default 120)
+//!
+//! It reports `openai_api`, the price-table key its usage bills under, and
+//! advertises vision, `top_p`, stop sequences and `response_format`, which
+//! therefore reach the wire. [`OpenAiCompatibleProvider::with_discovered_models`]
+//! publishes the endpoint's own `GET /v1/models` list. A failure reads as the
+//! endpoint's own message under the shared status mapping, and a health check
+//! that cannot reach the endpoint reports it unhealthy rather than failing.
+//!
+//! The full request and response bodies are logged at `trace` level only
+//! (`RUST_LOG=embacle::http_api::openai_compatible=trace`).
 
 use std::env;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::{RequestBuilder, StatusCode};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::{debug, info, instrument, warn};
+use serde::Deserialize;
+use tracing::{debug, enabled, info, instrument, trace, warn, Level};
 
+use super::chat_completions::{self, CompletionRequest, Usage};
 use super::client::{self, map_send_error, DEFAULT_TIMEOUT_SECS};
 use super::sse::create_sse_stream;
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
-    StreamChunk, TokenUsage, ToolCallRequest, ToolDefinition,
 };
 
 // ============================================================================
@@ -80,179 +100,50 @@ const AVAILABLE_MODELS: &[&str] = &[
     "hermes2pro:latest",
 ];
 
+/// The name the `OpenAI` API reports, and the price-table key its usage bills under
+const OPENAI_API_NAME: &str = "openai_api";
+
+/// Display name of the `OpenAI` API
+const OPENAI_API_DISPLAY_NAME: &str = "OpenAI API";
+
+/// Environment variable for the `OpenAI` API base URL (without `/v1`)
+const OPENAI_API_BASE_URL_ENV: &str = "OPENAI_API_BASE_URL";
+
+/// Environment variable for the `OpenAI` API key
+const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// Environment variable for the `OpenAI` API default model
+const OPENAI_API_MODEL_ENV: &str = "OPENAI_API_MODEL";
+
+/// Environment variable for the `OpenAI` API request timeout, in seconds
+const OPENAI_API_TIMEOUT_SECS_ENV: &str = "OPENAI_API_TIMEOUT_SECS";
+
+/// Default `OpenAI` API base URL, without the version path
+const OPENAI_API_DEFAULT_BASE_URL: &str = "https://api.openai.com";
+
+/// The version path the `OpenAI` API serves chat completions and models under
+const OPENAI_API_VERSION_PATH: &str = "/v1";
+
+/// Default `OpenAI` API model
+const OPENAI_API_DEFAULT_MODEL: &str = "gpt-5.4";
+
+/// Timeout of a model-discovery or health-check request, in seconds
+const DISCOVERY_TIMEOUT_SECS: u64 = 5;
+
 // ============================================================================
-// API Request/Response Types (OpenAI-compatible format)
+// Model discovery wire types
 // ============================================================================
 
-/// OpenAI-compatible API request structure
-#[derive(Debug, Serialize)]
-struct OpenAiRequest {
-    model: String,
-    messages: Vec<OpenAiMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<OpenAiTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-}
-
-/// Tool definition for OpenAI-compatible API
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiTool {
-    #[serde(rename = "type")]
-    tool_type: String,
-    function: OpenAiFunction,
-}
-
-/// Function definition within a tool
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiFunction {
-    name: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<Value>,
-}
-
-/// Message structure for OpenAI-compatible API: role and text only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiMessage {
-    role: String,
-    content: String,
-}
-
-impl From<&ChatMessage> for OpenAiMessage {
-    fn from(msg: &ChatMessage) -> Self {
-        Self {
-            role: msg.role.as_str().to_owned(),
-            content: msg.content.clone(),
-        }
-    }
-}
-
-/// OpenAI-compatible API response structure
+/// The `GET {base}/models` answer
 #[derive(Debug, Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<OpenAiChoice>,
-    #[serde(default)]
-    usage: Option<OpenAiUsage>,
-    model: String,
+struct ModelList {
+    data: Vec<ModelEntry>,
 }
 
-/// Choice in response
+/// One entry of the models list
 #[derive(Debug, Deserialize)]
-struct OpenAiChoice {
-    message: OpenAiResponseMessage,
-    finish_reason: Option<String>,
-}
-
-/// Message in response
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseMessage {
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiToolCall>>,
-}
-
-/// Tool call in response
-#[derive(Debug, Clone, Deserialize)]
-struct OpenAiToolCall {
+struct ModelEntry {
     id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: OpenAiFunctionCall,
-}
-
-/// Function call details in response
-#[derive(Debug, Clone, Deserialize)]
-struct OpenAiFunctionCall {
-    name: String,
-    arguments: String,
-}
-
-/// Usage statistics in response
-#[derive(Debug, Deserialize)]
-struct OpenAiUsage {
-    #[serde(rename = "prompt_tokens")]
-    prompt: u32,
-    #[serde(rename = "completion_tokens")]
-    completion: u32,
-    #[serde(rename = "total_tokens")]
-    total: u32,
-    /// Breakdown of `prompt_tokens`, carrying the cache-read share.
-    #[serde(default)]
-    prompt_tokens_details: Option<OpenAiUsageDetails>,
-    /// Breakdown of `completion_tokens`, carrying the reasoning-token share.
-    #[serde(default)]
-    completion_tokens_details: Option<OpenAiCompletionDetails>,
-}
-
-/// The `completion_tokens_details` sub-object, present on reasoning models.
-#[derive(Debug, Deserialize)]
-struct OpenAiCompletionDetails {
-    #[serde(default)]
-    reasoning_tokens: Option<u32>,
-}
-
-/// The `prompt_tokens_details` sub-object of an OpenAI-compatible usage block.
-#[derive(Debug, Deserialize)]
-struct OpenAiUsageDetails {
-    #[serde(default)]
-    cached_tokens: Option<u32>,
-}
-
-impl OpenAiUsage {
-    /// No cache-WRITE count in this API shape: writes are implicit and
-    /// unbilled, so `None` is accurate, not unknown.
-    fn into_token_usage(self) -> TokenUsage {
-        TokenUsage::new(self.prompt, self.completion, self.total)
-            .with_cache(
-                self.prompt_tokens_details.and_then(|d| d.cached_tokens),
-                None,
-            )
-            .with_reasoning(
-                self.completion_tokens_details
-                    .and_then(|d| d.reasoning_tokens),
-            )
-    }
-}
-
-/// Streaming chunk structure
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChunk {
-    choices: Vec<OpenAiStreamChoice>,
-}
-
-/// Choice in streaming chunk
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChoice {
-    delta: OpenAiDelta,
-    finish_reason: Option<String>,
-}
-
-/// Delta content in streaming chunk
-#[derive(Debug, Deserialize)]
-struct OpenAiDelta {
-    #[serde(default)]
-    content: Option<String>,
-}
-
-/// Error response structure
-#[derive(Debug, Deserialize)]
-struct OpenAiErrorResponse {
-    error: OpenAiErrorDetail,
-}
-
-/// Error detail structure
-#[derive(Debug, Deserialize)]
-struct OpenAiErrorDetail {
-    message: String,
-    #[serde(rename = "type")]
-    error_type: Option<String>,
 }
 
 // ============================================================================
@@ -272,8 +163,11 @@ pub struct OpenAiCompatibleConfig {
     pub provider_name: String,
     /// Provider display name
     pub display_name: String,
-    /// Capabilities of this provider
+    /// Capabilities of this provider; they decide which optional request
+    /// fields reach the wire
     pub capabilities: LlmCapabilities,
+    /// HTTP request timeout for a client the provider builds itself
+    pub timeout: Duration,
 }
 
 impl OpenAiCompatibleConfig {
@@ -289,6 +183,7 @@ impl OpenAiCompatibleConfig {
             capabilities: LlmCapabilities::STREAMING
                 | LlmCapabilities::FUNCTION_CALLING
                 | LlmCapabilities::SYSTEM_MESSAGES,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
@@ -305,6 +200,7 @@ impl OpenAiCompatibleConfig {
                 | LlmCapabilities::FUNCTION_CALLING
                 | LlmCapabilities::SYSTEM_MESSAGES
                 | LlmCapabilities::JSON_MODE,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
@@ -320,6 +216,7 @@ impl OpenAiCompatibleConfig {
             capabilities: LlmCapabilities::STREAMING
                 | LlmCapabilities::FUNCTION_CALLING
                 | LlmCapabilities::SYSTEM_MESSAGES,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
@@ -355,7 +252,69 @@ impl OpenAiCompatibleConfig {
             capabilities: LlmCapabilities::STREAMING
                 | LlmCapabilities::FUNCTION_CALLING
                 | LlmCapabilities::SYSTEM_MESSAGES,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
+    }
+
+    /// Create configuration for the `OpenAI` API at
+    /// <https://api.openai.com/v1>, reporting `openai_api`.
+    ///
+    /// Any endpoint that speaks the same API under its own `/v1` works by
+    /// replacing `base_url`.
+    #[must_use]
+    pub fn openai_api(model: &str) -> Self {
+        Self {
+            base_url: format!("{OPENAI_API_DEFAULT_BASE_URL}{OPENAI_API_VERSION_PATH}"),
+            api_key: None,
+            default_model: model.to_owned(),
+            provider_name: OPENAI_API_NAME.to_owned(),
+            display_name: OPENAI_API_DISPLAY_NAME.to_owned(),
+            capabilities: LlmCapabilities::STREAMING
+                | LlmCapabilities::FUNCTION_CALLING
+                | LlmCapabilities::VISION
+                | LlmCapabilities::SYSTEM_MESSAGES
+                | LlmCapabilities::TEMPERATURE
+                | LlmCapabilities::MAX_TOKENS
+                | LlmCapabilities::TOP_P
+                | LlmCapabilities::STOP_SEQUENCES
+                | LlmCapabilities::RESPONSE_FORMAT,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        }
+    }
+
+    /// Read the `OpenAI` API configuration from the environment.
+    ///
+    /// `OPENAI_API_BASE_URL` (default <https://api.openai.com>) names the
+    /// host without the version path: requests go to its `/v1`. An unset
+    /// `OPENAI_API_MODEL` is `gpt-5.4`, an unset or unparseable
+    /// `OPENAI_API_TIMEOUT_SECS` is 120, and an unset or empty
+    /// `OPENAI_API_KEY` sends no `Authorization` header.
+    #[must_use]
+    pub fn openai_api_from_env() -> Self {
+        let base_url = env::var(OPENAI_API_BASE_URL_ENV)
+            .unwrap_or_else(|_| OPENAI_API_DEFAULT_BASE_URL.to_owned());
+        let model =
+            env::var(OPENAI_API_MODEL_ENV).unwrap_or_else(|_| OPENAI_API_DEFAULT_MODEL.to_owned());
+        let timeout_secs = env::var(OPENAI_API_TIMEOUT_SECS_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        Self {
+            base_url: format!(
+                "{}{OPENAI_API_VERSION_PATH}",
+                base_url.trim_end_matches('/')
+            ),
+            api_key: env::var(OPENAI_API_KEY_ENV).ok().filter(|k| !k.is_empty()),
+            timeout: Duration::from_secs(timeout_secs),
+            ..Self::openai_api(&model)
+        }
+    }
+
+    /// Whether this is the `OpenAI` API rather than a self-hosted server:
+    /// it decides the error wording, what an unreachable health check means,
+    /// and the model list before discovery.
+    fn is_openai_api(&self) -> bool {
+        self.provider_name == OPENAI_API_NAME
     }
 }
 
@@ -370,6 +329,7 @@ impl Default for OpenAiCompatibleConfig {
             capabilities: LlmCapabilities::STREAMING
                 | LlmCapabilities::FUNCTION_CALLING
                 | LlmCapabilities::SYSTEM_MESSAGES,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 }
@@ -383,6 +343,7 @@ impl Debug for OpenAiCompatibleConfig {
             .field("provider_name", &self.provider_name)
             .field("display_name", &self.display_name)
             .field("capabilities", &self.capabilities)
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -391,7 +352,8 @@ impl Debug for OpenAiCompatibleConfig {
 // Provider Implementation
 // ============================================================================
 
-/// LLM provider for OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
+/// LLM provider for OpenAI-compatible APIs: the `OpenAI` API, Ollama, vLLM,
+/// LM Studio, and others
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     config: OpenAiCompatibleConfig,
@@ -399,24 +361,33 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
-    /// Create a provider that builds its own HTTP client.
+    /// Create a provider that builds its own HTTP client from `config.timeout`.
     ///
     /// # Errors
     ///
     /// Returns [`RunnerError`] with `ErrorKind::Config` when the HTTP client
     /// cannot be built.
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, RunnerError> {
-        let client = client::build_client(Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
+        let client = client::build_client(config.timeout)?;
         Ok(Self::with_client(config, client))
     }
 
     /// Create a provider over a caller-owned HTTP client (a shared pool).
+    ///
+    /// A self-hosted endpoint publishes the models the local runtimes commonly
+    /// serve; the `OpenAI` API publishes its default model until
+    /// [`with_discovered_models`](Self::with_discovered_models) asks it.
     #[must_use]
     pub fn with_client(config: OpenAiCompatibleConfig, client: reqwest::Client) -> Self {
+        let available_models = if config.is_openai_api() {
+            vec![config.default_model.clone()]
+        } else {
+            AVAILABLE_MODELS.iter().map(|s| (*s).to_owned()).collect()
+        };
         Self {
             client,
             config,
-            available_models: AVAILABLE_MODELS.iter().map(|s| (*s).to_owned()).collect(),
+            available_models,
         }
     }
 
@@ -424,6 +395,25 @@ impl OpenAiCompatibleProvider {
     #[must_use]
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.config.default_model = model.into();
+        self
+    }
+
+    /// Publish the endpoint's own model list: `GET {base_url}/models`, sorted.
+    ///
+    /// The list published so far is kept when the endpoint cannot be reached
+    /// within five seconds, refuses, or lists nothing.
+    pub async fn with_discovered_models(mut self) -> Self {
+        let discovered = self.discover_models().await;
+        if !discovered.is_empty() {
+            self.available_models = discovered;
+        }
+        debug!(
+            provider = %self.config.provider_name,
+            base_url = %self.config.base_url,
+            model = %self.config.default_model,
+            published_models = self.available_models.len(),
+            "OpenAI-compatible model list resolved"
+        );
         self
     }
 
@@ -454,20 +444,25 @@ impl OpenAiCompatibleProvider {
         )
     }
 
-    /// Convert internal messages to `OpenAI` format
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<OpenAiMessage> {
-        messages.iter().map(OpenAiMessage::from).collect()
+    /// The name errors carry: `openai_api` for the `OpenAI` API, one label
+    /// for whichever self-hosted server is configured.
+    fn label(&self) -> &'static str {
+        if self.config.is_openai_api() {
+            OPENAI_API_NAME
+        } else {
+            LOG_LABEL
+        }
     }
 
     /// Log message details for debugging LLM interactions
-    fn log_messages_debug(messages: &[OpenAiMessage], provider_name: &str, has_tools: bool) {
+    fn log_messages_debug(messages: &[ChatMessage], provider_name: &str, has_tools: bool) {
         for (i, msg) in messages.iter().enumerate() {
             debug!(
                 "Message[{i}] role={}, content_len={}",
-                msg.role,
+                msg.role.as_str(),
                 msg.content.len()
             );
-            if msg.role == "system" {
+            if msg.role.as_str() == "system" {
                 debug!("System prompt present (content redacted for security)");
             }
         }
@@ -477,14 +472,32 @@ impl OpenAiCompatibleProvider {
         );
     }
 
-    /// Parse an error response from the endpoint.
+    /// Map a non-success response to an error, in the configured endpoint's
+    /// terms.
+    fn error_response(&self, status: StatusCode, body: &str) -> RunnerError {
+        if self.config.is_openai_api() {
+            Self::openai_api_error_response(status, body)
+        } else {
+            Self::parse_error_response(status, body)
+        }
+    }
+
+    /// The `OpenAI` API's error: the vendor's message when the body is its
+    /// envelope and the body as sent otherwise; the status decides the kind.
+    fn openai_api_error_response(status: StatusCode, body: &str) -> RunnerError {
+        let message = chat_completions::error_detail(body)
+            .map_or_else(|| body.to_owned(), |detail| detail.message);
+        client::map_http_error(OPENAI_API_NAME, status, &message)
+    }
+
+    /// Parse an error response from a self-hosted endpoint.
     ///
     /// Local servers answer with HTML or an empty body more often than a
     /// JSON envelope, so a 502–504 without JSON reads as "the local server is
     /// not responding". A 404 is an unavailable model (Ollama's answer to a
     /// model that was never pulled), a 503 says the server is starting.
     fn parse_error_response(status: StatusCode, body: &str) -> RunnerError {
-        let Ok(error_response) = serde_json::from_str::<OpenAiErrorResponse>(body) else {
+        let Some(detail) = chat_completions::error_detail(body) else {
             if (502..=504).contains(&status.as_u16()) {
                 return RunnerError::external_service(
                     LOG_LABEL,
@@ -499,63 +512,23 @@ impl OpenAiCompatibleProvider {
             return client::map_http_error(LOG_LABEL, status, &format!("HTTP {status}"));
         };
 
-        let message = error_response.error.message;
         match status.as_u16() {
-            404 => RunnerError::model_unavailable(format!("endpoint or model: {message}")),
+            404 => RunnerError::model_unavailable(format!("endpoint or model: {}", detail.message)),
             503 => RunnerError::external_service(
                 LOG_LABEL,
-                format!("Service unavailable (is the local server running?): {message}"),
+                format!(
+                    "Service unavailable (is the local server running?): {}",
+                    detail.message
+                ),
             ),
-            _ => {
-                let error_type = error_response
-                    .error
-                    .error_type
-                    .unwrap_or_else(|| "unknown".to_owned());
-                client::map_http_error(LOG_LABEL, status, &format!("{error_type} - {message}"))
-            }
+            _ => client::map_http_error(LOG_LABEL, status, &detail.typed_message()),
         }
     }
 
-    /// Convert tool definitions to OpenAI-compatible format
-    fn convert_tools(tools: &[ToolDefinition]) -> Vec<OpenAiTool> {
-        tools
-            .iter()
-            .map(|func| OpenAiTool {
-                tool_type: "function".to_owned(),
-                function: OpenAiFunction {
-                    name: func.name.clone(),
-                    description: func.description.clone(),
-                    parameters: func.parameters.clone(),
-                },
-            })
-            .collect()
-    }
-
-    /// Convert tool calls to tool-call requests. Arguments arrive as a
-    /// JSON-encoded string; one that does not parse becomes `null`.
-    fn convert_tool_calls(tool_calls: &[OpenAiToolCall]) -> Vec<ToolCallRequest> {
-        tool_calls
-            .iter()
-            .map(|call| {
-                debug!(
-                    tool_call_id = %call.id,
-                    tool_call_type = %call.call_type,
-                    function_name = %call.function.name,
-                    "Converting tool call"
-                );
-                ToolCallRequest {
-                    id: call.id.clone(),
-                    function_name: call.function.name.clone(),
-                    arguments: serde_json::from_str(&call.function.arguments).unwrap_or_default(),
-                }
-            })
-            .collect()
-    }
-
-    /// Map a transport failure, naming the endpoint when it refused the
-    /// connection so the operator knows which server to start.
+    /// Map a transport failure. A self-hosted endpoint that refused the
+    /// connection is named, so the operator knows which server to start.
     fn map_send(&self, error: reqwest::Error) -> RunnerError {
-        if error.is_connect() {
+        if error.is_connect() && !self.config.is_openai_api() {
             RunnerError::external_service(
                 LOG_LABEL,
                 format!(
@@ -564,7 +537,7 @@ impl OpenAiCompatibleProvider {
                 ),
             )
         } else {
-            map_send_error(LOG_LABEL, error)
+            map_send_error(self.label(), error)
         }
     }
 
@@ -577,58 +550,99 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Build the request body for a `ChatRequest`
-    fn build_body(&self, request: &ChatRequest, stream: bool) -> OpenAiRequest {
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.config.default_model);
-        let messages = Self::convert_messages(&request.messages);
-        let tools = request
-            .tools
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .map(Self::convert_tools);
-        Self::log_messages_debug(&messages, &self.config.provider_name, tools.is_some());
-        OpenAiRequest {
-            model: model.to_owned(),
-            messages,
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: Some(stream),
-            tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
-            tools,
-        }
+    fn build_body(&self, request: &ChatRequest, stream: bool) -> CompletionRequest {
+        let body = CompletionRequest::new(
+            request,
+            &self.config.default_model,
+            stream,
+            self.config.capabilities,
+        );
+        Self::log_messages_debug(
+            &request.messages,
+            &self.config.provider_name,
+            body.tools.is_some(),
+        );
+        body
     }
 
-    /// Send a chat-completions request
-    async fn send(&self, body: &OpenAiRequest) -> Result<reqwest::Response, RunnerError> {
+    /// Send a chat-completions request, logging its outcome and latency
+    async fn send(&self, body: &CompletionRequest) -> Result<reqwest::Response, RunnerError> {
+        if enabled!(Level::TRACE) {
+            match serde_json::to_string(body) {
+                Ok(json) => trace!(body_len = json.len(), body = %json, "request body"),
+                Err(e) => trace!(error = %e, "request body serialization failed"),
+            }
+        }
         let http_request = self
             .client
             .post(self.api_url("chat/completions"))
             .header("Content-Type", "application/json")
             .json(body);
-        self.add_auth_header(http_request)
+        let started = Instant::now();
+        let response = self
+            .add_auth_header(http_request)
             .send()
             .await
-            .map_err(|e| self.map_send(e))
+            .map_err(|e| self.map_send(e))?;
+
+        let status = response.status();
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if status.is_success() {
+            info!(
+                provider = self.name(),
+                model = %body.model,
+                stream = body.stream,
+                status = status.as_u16(),
+                latency_ms,
+                "chat completion response received"
+            );
+        } else {
+            warn!(
+                provider = self.name(),
+                model = %body.model,
+                stream = body.stream,
+                status = status.as_u16(),
+                latency_ms,
+                "chat completion non-success response"
+            );
+        }
+        Ok(response)
     }
 
-    /// Parse an OpenAI-compatible SSE data payload into a `StreamChunk`
-    fn parse_stream_data(json_str: &str) -> Option<Result<StreamChunk, RunnerError>> {
-        match serde_json::from_str::<OpenAiStreamChunk>(json_str) {
-            Ok(chunk) => {
-                let choice = chunk.choices.into_iter().next()?;
-                let delta = choice.delta.content.unwrap_or_default();
-                let is_final = choice.finish_reason.is_some();
-                Some(Ok(StreamChunk {
-                    delta,
-                    is_final,
-                    finish_reason: choice.finish_reason,
-                }))
+    /// Fetch the endpoint's model ids, sorted; empty when it cannot say.
+    async fn discover_models(&self) -> Vec<String> {
+        let request = self.add_auth_header(
+            self.client
+                .get(self.api_url("models"))
+                .timeout(Duration::from_secs(DISCOVERY_TIMEOUT_SECS)),
+        );
+        let response = match request.send().await {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                debug!(status = %response.status(), "Model discovery returned non-200");
+                return Vec::new();
             }
             Err(e) => {
-                warn!("Failed to parse stream chunk: {e}");
-                None
+                debug!(error = %e.without_url(), "Model discovery failed");
+                return Vec::new();
+            }
+        };
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                debug!(error = %e.without_url(), "Model discovery body read failed");
+                return Vec::new();
+            }
+        };
+        match serde_json::from_str::<ModelList>(&body) {
+            Ok(list) => {
+                let mut ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+                ids.sort();
+                ids
+            }
+            Err(e) => {
+                debug!(error = %e, "Model discovery parse failed");
+                Vec::new()
             }
         }
     }
@@ -637,9 +651,10 @@ impl OpenAiCompatibleProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     fn name(&self) -> &'static str {
-        // The trait wants a static string; these four are the names the
-        // price table knows as self-hosted.
+        // The trait wants a static string; these are the names the price
+        // table knows: the OpenAI API, and four self-hosted ones.
         match self.config.provider_name.as_str() {
+            OPENAI_API_NAME => OPENAI_API_NAME,
             "ollama" => "ollama",
             "vllm" => "vllm",
             "localai" => "localai",
@@ -670,48 +685,26 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         let status = response.status();
         let text = response.text().await.map_err(|e| {
-            RunnerError::external_service(LOG_LABEL, format!("Failed to read response: {e}"))
+            RunnerError::external_service(self.label(), format!("Failed to read response: {e}"))
         })?;
+        trace!(body_len = text.len(), body = %text, "response body");
 
         if !status.is_success() {
-            return Err(Self::parse_error_response(status, &text));
+            return Err(self.error_response(status, &text));
         }
 
-        let openai_response: OpenAiResponse = serde_json::from_str(&text).map_err(|e| {
-            RunnerError::external_service(LOG_LABEL, format!("Failed to parse response: {e}"))
-        })?;
-
-        let choice =
-            openai_response.choices.into_iter().next().ok_or_else(|| {
-                RunnerError::external_service(LOG_LABEL, "API returned no choices")
-            })?;
-
-        let content = choice.message.content.unwrap_or_default();
-        let tool_calls = choice.message.tool_calls.map(|calls| {
+        let response = chat_completions::parse_response(self.label(), &text, Usage::with_details)?;
+        if let Some(usage) = &response.usage {
             info!(
-                "{} returned {} tool calls",
-                self.config.provider_name,
-                calls.len()
+                provider = self.name(),
+                model = %response.model,
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                total_tokens = usage.total_tokens,
+                "chat completion usage"
             );
-            Self::convert_tool_calls(&calls)
-        });
-
-        debug!(
-            provider = %self.config.provider_name,
-            content_len = content.len(),
-            tool_calls = tool_calls.as_ref().map(Vec::len),
-            finish_reason = ?choice.finish_reason,
-            "Received response"
-        );
-
-        Ok(ChatResponse {
-            content,
-            model: openai_response.model,
-            usage: openai_response.usage.map(OpenAiUsage::into_token_usage),
-            finish_reason: choice.finish_reason,
-            warnings: None,
-            tool_calls,
-        })
+        }
+        Ok(response)
     }
 
     #[instrument(skip(self, request), fields(model = %request.model.as_deref().unwrap_or(&self.config.default_model)))]
@@ -722,16 +715,21 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(Self::parse_error_response(status, &text));
+            return Err(self.error_response(status, &text));
         }
 
+        let label = self.label();
         Ok(create_sse_stream(
             response.bytes_stream(),
-            Self::parse_stream_data,
-            LOG_LABEL,
+            move |json| chat_completions::parse_stream_frame(label, json),
+            label,
         ))
     }
 
+    /// Probe `GET {base_url}/models` within five seconds.
+    ///
+    /// The `OpenAI` API that cannot be reached is unhealthy; a self-hosted
+    /// endpoint that cannot be reached is an error naming the server to start.
     #[instrument(skip(self))]
     async fn health_check(&self) -> Result<bool, RunnerError> {
         debug!(
@@ -740,13 +738,22 @@ impl LlmProvider for OpenAiCompatibleProvider {
             "Performing health check"
         );
 
-        // The models endpoint is a lightweight health check
-        let http_request = self.client.get(self.api_url("models"));
-        let response = self
-            .add_auth_header(http_request)
-            .send()
-            .await
-            .map_err(|e| self.map_send(e))?;
+        let http_request = self
+            .client
+            .get(self.api_url("models"))
+            .timeout(Duration::from_secs(DISCOVERY_TIMEOUT_SECS));
+        let response = match self.add_auth_header(http_request).send().await {
+            Ok(response) => response,
+            Err(e) if self.config.is_openai_api() => {
+                warn!(
+                    provider = OPENAI_API_NAME,
+                    error = %e.without_url(),
+                    "health check could not reach the endpoint"
+                );
+                return Ok(false);
+            }
+            Err(e) => return Err(self.map_send(e)),
+        };
 
         let healthy = response.status().is_success();
         if healthy {
