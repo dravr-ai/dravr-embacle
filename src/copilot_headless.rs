@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol_schema as schema;
+use agent_client_protocol_schema::v1 as schema;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
