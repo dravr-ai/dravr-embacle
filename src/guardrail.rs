@@ -196,16 +196,13 @@ impl Guardrail for ContentLengthGuardrail {
             }
             total += msg.content.len();
         }
-        if total > self.max_total_chars {
-            return Err(GuardrailViolation {
-                guardrail_name: self.name().to_owned(),
-                reason: format!(
-                    "total content exceeds max length ({total} > {} chars)",
-                    self.max_total_chars
-                ),
-            });
-        }
-        Ok(())
+        (total <= self.max_total_chars).ok_or_else(|| GuardrailViolation {
+            guardrail_name: self.name().to_owned(),
+            reason: format!(
+                "total content exceeds max length ({total} > {} chars)",
+                self.max_total_chars
+            ),
+        })
     }
 
     fn check_response(
