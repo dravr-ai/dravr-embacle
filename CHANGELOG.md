@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.29.1] — 2026-09-25
+
+### Fixed
+
+- fix(uhp): confine artifact downloads to a held session's own folder
+- fix(acp): a streamed turn spawns under the model routing gate
+
+### Other
+
+- chore(deps): bump dravr-tronc 1.3.0 -> 1.4.0
+- chore(deps): bump dravr-tronc 1.2.0 -> 1.3.0
+- chore(deps): bump dravr-tronc 1.1.0 -> 1.2.0
+- test(e2e): the streamed turn is asked for a verbatim reply, not a count
+
+
+
 ## [0.29.0] — 2026-09-22
 
 ### Added
