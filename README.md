@@ -108,7 +108,7 @@ embacle = "0.30"
 
 | Runner | Feature Flag | Features |
 |--------|-------------|----------|
-| OpenAI API | `openai-api` | Any OpenAI-compatible endpoint (OpenAI, Groq, Gemini, Ollama, vLLM), streaming, tool calling, model discovery |
+| OpenAI API | `http-api` | `OpenAiCompatibleProvider` on `OPENAI_API_*`: the OpenAI API or any endpoint serving it, streaming, tool calling, vision, model discovery |
 | Google Gemini | `http-api` | Generative Language API, streaming, function calling, cache-read usage, retries thinking-only answers |
 | Cohere | `http-api` | v2 chat API (Command A / Command R), typed SSE envelope, tool calling, billed-units usage |
 | Groq | `http-api` | OpenAI-shaped chat on LPU inference, streaming, tool calling, 429 wait parsing |
@@ -409,34 +409,37 @@ Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`)
 
 ## OpenAI API (feature flag)
 
-Enable the `openai-api` feature for HTTP-based communication with any OpenAI-compatible endpoint:
+The `http-api` feature's `OpenAiCompatibleProvider` talks to the OpenAI API, or to any endpoint that serves the same API:
 
 ```toml
 [dependencies]
-embacle = { version = "0.30", features = ["openai-api"] }
+embacle = { version = "0.30", features = ["http-api"] }
 ```
 
 ```rust
-use embacle::{OpenAiApiConfig, OpenAiApiRunner};
+use embacle::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use embacle::types::{ChatMessage, ChatRequest, LlmProvider};
 
 #[tokio::main]
 async fn main() -> Result<(), embacle::types::RunnerError> {
-    // Reads OPENAI_API_BASE_URL, OPENAI_API_KEY, OPENAI_API_MODEL from env
-    let config = OpenAiApiConfig::from_env();
-    let runner = OpenAiApiRunner::new(config).await;
+    // Reads OPENAI_API_BASE_URL (requests go to its /v1), OPENAI_API_KEY,
+    // OPENAI_API_MODEL and OPENAI_API_TIMEOUT_SECS from env
+    let config = OpenAiCompatibleConfig::openai_api_from_env();
+    let provider = OpenAiCompatibleProvider::new(config)?
+        .with_discovered_models()
+        .await;
 
     let request = ChatRequest::new(vec![
         ChatMessage::user("What is the capital of France?"),
     ]);
 
-    let response = runner.complete(&request).await?;
+    let response = provider.complete(&request).await?;
     println!("{}", response.content);
     Ok(())
 }
 ```
 
-Works with any OpenAI-compatible endpoint — OpenAI, Groq, Google Gemini, Ollama, vLLM, and more. To inject a shared HTTP client (e.g. from a connection pool), use `OpenAiApiRunner::with_client(config, client)`.
+It reports `openai_api`, the price-table key its usage bills under, and sends `top_p`, stop sequences, `response_format` and images, which it advertises. `with_discovered_models` publishes the endpoint's own `GET /v1/models` list. To inject a shared HTTP client (e.g. from a connection pool), use `OpenAiCompatibleProvider::with_client(config, client)`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -825,12 +828,11 @@ Your Application
             │   └── KiloCliRunner       → spawns `kilo run --auto --format json`
             │
             ├── HTTP API Runners (behind feature flags)
-            │   ├── OpenAiApiRunner       → reqwest to any OpenAI-compatible endpoint
             │   ├── GeminiProvider        → Google Generative Language API
             │   ├── CohereProvider        → Cohere v2 chat
             │   ├── GroqProvider          → Groq (OpenAI-shaped)
             │   ├── OpenRouterProvider    → OpenRouter gateway
-            │   └── OpenAiCompatibleProvider → Ollama / vLLM / LocalAI / any local endpoint
+            │   └── OpenAiCompatibleProvider → the OpenAI API / Ollama / vLLM / LocalAI / any compatible endpoint
             │
             ├── ACP Runners (persistent connection, behind feature flag)
             │   └── CopilotHeadlessRunner → NDJSON/JSON-RPC to `copilot --acp`

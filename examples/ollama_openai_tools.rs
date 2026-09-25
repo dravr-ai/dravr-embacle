@@ -1,13 +1,13 @@
-// ABOUTME: Live check that embacle's OpenAI-compatible runner still does structured tools
+// ABOUTME: Live check that embacle's OpenAI-compatible provider still does structured tools
 // ABOUTME: Points at Ollama, so it needs no cloud key and pins the contract locally
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 //
 // Run: ollama serve &
-//      cargo run --example ollama_openai_tools --features openai-api
+//      cargo run --example ollama_openai_tools --features http-api
 //
-// This is the OTHER half of the provider contract. `OpenAiApiRunner` advertises
+// This is the OTHER half of the provider contract. `OpenAiCompatibleProvider` advertises
 // FUNCTION_CALLING, so a host routes it to the structured loop and expects
 // `ChatResponse.tool_calls` to come back populated — no MCP, no prompt catalog.
 // Ollama speaks the same wire format, which makes it a free local conformance rig.
@@ -16,19 +16,22 @@ use std::env;
 use std::time::Duration;
 
 use embacle::types::{ChatMessage, ChatRequest, LlmProvider, ToolDefinition};
-use embacle::{OpenAiApiConfig, OpenAiApiRunner};
+use embacle::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use serde_json::json;
 use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() {
-    env::set_var("OPENAI_API_BASE_URL", "http://localhost:11434");
-    env::set_var("OPENAI_API_KEY", "ollama");
     let model =
         env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:7b-instruct-q4_K_M".to_owned());
-    env::set_var("OPENAI_API_MODEL", &model);
 
-    let runner = OpenAiApiRunner::new(OpenAiApiConfig::from_env()).await;
+    let runner = match OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::ollama(&model)) {
+        Ok(provider) => provider,
+        Err(e) => {
+            println!("FAIL: cannot build the provider: {e}");
+            return;
+        }
+    };
     println!("provider     : {}", runner.name());
     println!("capabilities : {:?}", runner.capabilities());
     println!("model        : {model}\n");
@@ -68,7 +71,7 @@ async fn main() {
             println!("\n=== VERDICT ===");
             if calls.iter().any(|c| c.function_name == "get_secret_number") {
                 println!(
-                    "PASS: the OpenAI-compatible runner returned a STRUCTURED tool call, \
+                    "PASS: the OpenAI-compatible provider returned a STRUCTURED tool call, \
                      which is exactly what ChatProvider::complete_with_tools now forwards."
                 );
             } else {

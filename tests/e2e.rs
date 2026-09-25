@@ -476,21 +476,22 @@ mod headless {
 }
 
 // ============================================================================
-// OpenAI API Runner (requires `openai-api` feature + live API key)
+// OpenAI API (requires `http-api` feature + live API key)
 // ============================================================================
 
-/// E2E test for `OpenAiApiRunner` against a live `OpenAI`-compatible endpoint.
+/// E2E test for the `OpenAI` API configuration of `OpenAiCompatibleProvider`
+/// against a live `OpenAI`-compatible endpoint.
 ///
 /// Enable with: `EMBACLE_E2E_OPENAI_API=1`
 ///
-/// Required env vars (example for Groq):
-///   `OPENAI_API_BASE_URL=https://api.groq.com/openai/v1`
+/// Required env vars (example for Groq; the requests go to the base URL's `/v1`):
+///   `OPENAI_API_BASE_URL=https://api.groq.com/openai`
 ///   `OPENAI_API_KEY=gsk_...`
 ///   `OPENAI_API_MODEL=llama-3.3-70b-versatile`
-#[cfg(feature = "openai-api")]
+#[cfg(feature = "http-api")]
 mod openai_api_e2e {
     use super::*;
-    use embacle::{OpenAiApiConfig, OpenAiApiRunner};
+    use embacle::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 
     #[tokio::test]
     async fn openai_api_complete_and_stream() {
@@ -499,14 +500,17 @@ mod openai_api_e2e {
             return;
         }
 
-        let config = OpenAiApiConfig::from_env();
+        let config = OpenAiCompatibleConfig::openai_api_from_env();
         eprintln!(
             "  openai_api: base_url={}, model={}",
-            config.base_url, config.model
+            config.base_url, config.default_model
         );
 
-        let runner = OpenAiApiRunner::new(config).await;
-        test_provider_complete(&runner).await;
+        let provider = OpenAiCompatibleProvider::new(config)
+            .expect("the HTTP client builds")
+            .with_discovered_models()
+            .await;
+        test_provider_complete(&provider).await;
     }
 }
 

@@ -34,15 +34,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{RequestBuilder, StatusCode};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
+use super::chat_completions::{self, CompletionRequest, Usage};
 use super::client::{self, with_retries, AttemptError, HttpRetryConfig, DEFAULT_TIMEOUT_SECS};
 use super::sse::create_sse_stream;
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
-    StreamChunk, TokenUsage, ToolCallRequest, ToolDefinition,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
 };
 
 /// The name this provider reports, and the price-table key its usage bills under
@@ -88,182 +86,6 @@ const AVAILABLE_MODELS: &[&str] = &[
 
 /// Base URL for the `OpenRouter` API (OpenAI-compatible)
 const API_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-// ============================================================================
-// API Request/Response Types (OpenAI-compatible format)
-// ============================================================================
-
-/// `OpenRouter` API request structure (OpenAI-compatible)
-#[derive(Debug, Serialize)]
-struct OpenRouterRequest {
-    model: String,
-    messages: Vec<OpenRouterMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<OpenRouterTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-}
-
-/// Tool definition for `OpenRouter` API (OpenAI-compatible format)
-#[derive(Debug, Clone, Serialize)]
-struct OpenRouterTool {
-    #[serde(rename = "type")]
-    tool_type: String,
-    function: OpenRouterFunction,
-}
-
-/// Function definition within a tool
-#[derive(Debug, Clone, Serialize)]
-struct OpenRouterFunction {
-    name: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<Value>,
-}
-
-/// Message structure for `OpenRouter` API (OpenAI-compatible): role and text only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenRouterMessage {
-    role: String,
-    content: String,
-}
-
-impl From<&ChatMessage> for OpenRouterMessage {
-    fn from(msg: &ChatMessage) -> Self {
-        Self {
-            role: msg.role.as_str().to_owned(),
-            content: msg.content.clone(),
-        }
-    }
-}
-
-/// `OpenRouter` API response structure (OpenAI-compatible)
-#[derive(Debug, Deserialize)]
-struct OpenRouterResponse {
-    choices: Vec<OpenRouterChoice>,
-    #[serde(default)]
-    usage: Option<OpenRouterUsage>,
-    model: String,
-}
-
-/// Choice in `OpenRouter` response
-#[derive(Debug, Deserialize)]
-struct OpenRouterChoice {
-    message: OpenRouterResponseMessage,
-    finish_reason: Option<String>,
-}
-
-/// Message in `OpenRouter` response
-#[derive(Debug, Deserialize)]
-struct OpenRouterResponseMessage {
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenRouterToolCall>>,
-}
-
-/// Tool call in `OpenRouter` response (OpenAI-compatible)
-#[derive(Debug, Clone, Deserialize)]
-struct OpenRouterToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: OpenRouterFunctionCall,
-}
-
-/// Function call details in `OpenRouter` response
-#[derive(Debug, Clone, Deserialize)]
-struct OpenRouterFunctionCall {
-    name: String,
-    arguments: String,
-}
-
-/// Usage statistics in `OpenRouter` response
-#[derive(Debug, Deserialize)]
-struct OpenRouterUsage {
-    #[serde(rename = "prompt_tokens")]
-    prompt: u32,
-    #[serde(rename = "completion_tokens")]
-    completion: u32,
-    #[serde(rename = "total_tokens")]
-    total: u32,
-    /// Breakdown of `prompt_tokens`, carrying the cache-read share.
-    #[serde(default)]
-    prompt_tokens_details: Option<OpenRouterUsageDetails>,
-    /// Breakdown of `completion_tokens`, carrying the reasoning-token share
-    /// that reasoning models bill as output but exclude from the count.
-    #[serde(default)]
-    completion_tokens_details: Option<OpenRouterCompletionDetails>,
-}
-
-/// The `completion_tokens_details` sub-object, present on reasoning models.
-#[derive(Debug, Deserialize)]
-struct OpenRouterCompletionDetails {
-    #[serde(default)]
-    reasoning_tokens: Option<u32>,
-}
-
-/// The `prompt_tokens_details` sub-object of an OpenAI-compatible usage block.
-#[derive(Debug, Deserialize)]
-struct OpenRouterUsageDetails {
-    #[serde(default)]
-    cached_tokens: Option<u32>,
-}
-
-impl OpenRouterUsage {
-    /// No cache-WRITE count in this API shape: writes are implicit and
-    /// unbilled, so `None` is accurate, not unknown.
-    fn into_token_usage(self) -> TokenUsage {
-        TokenUsage::new(self.prompt, self.completion, self.total)
-            .with_cache(
-                self.prompt_tokens_details.and_then(|d| d.cached_tokens),
-                None,
-            )
-            .with_reasoning(
-                self.completion_tokens_details
-                    .and_then(|d| d.reasoning_tokens),
-            )
-    }
-}
-
-/// Streaming chunk structure (OpenAI-compatible)
-#[derive(Debug, Deserialize)]
-struct OpenRouterStreamChunk {
-    choices: Vec<OpenRouterStreamChoice>,
-}
-
-/// Choice in streaming chunk
-#[derive(Debug, Deserialize)]
-struct OpenRouterStreamChoice {
-    delta: OpenRouterDelta,
-    finish_reason: Option<String>,
-}
-
-/// Delta content in streaming chunk
-#[derive(Debug, Deserialize)]
-struct OpenRouterDelta {
-    #[serde(default)]
-    content: Option<String>,
-}
-
-/// `OpenRouter` API error response
-#[derive(Debug, Deserialize)]
-struct OpenRouterErrorResponse {
-    error: OpenRouterErrorDetail,
-}
-
-/// Error detail structure
-#[derive(Debug, Deserialize)]
-struct OpenRouterErrorDetail {
-    message: String,
-    #[serde(rename = "type")]
-    error_type: Option<String>,
-}
 
 // ============================================================================
 // Configuration
@@ -416,34 +238,17 @@ impl OpenRouterProvider {
         format!("{API_BASE_URL}/{endpoint}")
     }
 
-    /// Convert internal messages to `OpenRouter` format
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<OpenRouterMessage> {
-        messages.iter().map(OpenRouterMessage::from).collect()
-    }
-
     /// Parse an error response from the `OpenRouter` API: the vendor's
     /// message when the body is its JSON envelope, `HTTP <status>` otherwise;
     /// the status decides the kind. A 402 (credit balance exhausted) is an
     /// external-service error like any other non-4xx-class refusal.
     fn parse_error_response(status: StatusCode, body: &str) -> RunnerError {
-        let message = serde_json::from_str::<OpenRouterErrorResponse>(body).map_or_else(
-            |_| {
-                debug!(
-                    status = status.as_u16(),
-                    body_preview = %body.chars().take(200).collect::<String>(),
-                    "OpenRouter API returned non-JSON error response"
-                );
-                format!("HTTP {status}")
-            },
-            |e| {
-                let error_type = e.error.error_type.unwrap_or_else(|| "unknown".to_owned());
-                if status.as_u16() == 402 {
-                    format!("credit balance exhausted: {}", e.error.message)
-                } else {
-                    format!("{error_type} - {}", e.error.message)
-                }
-            },
-        );
+        let message = match chat_completions::error_detail(body) {
+            Some(detail) if status == StatusCode::PAYMENT_REQUIRED => {
+                format!("credit balance exhausted: {}", detail.message)
+            }
+            _ => chat_completions::describe_error(PROVIDER_NAME, status, body),
+        };
         client::map_http_error(PROVIDER_NAME, status, &message)
     }
 
@@ -459,7 +264,7 @@ impl OpenRouterProvider {
     }
 
     /// Build an authenticated HTTP request to the `OpenRouter` API
-    fn build_request(&self, body: &OpenRouterRequest) -> RequestBuilder {
+    fn build_request(&self, body: &CompletionRequest) -> RequestBuilder {
         let builder = self
             .client
             .post(Self::api_url("chat/completions"))
@@ -469,84 +274,14 @@ impl OpenRouterProvider {
     }
 
     /// Build the request body for a `ChatRequest`
-    fn build_body(&self, request: &ChatRequest, stream: bool) -> OpenRouterRequest {
-        let model = request.model.as_deref().unwrap_or(&self.config.model);
-        let tools = request
-            .tools
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .map(Self::convert_tools);
-        OpenRouterRequest {
-            model: model.to_owned(),
-            messages: Self::convert_messages(&request.messages),
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: Some(stream),
-            tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
-            tools,
-        }
-    }
-
-    /// Parse an `OpenRouter` SSE data payload into a `StreamChunk`
-    fn parse_stream_data(json_str: &str) -> Option<Result<StreamChunk, RunnerError>> {
-        match serde_json::from_str::<OpenRouterStreamChunk>(json_str) {
-            Ok(chunk) => {
-                let choice = chunk.choices.into_iter().next()?;
-                let delta = choice.delta.content.unwrap_or_default();
-                let is_final = choice.finish_reason.is_some();
-                Some(Ok(StreamChunk {
-                    delta,
-                    is_final,
-                    finish_reason: choice.finish_reason,
-                }))
-            }
-            Err(e) => {
-                warn!("Failed to parse OpenRouter stream chunk: {e}");
-                None
-            }
-        }
-    }
-
-    /// Convert tool definitions to `OpenRouter`'s OpenAI-compatible format
-    fn convert_tools(tools: &[ToolDefinition]) -> Vec<OpenRouterTool> {
-        tools
-            .iter()
-            .map(|func| OpenRouterTool {
-                tool_type: "function".to_owned(),
-                function: OpenRouterFunction {
-                    name: func.name.clone(),
-                    description: func.description.clone(),
-                    parameters: func.parameters.clone(),
-                },
-            })
-            .collect()
-    }
-
-    /// Convert `OpenRouter` tool calls to tool-call requests. Arguments
-    /// arrive as a JSON-encoded string; one that does not parse becomes `null`.
-    fn convert_tool_calls(tool_calls: &[OpenRouterToolCall]) -> Vec<ToolCallRequest> {
-        tool_calls
-            .iter()
-            .map(|call| {
-                debug!(
-                    tool_call_id = %call.id,
-                    tool_call_type = %call.call_type,
-                    function_name = %call.function.name,
-                    "Converting OpenRouter tool call"
-                );
-                ToolCallRequest {
-                    id: call.id.clone(),
-                    function_name: call.function.name.clone(),
-                    arguments: serde_json::from_str(&call.function.arguments).unwrap_or_default(),
-                }
-            })
-            .collect()
+    fn build_body(&self, request: &ChatRequest, stream: bool) -> CompletionRequest {
+        CompletionRequest::new(request, &self.config.model, stream, self.capabilities())
     }
 
     /// One non-streaming attempt
     async fn attempt_complete(
         &self,
-        body: &OpenRouterRequest,
+        body: &CompletionRequest,
     ) -> Result<ChatResponse, AttemptError> {
         let response = self
             .build_request(body)
@@ -569,45 +304,18 @@ impl OpenRouterProvider {
             ));
         }
 
-        let or_response: OpenRouterResponse = serde_json::from_str(&text).map_err(|e| {
-            AttemptError::permanent(RunnerError::external_service(
-                PROVIDER_NAME,
-                format!("Failed to parse response: {e}"),
-            ))
-        })?;
+        Self::read_completion(&text).map_err(AttemptError::permanent)
+    }
 
-        let choice = or_response.choices.into_iter().next().ok_or_else(|| {
-            AttemptError::permanent(RunnerError::external_service(
-                PROVIDER_NAME,
-                "API returned no choices",
-            ))
-        })?;
-
-        let content = choice.message.content.unwrap_or_default();
-        let tool_calls = choice.message.tool_calls.map(|calls| {
-            info!("OpenRouter returned {} tool calls", calls.len());
-            Self::convert_tool_calls(&calls)
-        });
-
-        debug!(
-            content_len = content.len(),
-            tool_calls = tool_calls.as_ref().map(Vec::len),
-            finish_reason = ?choice.finish_reason,
-            "Received response from OpenRouter"
-        );
-
-        Ok(ChatResponse {
-            content,
-            model: or_response.model,
-            usage: or_response.usage.map(OpenRouterUsage::into_token_usage),
-            finish_reason: choice.finish_reason,
-            warnings: None,
-            tool_calls,
-        })
+    /// Read a completion body, with the cached and reasoning shares of its
+    /// usage so a cached prefix bills at the cache rate and thought tokens
+    /// are charged.
+    fn read_completion(body: &str) -> Result<ChatResponse, RunnerError> {
+        chat_completions::parse_response(PROVIDER_NAME, body, Usage::with_details)
     }
 
     /// One attempt at opening the stream
-    async fn attempt_stream(&self, body: &OpenRouterRequest) -> Result<ChatStream, AttemptError> {
+    async fn attempt_stream(&self, body: &CompletionRequest) -> Result<ChatStream, AttemptError> {
         let response = self
             .build_request(body)
             .send()
@@ -625,7 +333,7 @@ impl OpenRouterProvider {
 
         Ok(create_sse_stream(
             response.bytes_stream(),
-            Self::parse_stream_data,
+            |json| chat_completions::parse_stream_frame(PROVIDER_NAME, json),
             PROVIDER_NAME,
         ))
     }
@@ -732,18 +440,68 @@ impl Debug for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ErrorKind;
+    use crate::types::{ChatMessage, ErrorKind, ResponseFormat, ToolChoice, ToolDefinition};
+    use serde_json::json;
 
+    /// A recorded `OpenRouter` answer: tool calls decoded, and the cached
+    /// and reasoning shares read into usage.
     #[test]
-    fn usage_reads_cached_and_reasoning_details() {
-        let body = r#"{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
-            "prompt_tokens_details":{"cached_tokens":60},
-            "completion_tokens_details":{"reasoning_tokens":15}}"#;
-        let usage: OpenRouterUsage = serde_json::from_str(body).expect("parses"); // Safe: test assertion
-        let usage = usage.into_token_usage();
+    fn a_recorded_response_yields_its_tool_calls_and_usage_details() {
+        let recorded = r#"{
+            "id": "gen-1", "provider": "Together", "model": "meta-llama/llama-3.3-70b-instruct",
+            "choices": [{"finish_reason": "tool_calls", "native_finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "call_7", "type": "function", "index": 0,
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Lyon\"}"}}]}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 60},
+                "completion_tokens_details": {"reasoning_tokens": 15}}
+        }"#;
+        let response = OpenRouterProvider::read_completion(recorded).expect("parses"); // Safe: test assertion
+        assert_eq!(response.model, "meta-llama/llama-3.3-70b-instruct");
+        let calls = response.tool_calls.expect("tool calls"); // Safe: test assertion
+        assert_eq!(calls[0].id, "call_7");
+        assert_eq!(calls[0].function_name, "get_weather");
+        assert_eq!(calls[0].arguments, json!({"city": "Lyon"}));
+        let usage = response.usage.expect("usage"); // Safe: test assertion
+        assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.cached_read_tokens, Some(60));
         assert_eq!(usage.cached_write_tokens, None);
         assert_eq!(usage.reasoning_tokens, Some(15));
+    }
+
+    /// `OpenRouter` advertises none of `TOP_P`, `STOP_SEQUENCES`,
+    /// `RESPONSE_FORMAT` or `VISION`, so those never reach the body.
+    #[test]
+    fn the_body_is_the_openai_shape_without_what_the_gateway_does_not_advertise() {
+        let provider =
+            OpenRouterProvider::with_client(OpenRouterConfig::new("k"), reqwest::Client::new());
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_model("openai/gpt-4o")
+            .with_max_tokens(32)
+            .with_top_p(0.9)
+            .with_stop(vec!["END".to_owned()])
+            .with_response_format(ResponseFormat::JsonObject)
+            .with_tools(vec![ToolDefinition {
+                name: "lookup".to_owned(),
+                description: "Lookup".to_owned(),
+                parameters: None,
+            }])
+            .with_tool_choice(ToolChoice::Specific {
+                name: "lookup".to_owned(),
+            });
+        let body = serde_json::to_value(provider.build_body(&request, true)).expect("serialises"); // Safe: test assertion
+        assert_eq!(
+            body,
+            json!({
+                "model": "openai/gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 32,
+                "stream": true,
+                "tools": [{"type": "function", "function": {"name": "lookup", "description": "Lookup"}}],
+                "tool_choice": {"type": "function", "function": {"name": "lookup"}}
+            })
+        );
     }
 
     #[test]

@@ -57,9 +57,9 @@ echo "✅"
 echo ""
 
 # ============================================================================
-# TIER 2: Clippy (copilot-headless, http-api, openai-api features)
+# TIER 2: Clippy (copilot-headless, copilot-sdk, web-ui, http-api features)
 # ============================================================================
-FEATURES="copilot-headless,copilot-sdk,web-ui,http-api,openai-api"
+FEATURES="copilot-headless,copilot-sdk,web-ui,http-api"
 echo "📎 Tier 2: Clippy (--features $FEATURES)"
 echo "---------------------------------------------"
 echo -n "Running clippy --features $FEATURES... "
