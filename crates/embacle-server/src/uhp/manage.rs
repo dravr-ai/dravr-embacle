@@ -52,20 +52,43 @@ pub struct HarnessConfig {
     pub disabled_tools: Vec<String>,
 }
 
-/// Refuse a skill bundle that carries no manifest.
+/// Refuse a skill bundle that carries no manifest, or that cannot be written
+/// out for a task as it stands.
+///
+/// A bundle is written to disk under its name when a task runs on the harness,
+/// so a name or member path that would land outside it, or a member whose
+/// base64 does not decode, is refused here rather than at every task.
 fn validated_skills(skills: &[Skill]) -> Result<(), UhpFailure> {
+    let refuse =
+        |message: String| UhpFailure::new(ErrorType::InvalidRequestError, "invalid_input", message);
     for skill in skills {
         if !skill.has_manifest() {
-            return Err(UhpFailure::new(
-                ErrorType::InvalidRequestError,
-                "invalid_input",
-                format!(
-                    "skill '{}' carries no {} — it would be stored and then silently ignored at \
-                     run time",
-                    skill.name,
-                    Skill::MANIFEST
-                ),
-            ));
+            return Err(refuse(format!(
+                "skill '{}' carries no {} — it would be stored and then silently ignored at run \
+                 time",
+                skill.name,
+                Skill::MANIFEST
+            )));
+        }
+        if !skill.has_plain_name() {
+            return Err(refuse(format!(
+                "skill '{}' must be named by one path segment",
+                skill.name
+            )));
+        }
+        for file in &skill.files {
+            if file.relative_path().is_none() {
+                return Err(refuse(format!(
+                    "skill '{}' member '{}' is not a relative path inside the bundle",
+                    skill.name, file.path
+                )));
+            }
+            if file.bytes().is_err() {
+                return Err(refuse(format!(
+                    "skill '{}' member '{}' carries content_b64 that is not base64",
+                    skill.name, file.path
+                )));
+            }
         }
     }
     Ok(())

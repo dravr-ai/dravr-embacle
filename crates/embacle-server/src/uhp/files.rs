@@ -67,6 +67,21 @@ pub fn session_workdir(session_id: &str) -> PathBuf {
     workdir_base().join(session_id)
 }
 
+/// The folder, beside every session's, where staged task inputs live.
+const STAGING_DIR: &str = ".staged";
+
+/// Where one task's staged inputs — the skill bundles its harness reads but
+/// did not write — are put.
+///
+/// Beside the session folders rather than inside one: everything inside a
+/// session's folder is listed as an artifact of that session, so a bundle
+/// staged there would come back to the client as though the harness had
+/// produced it. No minted session id can equal the staging folder's name.
+#[must_use]
+pub fn staging_dir(task_id: &str) -> PathBuf {
+    workdir_base().join(STAGING_DIR).join(task_id)
+}
+
 /// The folder every session's working folder sits directly inside.
 fn workdir_base() -> PathBuf {
     env::var(WORKDIR_ENV).map_or_else(|_| env::temp_dir().join("embacle-uhp"), PathBuf::from)

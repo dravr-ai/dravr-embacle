@@ -53,6 +53,7 @@ tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 subtle = "2"
+base64 = "0.23"
 
 [dev-dependencies]
 http-body-util = "0.1"

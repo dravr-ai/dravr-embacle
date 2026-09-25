@@ -34,6 +34,7 @@ pub mod discovery;
 pub mod error;
 pub mod files;
 pub mod harnesses;
+pub mod invocation;
 pub mod manage;
 pub mod sessions;
 pub mod share;

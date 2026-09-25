@@ -50,6 +50,7 @@ use uuid::Uuid;
 use super::error::{ErrorType, UhpFailure};
 use super::files;
 use super::harnesses;
+use super::invocation::{self, StagedSkills};
 use super::state::UhpState;
 
 /// The fields this protocol reserves and a server must ignore.
@@ -480,9 +481,13 @@ pub struct Prepared {
     pub metadata: Map<String, Value>,
     /// What the client asked for, when it differs from what will run.
     pub requested_model: Option<String>,
+    /// The harness's skill bundles, staged where the runner reads them and
+    /// removed once this task is done with them.
+    pub skills: Option<StagedSkills>,
 }
 
-/// Build a runner that executes inside `workdir`.
+/// Build a runner that executes inside `workdir`, with `harness_args` — what
+/// the chosen harness's configuration adds to its command line — appended.
 ///
 /// Deliberately not the shared pooled runner: pooling hands back one runner per
 /// provider for the whole process, and every session needs its own directory or
@@ -490,6 +495,7 @@ pub struct Prepared {
 async fn runner_in(
     provider: CliRunnerType,
     workdir: &StdPath,
+    harness_args: Vec<String>,
 ) -> Result<Arc<dyn LlmProvider>, RunnerError> {
     fs::create_dir_all(workdir)
         .map_err(|e| RunnerError::internal(format!("session working folder: {e}")))?;
@@ -498,6 +504,7 @@ async fn runner_in(
     let binary = resolve_binary(provider.binary_name(), env_override.as_deref())?;
     let mut config = RunnerConfig::new(binary).with_working_directory(workdir.to_path_buf());
     config.extra_args = write_permission_args(provider);
+    config.extra_args.extend(harness_args);
 
     Ok(Arc::from(
         create_runner_with_config(provider, config).await?,
@@ -541,26 +548,34 @@ fn write_permission_args(provider: CliRunnerType) -> Vec<String> {
 /// Shared by the blocking and streaming paths so the two cannot drift on which
 /// harness they picked or which session they reported.
 ///
+/// The harness is a configured one or a discovered one alike, and its skills,
+/// MCP servers and disabled tools are applied to the runner here; see
+/// [`invocation`] for how each base takes them.
+///
 /// # Errors
 ///
-/// Answers `404 harness_not_found` when the requested harness is not installed.
+/// Answers `404 harness_not_found` when the requested harness is not installed,
+/// and `400 unsupported_harness_setting` when it sets something its base has no
+/// way to apply.
 pub async fn prepare(state: &UhpState, request: &CreateResponse) -> Result<Prepared, UhpFailure> {
-    let harnesses = harnesses::discover(&state.shared).await;
     let chosen = match request.harness_id() {
-        Some(id) => harnesses
-            .iter()
-            .find(|d| d.harness.id == id)
-            .ok_or_else(|| {
-                UhpFailure::not_found("harness_not_found", "no harness with that id is configured")
-            })?,
-        None => harnesses.first().ok_or_else(|| {
-            UhpFailure::new(
-                ErrorType::InvalidRequestError,
-                "harness_not_found",
-                "this server has no installed harness to run",
-            )
+        Some(id) => harnesses::resolve(state, id).await.ok_or_else(|| {
+            UhpFailure::not_found("harness_not_found", "no harness with that id is configured")
         })?,
+        None => harnesses::discover(&state.shared)
+            .await
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                UhpFailure::new(
+                    ErrorType::InvalidRequestError,
+                    "harness_not_found",
+                    "this server has no installed harness to run",
+                )
+            })?,
     };
+    let id = id_with("resp_");
+    let applied = invocation::apply(chosen.provider, &chosen.harness, &id)?;
 
     // The harness runs inside the session's own folder, which is what makes an
     // artifact attributable: a file that appears there was written by this
@@ -573,13 +588,15 @@ pub async fn prepare(state: &UhpState, request: &CreateResponse) -> Result<Prepa
         .and_then(|prev| state.store.session_of(prev))
         .unwrap_or_else(|| id_with(SESSION_PREFIX));
     let workdir = files::session_workdir(&session_id);
-    let runner = runner_in(chosen.provider, &workdir).await.map_err(|_| {
-        UhpFailure::new(
-            ErrorType::HarnessError,
-            "harness_unavailable",
-            "the harness could not be started",
-        )
-    })?;
+    let runner = runner_in(chosen.provider, &workdir, applied.args)
+        .await
+        .map_err(|_| {
+            UhpFailure::new(
+                ErrorType::HarnessError,
+                "harness_unavailable",
+                "the harness could not be started",
+            )
+        })?;
 
     let requested_model = request.model.clone();
     let model = requested_model
@@ -587,7 +604,8 @@ pub async fn prepare(state: &UhpState, request: &CreateResponse) -> Result<Prepa
         .or_else(|| chosen.harness.default_model.clone())
         .unwrap_or_else(|| runner.default_model().to_owned());
 
-    let mut chat = ChatRequest::new(vec![ChatMessage::user(request.prompt())]);
+    let mut chat = ChatRequest::new(vec![ChatMessage::user(request.prompt())])
+        .with_mcp_servers(applied.mcp_servers);
     chat.model = Some(model.clone());
 
     let mut metadata = request.metadata.clone().unwrap_or_default();
@@ -605,9 +623,10 @@ pub async fn prepare(state: &UhpState, request: &CreateResponse) -> Result<Prepa
         chat,
         model,
         session_id,
-        id: id_with("resp_"),
+        id,
         metadata,
         requested_model,
+        skills: applied.skills,
     })
 }
 
