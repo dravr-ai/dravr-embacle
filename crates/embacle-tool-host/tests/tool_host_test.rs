@@ -191,9 +191,9 @@ async fn a_tool_outside_the_session_surface_is_refused() {
     .await;
 
     assert_eq!(status, 200, "a refusal is in-band, not a transport error");
-    assert!(
-        result["result"]["isError"].as_bool().unwrap_or(false),
-        "an ungranted tool must come back as an error result: {result}"
+    assert_eq!(
+        result["error"]["code"], -32602,
+        "an ungranted tool is MCP's unknown-tool protocol error: {result}"
     );
     assert_eq!(
         executor.calls.load(Ordering::SeqCst),
@@ -295,9 +295,9 @@ async fn a_tool_withdrawn_mid_session_stops_being_listed_and_callable() {
 
     let (status, result) = post(&url, &bearer, call("get_activities")).await;
     assert_eq!(status, 200, "a refusal is in-band");
-    assert!(
-        result["result"]["isError"].as_bool().unwrap_or(false),
-        "a withdrawn tool must be refused: {result}"
+    assert_eq!(
+        result["error"]["code"], -32602,
+        "a withdrawn tool is refused as an unknown tool: {result}"
     );
     assert_eq!(
         surface.calls.load(Ordering::SeqCst),
@@ -407,8 +407,8 @@ async fn concurrent_sessions_do_not_leak_into_each_other() {
     // Bob's bearer must not reach Alice's tool.
     let (status, result) = post(&b_url, &b_bearer, call("alice_only")).await;
     assert_eq!(status, 200);
-    assert!(
-        result["result"]["isError"].as_bool().unwrap_or(false),
+    assert_eq!(
+        result["error"]["code"], -32602,
         "Bob must not be able to call Alice's tool: {result}"
     );
     assert_eq!(

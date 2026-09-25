@@ -49,7 +49,7 @@ use std::sync::{Arc, PoisonError, RwLock, Weak};
 
 use async_trait::async_trait;
 use dravr_tronc::mcp::auth::{AuthError, AuthHook};
-use dravr_tronc::mcp::host::ToolDispatcher;
+use dravr_tronc::mcp::host::{CallToolOutcome, ToolDispatcher};
 use dravr_tronc::mcp::protocol::JsonRpcRequest;
 use dravr_tronc::mcp::schema::{Tool, ToolResponse};
 use dravr_tronc::mcp::server::McpServer;
@@ -532,14 +532,17 @@ impl ToolDispatcher<Inner> for Forwarding {
         state: &Arc<Inner>,
         ctx: &ToolContext,
         arguments: Value,
-    ) -> ToolResponse {
+    ) -> CallToolOutcome {
         let Some(session) = resolve(state, ctx) else {
-            return ToolResponse::error("session is no longer open".to_owned());
+            return CallToolOutcome::Immediate(Box::new(ToolResponse::error(
+                "session is no longer open".to_owned(),
+            )));
         };
 
         // Re-check visibility at call time against the SAME live answer the
         // listing came from. A tool withheld between the agent's list and its
-        // call must not run just because it was visible a moment ago.
+        // call must not run just because it was visible a moment ago, and MCP
+        // answers a tool the caller cannot call with the -32602 protocol error.
         if !session
             .surface
             .list_tools()
@@ -547,7 +550,7 @@ impl ToolDispatcher<Inner> for Forwarding {
             .iter()
             .any(|t| t.name == name)
         {
-            return ToolResponse::error(format!("unknown tool: {name}"));
+            return CallToolOutcome::UnknownTool;
         }
 
         session.calls_served.fetch_add(1, Ordering::SeqCst);
@@ -558,7 +561,7 @@ impl ToolDispatcher<Inner> for Forwarding {
             ToolResponse::text(outcome.text)
         };
         response.structured_content = outcome.structured;
-        response
+        CallToolOutcome::Immediate(Box::new(response))
     }
 }
 

@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use embacle::config::CliRunnerType;
 use embacle::discovery;
@@ -859,7 +859,7 @@ async fn mcp_unknown_method_returns_error() {
 }
 
 #[tokio::test]
-async fn mcp_notification_returns_no_content() {
+async fn mcp_notification_is_accepted_with_no_body() {
     let _guard = ENV_MUTEX.lock().await;
     env::remove_var("EMBACLE_API_KEY");
 
@@ -871,7 +871,12 @@ async fn mcp_notification_returns_no_content() {
     let app = test_app();
     let response = app.oneshot(post_mcp(&body)).await.expect("send request");
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // Streamable HTTP answers an accepted notification 202 Accepted, no body.
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert!(bytes.is_empty(), "a notification gets no body: {bytes:?}");
 }
 
 #[tokio::test]
@@ -886,8 +891,10 @@ async fn mcp_invalid_json_returns_parse_error() {
         .body(Body::from("not valid json"))
         .expect("build request");
 
+    // A body the server cannot accept is an HTTP 400, still carrying the
+    // JSON-RPC parse error.
     let (status, json) = send_and_parse(test_app(), request).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["error"]["code"], -32700);
 }
 
