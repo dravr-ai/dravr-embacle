@@ -895,6 +895,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "clap",
  "dravr-tronc",
  "embacle",

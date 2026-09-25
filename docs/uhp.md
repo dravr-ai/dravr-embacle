@@ -157,7 +157,38 @@ would silently repoint every session already running on that harness.
 
 Skill bundles round-trip as whole folders — a member carries its bytes as `content`, or as
 `content_b64` when it is not text. A bundle with no `SKILL.md` is refused at config time rather than
-stored and silently ignored at run time.
+stored and silently ignored at run time, and so is one whose name or member paths would land outside
+its own folder, or whose `content_b64` does not decode.
+
+A configured harness is listed by `GET /v1/harnesses` beside the discovered ones and runs a task
+like any of them — name it in `metadata.harness_id`:
+
+```bash
+curl http://localhost:3000/uhp/v1/responses \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"input": "Review this diff", "metadata": {"harness_id": "chrn_…"}}'
+```
+
+Its skills, MCP servers and disabled tools apply to every task it runs, through what each base's
+CLI takes. Only entries with `"enabled": true` count; a disabled skill or MCP server is neither
+applied nor refused.
+
+| Base | `skills` | `mcpServers` | `disabledTools` |
+|---|---|---|---|
+| `claude-code` | `--plugin-dir` | `--mcp-config` | `--disallowed-tools` |
+| `copilot` | `--plugin-dir` | `--additional-mcp-config` | `--excluded-tools` |
+| `copilot_headless` | — | ACP `session/new` | — |
+| every other base | — | — | — |
+
+Skills are written for the length of the task as one plugin directory named `harness`, outside the
+session folder so they are never listed as artifacts, and reach the model as `harness:<skill>`. A
+disabled tool is removed from the tools the model is offered, not merely denied once called. An MCP
+server is reached by its `url` over `http` (also what an absent `transport` means) or `sse`.
+
+A task on a harness that sets something its base has no way to apply is refused with
+`400 unsupported_harness_setting` before the harness starts, and `error.detail.unsupported` names
+each such setting. Running it without them would return a result produced under a configuration the
+client did not ask for.
 
 ## Verifying it yourself
 

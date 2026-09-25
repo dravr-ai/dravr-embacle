@@ -17,10 +17,13 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::path::{Component, Path as FsPath};
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
+use base64::engine::general_purpose::STANDARD;
+use base64::{DecodeError, Engine};
 use embacle::config::CliRunnerType;
 use embacle::discovery::resolve_binary;
 use serde::{Deserialize, Serialize};
@@ -81,6 +84,37 @@ pub struct SkillFile {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
+impl SkillFile {
+    /// Where this member sits inside its bundle, when `path` is a plain
+    /// relative path.
+    ///
+    /// The path is the client's and is written to disk when a task runs, so
+    /// anything that could climb out of the bundle — a `..`, a root, a drive
+    /// prefix, a leading `.` — is refused rather than resolved.
+    #[must_use]
+    pub fn relative_path(&self) -> Option<&FsPath> {
+        let path = FsPath::new(&self.path);
+        let mut components = path.components().peekable();
+        components.peek()?;
+        components
+            .all(|c| matches!(c, Component::Normal(_)))
+            .then_some(path)
+    }
+
+    /// The member's bytes: its text, else its decoded base64, else none at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns the decode error when `content_b64` is not standard base64.
+    pub fn bytes(&self) -> Result<Vec<u8>, DecodeError> {
+        match (&self.content, &self.content_b64) {
+            (Some(text), _) => Ok(text.as_bytes().to_vec()),
+            (None, Some(encoded)) => STANDARD.decode(encoded),
+            (None, None) => Ok(Vec::new()),
+        }
+    }
+}
+
 /// A skill bundle: a manifest plus whatever it references.
 ///
 /// The whole folder round-trips. Storing only `SKILL.md` breaks every skill
@@ -110,6 +144,19 @@ impl Skill {
     #[must_use]
     pub fn has_manifest(&self) -> bool {
         self.files.iter().any(|f| f.path == Self::MANIFEST)
+    }
+
+    /// Whether the bundle's name is one plain path segment.
+    ///
+    /// The name becomes the folder the bundle is written to when a task runs,
+    /// so a name carrying a separator or a `..` would place it elsewhere.
+    #[must_use]
+    pub fn has_plain_name(&self) -> bool {
+        let mut components = FsPath::new(&self.name).components();
+        matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        )
     }
 }
 
@@ -247,13 +294,47 @@ pub async fn discover(state: &SharedState) -> Vec<Discovered> {
     found
 }
 
+/// The harness `id` names, with the installed base that runs it.
+///
+/// A configured harness is looked up first and runs on the discovered harness
+/// whose base it names, carrying its own id, skills, MCP servers and disabled
+/// tools; its default model falls back to that base's when it names none.
+/// Anything else is looked up among the discovered harnesses. `None` when
+/// the id names neither, or names a configured harness whose base is no longer
+/// installed.
+pub async fn resolve(state: &UhpState, id: &str) -> Option<Discovered> {
+    let found = discover(&state.shared).await;
+    let Some(configured) = state.configured.get(id) else {
+        return found.into_iter().find(|d| d.harness.id == id);
+    };
+    let base = found
+        .into_iter()
+        .find(|d| d.harness.base == configured.base)?;
+    Some(Discovered {
+        provider: base.provider,
+        name: base.name,
+        harness: Harness {
+            default_model: configured
+                .default_model
+                .clone()
+                .or(base.harness.default_model),
+            ..configured
+        },
+        models: base.models,
+    })
+}
+
 /// Handle `GET /v1/harnesses`.
-pub async fn list(State(state): State<SharedState>) -> impl IntoResponse {
-    let harnesses = discover(&state)
+///
+/// Every discovered harness, then every configured one: a harness a client
+/// created is as runnable as one discovery found, so it is listed beside them.
+pub async fn list(State(state): State<UhpState>) -> impl IntoResponse {
+    let mut harnesses: Vec<Harness> = discover(&state.shared)
         .await
         .into_iter()
         .map(|d| d.harness)
         .collect();
+    harnesses.extend(state.configured.all());
     Json(HarnessList { harnesses })
 }
 
@@ -310,6 +391,8 @@ pub async fn models(State(state): State<UhpState>) -> impl IntoResponse {
 
 /// Handle `GET /v1/harnesses/{harness_id}/models`.
 ///
+/// A configured harness answers with its base's models.
+///
 /// # Errors
 ///
 /// Answers `404 harness_not_found` when the id names nothing installed.
@@ -317,13 +400,9 @@ pub async fn harness_models(
     State(state): State<UhpState>,
     Path(id): Path<String>,
 ) -> Result<Json<HarnessModels>, UhpFailure> {
-    let d = discover(&state.shared)
-        .await
-        .into_iter()
-        .find(|d| d.harness.id == id)
-        .ok_or_else(|| {
-            UhpFailure::not_found("harness_not_found", "no harness with that id is configured")
-        })?;
+    let d = resolve(&state, &id).await.ok_or_else(|| {
+        UhpFailure::not_found("harness_not_found", "no harness with that id is configured")
+    })?;
 
     let name = d.name;
     let default = d.harness.default_model.unwrap_or_default();

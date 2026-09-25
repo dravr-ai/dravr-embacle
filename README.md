@@ -292,6 +292,10 @@ catalog. UHP serves that catalogue over a standard wire format, so anything that
 protocol can drive Claude Code, Codex, Gemini CLI or any other supported harness through this
 server without knowing which one it is talking to.
 
+The UHP surface is built for clients outside this repository: embacle is public, and anyone may run
+`embacle-server` as their UHP runner. No dravr service calls it — dravr-platform uses embacle as a
+library — so its contract is kept for those external users.
+
 ### It sits beside the OpenAI API, not instead of it
 
 Both surfaces define `GET /v1/models` and the bodies are incompatible — the OpenAI API answers a
@@ -348,6 +352,10 @@ A task runs in its own session working folder, so files the harness writes are c
 artifacts and downloaded with `X-Content-Type-Options: nosniff` — an artifact is content a model was
 steered into producing, and must never render as a page on this origin. Deleting a session removes
 that folder, so an artifact never outlives what produced it.
+
+A harness you configure over `POST /v1/harnesses` runs tasks like a discovered one, with its skills,
+MCP servers and disabled tools applied to the CLI underneath; a setting that CLI has no way to apply
+refuses the task with `unsupported_harness_setting` instead of being dropped.
 
 Full endpoint table, authentication rules, artifact handling and harness configuration are in
 [docs/uhp.md](docs/uhp.md).

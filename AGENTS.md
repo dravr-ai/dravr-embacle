@@ -178,6 +178,7 @@ Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Conti
 - **Text tool simulation** — XML-based `<tool_call>` protocol for CLI runners without native function calling
 - **Config file** — TOML-based declarative configuration (feature flag: `config-file`)
 - **Capability guard** — request/provider capability validation
+- **Unified Harness Protocol server** (`embacle-server`, `crates/embacle-server/src/uhp/`) — every installed runner served as a UHP harness, plus harnesses configured over the API whose skills, MCP servers and disabled tools apply to each task (see `docs/uhp.md`). **Externally consumed:** embacle is public and third parties run this server as their UHP runner; no dravr service calls it (dravr-platform uses embacle as a library). Keep it conformant and never remove it for lack of an in-fleet caller.
 
 ### Architecture
 ```
