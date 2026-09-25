@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.0] — 2026-09-25
+
+### Other
+
+- chore(deps): dravr-tronc 2.0.0; ungranted tools answer -32602
+- refactor: bool::ok_or_else in the content-length guardrail (Rust 1.98)
+
+
+
 ## [0.29.1] — 2026-09-25
 
 ### Fixed
