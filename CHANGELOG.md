@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.0] — 2026-09-26
+
+### Fixed
+
+- fix(uhp): configured harnesses run with their skills, MCP and tools
+
+### Other
+
+- chore(deps): bump dravr-tronc 2.0.0 -> 2.1.0
+
+
+
 ## [0.30.0] — 2026-09-25
 
 ### Other
