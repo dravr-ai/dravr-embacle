@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.32.0] — 2026-09-27
+
+### Added
+
+- feat(quota): GitHub rate limit as absolute remaining/limit/reset
+- feat(tools): FunctionCall serializes as {name, args}
+
+
+
 ## [0.31.0] — 2026-09-26
 
 ### Fixed
