@@ -48,7 +48,20 @@ async fn main() {
         None => println!("\n=== anthropic-usage ===\n  CLAUDE_CODE_OAUTH_TOKEN not set"),
     }
     match GithubHeadroomChecker::from_env() {
-        Some(c) => report(&c).await,
-        None => println!("\n=== github-headroom ===\n  GITHUB_TOKEN / GH_TOKEN not set"),
+        Some(c) => {
+            report(&c).await;
+            match c.rate_limit().await {
+                Ok(rl) => println!(
+                    "  {} of {} requests remaining, resets {}",
+                    rl.remaining,
+                    rl.limit,
+                    in_words(rl.resets_at)
+                ),
+                Err(e) => println!("  rate_limit failed: {e}"),
+            }
+        }
+        None => println!(
+            "\n=== github-headroom ===\n  COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN not set"
+        ),
     }
 }

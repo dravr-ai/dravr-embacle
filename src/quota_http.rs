@@ -35,6 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::copilot_common::resolve_github_token;
 use crate::quota::{parse_anthropic_usage, Cooldown, LimitChecker, QuotaSnapshot};
 use crate::types::RunnerError;
 
@@ -257,70 +258,39 @@ impl GithubHeadroomChecker {
         self
     }
 
-    /// Read the token from `GITHUB_TOKEN` or `GH_TOKEN`, if either is set.
+    /// Read the token the Copilot providers authenticate with, if it is set.
+    ///
+    /// Resolved by [`resolve_github_token`] in the Copilot runtime's own
+    /// precedence — `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+    /// `GITHUB_TOKEN` — so the headroom measured is the headroom of the token
+    /// the Copilot calls actually spend, not of some other token that happens
+    /// to be in the environment.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        env::var("GITHUB_TOKEN")
-            .or_else(|_| env::var("GH_TOKEN"))
-            .ok()
+        resolve_github_token()
             .filter(|t| !t.trim().is_empty())
             .map(Self::new)
     }
-}
 
-/// Map a `/rate_limit` payload to the single headroom window.
-///
-/// Split out so the mapping is testable without a network.
-///
-/// # Errors
-///
-/// Returns an error when `resources.core` is missing or malformed — a shape
-/// change, which must not read as full headroom.
-pub fn parse_github_rate_limit(
-    body: &Value,
-    observed_at: SystemTime,
-) -> Result<Vec<QuotaSnapshot>, RunnerError> {
-    let core = body
-        .get("resources")
-        .and_then(|r| r.get("core"))
-        .ok_or_else(|| {
-            RunnerError::external_service(
-                "github-headroom",
-                "rate_limit response carried no resources.core",
-            )
-        })?;
-
-    let limit = core.get("limit").and_then(Value::as_u64).unwrap_or(0);
-    let used = core.get("used").and_then(Value::as_u64).unwrap_or(0);
-    let reset = core.get("reset").and_then(Value::as_u64).ok_or_else(|| {
-        RunnerError::external_service("github-headroom", "rate_limit core carried no reset")
-    })?;
-
-    // A zero limit would divide to nothing; report it as fully consumed rather
-    // than as infinite headroom, because a missing limit is not permission.
-    #[allow(clippy::cast_precision_loss)]
-    let percent = if limit == 0 {
-        100.0
-    } else {
-        (used as f32 / limit as f32) * 100.0
-    };
-
-    Ok(vec![QuotaSnapshot {
-        key: "github_core".to_owned(),
-        label: "GitHub core rate limit (Copilot proxy)".to_owned(),
-        percent,
-        resets_at: UNIX_EPOCH + Duration::from_secs(reset),
-        observed_at,
-    }])
-}
-
-#[async_trait]
-impl LimitChecker for GithubHeadroomChecker {
-    fn name(&self) -> &str {
-        "github-headroom"
-    }
-
-    async fn check(&self) -> Result<Vec<QuotaSnapshot>, RunnerError> {
+    /// Read the core rate limit as absolute counts: remaining, limit, reset.
+    ///
+    /// The same reading [`LimitChecker::check`] reports as a percentage, for
+    /// a caller that needs an absolute floor ("stop below 200 remaining")
+    /// rather than a share. The figures describe the token this checker was
+    /// built with; build it with [`GithubHeadroomChecker::from_env`], or with
+    /// the value of `COPILOT_GITHUB_TOKEN` (the variable the Copilot
+    /// providers pass to their runtime), so the count is that of the token
+    /// Copilot's session-token exchange draws on.
+    ///
+    /// This is still the GitHub core pool, a **proxy** for Copilot capacity
+    /// and never a premium-request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endpoint is unreachable, answers non-2xx, or
+    /// answers a shape without `resources.core` or its `reset` — a failed
+    /// read is never reported as full headroom.
+    pub async fn rate_limit(&self) -> Result<GithubRateLimit, RunnerError> {
         let response = self
             .client
             .get(&self.url)
@@ -341,7 +311,118 @@ impl LimitChecker for GithubHeadroomChecker {
             .json()
             .await
             .map_err(|e| RunnerError::external_service("github-headroom", e.to_string()))?;
-        parse_github_rate_limit(&body, SystemTime::now())
+        parse_github_rate_limit_counts(&body)
+    }
+}
+
+/// The GitHub core rate limit as absolute counts, as the API stated them.
+///
+/// A **proxy** for Copilot capacity (see [`GithubHeadroomChecker`]), read on
+/// the token the checker holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GithubRateLimit {
+    /// Requests left in the current window.
+    pub remaining: u64,
+    /// Requests the window allows in total.
+    pub limit: u64,
+    /// Requests already spent in the current window.
+    pub used: u64,
+    /// When GitHub said the window resets. Never computed locally.
+    pub resets_at: SystemTime,
+}
+
+impl GithubRateLimit {
+    /// Share of the window consumed, 0-100.
+    ///
+    /// A zero limit reads as fully consumed rather than as infinite
+    /// headroom, because a missing limit is not permission.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn percent_used(&self) -> f32 {
+        if self.limit == 0 {
+            100.0
+        } else {
+            (self.used as f32 / self.limit as f32) * 100.0
+        }
+    }
+}
+
+/// Map a `/rate_limit` payload to absolute core counts.
+///
+/// Split out so the mapping is testable without a network. A missing
+/// `remaining` is derived as `limit - used`, and a missing `limit` or `used`
+/// counts as zero, so an incomplete payload reads as exhausted, never as
+/// full headroom.
+///
+/// # Errors
+///
+/// Returns an error when `resources.core` or its `reset` is missing — a
+/// shape change, which must not read as full headroom.
+pub fn parse_github_rate_limit_counts(body: &Value) -> Result<GithubRateLimit, RunnerError> {
+    let core = body
+        .get("resources")
+        .and_then(|r| r.get("core"))
+        .ok_or_else(|| {
+            RunnerError::external_service(
+                "github-headroom",
+                "rate_limit response carried no resources.core",
+            )
+        })?;
+
+    let limit = core.get("limit").and_then(Value::as_u64).unwrap_or(0);
+    let used = core.get("used").and_then(Value::as_u64).unwrap_or(0);
+    let remaining = core
+        .get("remaining")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| limit.saturating_sub(used));
+    let reset = core.get("reset").and_then(Value::as_u64).ok_or_else(|| {
+        RunnerError::external_service("github-headroom", "rate_limit core carried no reset")
+    })?;
+
+    Ok(GithubRateLimit {
+        remaining,
+        limit,
+        used,
+        resets_at: UNIX_EPOCH + Duration::from_secs(reset),
+    })
+}
+
+/// Map a `/rate_limit` payload to the single headroom window.
+///
+/// Split out so the mapping is testable without a network.
+///
+/// # Errors
+///
+/// Returns an error when `resources.core` is missing or malformed — a shape
+/// change, which must not read as full headroom.
+pub fn parse_github_rate_limit(
+    body: &Value,
+    observed_at: SystemTime,
+) -> Result<Vec<QuotaSnapshot>, RunnerError> {
+    let counts = parse_github_rate_limit_counts(body)?;
+    Ok(vec![github_core_snapshot(&counts, observed_at)])
+}
+
+/// The single `github_core` window a set of counts reads as.
+fn github_core_snapshot(counts: &GithubRateLimit, observed_at: SystemTime) -> QuotaSnapshot {
+    QuotaSnapshot {
+        key: "github_core".to_owned(),
+        label: "GitHub core rate limit (Copilot proxy)".to_owned(),
+        percent: counts.percent_used(),
+        resets_at: counts.resets_at,
+        observed_at,
+    }
+}
+
+#[async_trait]
+impl LimitChecker for GithubHeadroomChecker {
+    fn name(&self) -> &str {
+        "github-headroom"
+    }
+
+    async fn check(&self) -> Result<Vec<QuotaSnapshot>, RunnerError> {
+        let counts = self.rate_limit().await?;
+        Ok(vec![github_core_snapshot(&counts, SystemTime::now())])
     }
 }
 
