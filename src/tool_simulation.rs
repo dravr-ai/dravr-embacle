@@ -79,8 +79,9 @@ pub type FunctionDeclaration = ToolDefinition;
 /// A parsed tool call extracted from LLM text output.
 ///
 /// Produced by [`parse_tool_call_blocks()`] when an LLM response contains
-/// `<tool_call>` XML blocks.
-#[derive(Debug, Clone)]
+/// `<tool_call>` XML blocks. Serializes as `{"name": …, "args": …}`, so a
+/// host can persist or forward a call without a copy of this type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionCall {
     /// Name of the function to call
     pub name: String,
