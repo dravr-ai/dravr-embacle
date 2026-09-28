@@ -1,3 +1,6 @@
+# ABOUTME: Cuts an embacle release through dravr-build-config's release-crate.yml, called twice
+# ABOUTME: Bump and tag first; binaries, image and crates.io only once all four platforms built
+
 name: Release
 
 on:
@@ -20,135 +23,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  version:
-    name: Bump Version & Tag
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.bump.outputs.version }}
-      prev_tag: ${{ steps.bump.outputs.prev_tag }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@1.98.1
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump version
-        id: bump
-        run: |
-          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          IFS='.' read -r major minor patch <<< "$CURRENT"
-
-          case "${{ inputs.bump }}" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-
-          VERSION="${major}.${minor}.${patch}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Bumping ${CURRENT} → ${VERSION}"
-
-          # Previous tag for changelog range
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
-
-          # Update root crate version (first occurrence only)
-          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${VERSION}\"/" Cargo.toml
-
-          # Update subcrate package versions
-          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/embacle-mcp/Cargo.toml
-          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
-          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/embacle-tool-host/Cargo.toml
-
-          # Update dependency version references in subcrates
-          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/embacle-mcp/Cargo.toml
-          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
-          sed -i "s/embacle-mcp = { path = \"\.\.\/embacle-mcp\", version = \"[^\"]*\"/embacle-mcp = { path = \"\.\.\/embacle-mcp\", version = \"${VERSION}\"/" crates/embacle-server/Cargo.toml
-          # tool-host pins the root twice: a dependency and a dev-dependency for
-          # its live examples. Both lines match, and each is rewritten.
-          sed -i "s/embacle = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/embacle = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/embacle-tool-host/Cargo.toml
-
-      - name: Update lockfile
-        run: cargo generate-lockfile
-
-      - name: Generate changelog
-        run: |
-          VERSION="${{ steps.bump.outputs.version }}"
-          PREV_TAG="${{ steps.bump.outputs.prev_tag }}"
-          DATE=$(date +%Y-%m-%d)
-
-          if [ -z "$PREV_TAG" ]; then
-            RANGE="HEAD"
-          else
-            RANGE="${PREV_TAG}..HEAD"
-          fi
-
-          FEATURES=""
-          FIXES=""
-          OTHER=""
-
-          while IFS= read -r msg; do
-            [ -z "$msg" ] && continue
-            case "$msg" in
-              feat:*|feat\(*) FEATURES="${FEATURES}- ${msg}\n" ;;
-              fix:*|fix\(*)   FIXES="${FIXES}- ${msg}\n" ;;
-              docs:*|chore:*|test:*|ci:*|release:*) ;;
-              *) OTHER="${OTHER}- ${msg}\n" ;;
-            esac
-          done < <(git log "${RANGE}" --pretty=format:"%s" --no-merges)
-
-          BODY=""
-          [ -n "$FEATURES" ] && BODY="${BODY}### Added\n\n${FEATURES}\n"
-          [ -n "$FIXES" ]    && BODY="${BODY}### Fixed\n\n${FIXES}\n"
-          [ -n "$OTHER" ]    && BODY="${BODY}### Other\n\n${OTHER}\n"
-
-          HEADER="## [${VERSION}] — ${DATE}"
-
-          if [ -f CHANGELOG.md ]; then
-            TMPFILE=$(mktemp)
-            echo "# Changelog" > "$TMPFILE"
-            echo "" >> "$TMPFILE"
-            echo "$HEADER" >> "$TMPFILE"
-            echo "" >> "$TMPFILE"
-            echo -e "$BODY" >> "$TMPFILE"
-            tail -n +2 CHANGELOG.md >> "$TMPFILE"
-            mv "$TMPFILE" CHANGELOG.md
-          else
-            {
-              echo "# Changelog"
-              echo ""
-              echo "$HEADER"
-              echo ""
-              echo -e "$BODY"
-            } > CHANGELOG.md
-          fi
-
-      - name: Update README version
-        run: |
-          VERSION="${{ steps.bump.outputs.version }}"
-          MAJOR_MINOR="${VERSION%.*}"
-          if [ -f README.md ]; then
-            sed -i "s/embacle = { version = \"[0-9]*\.[0-9]*\"/embacle = { version = \"${MAJOR_MINOR}\"/" README.md
-            sed -i "s/embacle = \"[0-9]*\.[0-9]*\"/embacle = \"${MAJOR_MINOR}\"/" README.md
-          fi
-
-      - name: Commit, tag, push
-        run: |
-          VERSION="${{ steps.bump.outputs.version }}"
-          git add -A
-          git commit -m "release: v${VERSION}"
-          git tag "v${VERSION}"
-          git push origin main --tags
+  # Bumps the four crates in lockstep, commits, pushes main and the tag atomically,
+  # and creates the GitHub release the binaries below attach to. Nothing is published
+  # yet: crates.io waits for the build on every platform (see publish).
+  release:
+    name: Bump, tag and release
+    uses: dravr-ai/dravr-build-config/.github/workflows/release-crate.yml@main
+    with:
+      bump: ${{ inputs.bump }}
+      members: crates/embacle-mcp crates/embacle-server crates/embacle-tool-host
 
   build:
     name: Build (${{ matrix.target }})
-    needs: version
+    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -169,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: v${{ needs.version.outputs.version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -183,7 +70,7 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          VERSION="${{ needs.version.outputs.version }}"
+          VERSION="${{ needs.release.outputs.version }}"
           TARGET="${{ matrix.target }}"
           DIR="embacle-v${VERSION}-${TARGET}"
           mkdir "$DIR"
@@ -195,7 +82,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $VERSION = "${{ needs.version.outputs.version }}"
+          $VERSION = "${{ needs.release.outputs.version }}"
           $TARGET = "${{ matrix.target }}"
           $DIR = "embacle-v${VERSION}-${TARGET}"
           New-Item -ItemType Directory -Path $DIR
@@ -212,12 +99,12 @@ jobs:
 
   docker:
     name: Docker Image
-    needs: version
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: v${{ needs.version.outputs.version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - uses: docker/setup-buildx-action@v4
 
@@ -232,69 +119,16 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/dravr-ai/embacle:${{ needs.version.outputs.version }}
+            ghcr.io/dravr-ai/embacle:${{ needs.release.outputs.version }}
             ghcr.io/dravr-ai/embacle:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  publish:
-    name: Publish Release
-    needs: [version, build]
+  attach-binaries:
+    name: Attach binaries to the GitHub release
+    needs: [release, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: v${{ needs.version.outputs.version }}
-
-      - uses: dtolnay/rust-toolchain@1.98.1
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        # Each cargo publish call is wrapped in a helper that lets the
-        # benign "this version is already published" error through (e.g.
-        # workflow re-run after a partial publish) while still failing
-        # the job on every other error. The previous `|| echo "...continuing"`
-        # form swallowed real auth, version, and verification failures and
-        # is why crates.io drifted ~12 versions behind the git tags.
-        run: |
-          set -euo pipefail
-
-          publish_crate() {
-            local pkg="$1"
-            echo "::group::cargo publish -p ${pkg}"
-            if cargo publish -p "${pkg}" 2>&1 | tee /tmp/publish-${pkg}.log; then
-              echo "::endgroup::"
-              return 0
-            fi
-            echo "::endgroup::"
-            # Treat ONLY "crate version is already uploaded" as benign —
-            # everything else (bad token, missing dep, verify fail, etc.)
-            # must surface as a red workflow.
-            if grep -q "is already uploaded" /tmp/publish-${pkg}.log; then
-              echo "::warning::${pkg} version already on crates.io — skipping"
-              return 0
-            fi
-            echo "::error::cargo publish -p ${pkg} failed; see log above"
-            return 1
-          }
-
-          publish_crate embacle
-          echo "Waiting for crates.io to index embacle..."
-          sleep 30
-
-          publish_crate embacle-mcp
-          echo "Waiting for crates.io to index embacle-mcp..."
-          sleep 30
-
-          publish_crate embacle-server
-          echo "Waiting for crates.io to index embacle-server..."
-          sleep 30
-
-          # Depends on the root crate only, so it goes last — by now the root
-          # has had well over a minute to index.
-          publish_crate embacle-tool-host
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -302,17 +136,31 @@ jobs:
           pattern: embacle-*
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Attach to the GitHub Release
+        # The release job created the release, with its notes; this only adds files.
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: v${{ needs.version.outputs.version }}
-          body_path: CHANGELOG.md
+          tag_name: v${{ needs.release.outputs.version }}
           files: artifacts/*
+
+  # The same shared workflow in tag mode: it publishes the tag the release job pushed,
+  # and nothing else. Called separately so crates.io only ever carries a version that
+  # built on all four platforms. Each crate goes after the ones it depends on; a re-run
+  # skips any crate already on the registry, and every other failure fails the job.
+  publish:
+    name: Publish to crates.io
+    needs: [release, build]
+    uses: dravr-ai/dravr-build-config/.github/workflows/release-crate.yml@main
+    with:
+      tag: v${{ needs.release.outputs.version }}
+      publish: embacle embacle-mcp embacle-server embacle-tool-host
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-homebrew:
     name: Update Homebrew
-    needs: [version, build, publish]
+    # The formula points at the release's assets, so they must be attached first.
+    needs: [release, build, publish, attach-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -332,7 +180,7 @@ jobs:
 
       - name: Update formula
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           SHA_ARM=$(shasum -a 256 artifacts/embacle-v${VERSION}-aarch64-apple-darwin.tar.gz | awk '{print $1}')
           SHA_X86_MAC=$(shasum -a 256 artifacts/embacle-v${VERSION}-x86_64-apple-darwin.tar.gz | awk '{print $1}')
@@ -380,7 +228,7 @@ jobs:
 
       - name: Compute source tarball SHA for FFI formula
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           curl -sL "https://github.com/dravr-ai/dravr-embacle/archive/refs/tags/v${VERSION}.tar.gz" -o source.tar.gz
           SHA_SRC=$(shasum -a 256 source.tar.gz | awk '{print $1}')
@@ -416,7 +264,7 @@ jobs:
 
       - name: Commit and push
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -431,10 +279,10 @@ jobs:
   # and pass the released version for an exact version-match check.
   validate-homebrew:
     name: Validate Homebrew install
-    needs: [version, update-homebrew]
+    needs: [release, update-homebrew]
     uses: ./.github/workflows/homebrew.yml
     with:
-      version: ${{ needs.version.outputs.version }}
+      version: ${{ needs.release.outputs.version }}
 
   # ---------------------------------------------------------------------------
   # Tell dravr-platform this release exists, so its six pins stop drifting.
@@ -451,8 +299,8 @@ jobs:
   # rather than the primary signal.
   notify-platform:
     name: Announce the release to dravr-platform
-    needs: [version, publish]
+    needs: [release, publish]
     uses: ./.github/workflows/notify-platform-release.yml
     secrets: inherit
     with:
-      version: ${{ needs.version.outputs.version }}
+      version: ${{ needs.release.outputs.version }}
