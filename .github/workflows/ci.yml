@@ -123,7 +123,7 @@ jobs:
       # Restored before the server starts, so it opens a store that already
       # holds the weights and its startup prune sees their manifests.
       - name: Cache Ollama model store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ollama/models
           key: ollama-qwen2.5-3b-instruct-q4_K_M-v1
