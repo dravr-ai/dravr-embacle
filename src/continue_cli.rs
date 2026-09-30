@@ -44,11 +44,6 @@ impl ContinueCliRunner {
         }
     }
 
-    /// Store a session marker for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the command with all arguments
     fn build_command(&self, prompt: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
@@ -130,23 +125,10 @@ impl LlmProvider for ContinueCliRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
 
-        if let Some(model) = &request.model {
-            if self.base.get_session(model).await.is_some() {
-                cmd.arg("--resume");
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "continue")?;
 
-        let response = Self::parse_json_response(&output.stdout)?;
-
-        // Mark session as active for this model key (Continue uses `--resume` flag)
-        if let Some(model) = &request.model {
-            self.base.set_session(model, "active").await;
-        }
-
-        Ok(response)
+        Self::parse_json_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "continue"))]

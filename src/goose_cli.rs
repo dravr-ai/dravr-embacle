@@ -1,5 +1,5 @@
 // ABOUTME: Goose CLI runner implementing the `LlmProvider` trait
-// ABOUTME: Wraps the `goose` CLI with JSON/stream-JSON output parsing and session resume
+// ABOUTME: Wraps the `goose` CLI with JSON/stream-JSON output parsing, stateless via `--no-session`
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -49,11 +49,6 @@ impl GooseCliRunner {
         Self {
             base: CliRunnerBase::new(config, DEFAULT_MODEL, FALLBACK_MODELS),
         }
-    }
-
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
     }
 
     /// Build the base command with common arguments (without prompt delivery)
@@ -146,12 +141,6 @@ impl LlmProvider for GooseCliRunner {
         let mut cmd = self.build_command_base("json");
         cmd.args(["-i", &prompt_file.path().display().to_string()]);
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--session-id", &sid, "--resume"]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "goose")?;
 
@@ -165,12 +154,6 @@ impl LlmProvider for GooseCliRunner {
 
         let mut cmd = self.build_command_base("stream-json");
         cmd.args(["-i", "-"]);
-
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--session-id", &sid, "--resume"]);
-            }
-        }
 
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());

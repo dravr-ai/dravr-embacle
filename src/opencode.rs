@@ -56,11 +56,6 @@ impl OpenCodeRunner {
         }
     }
 
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the base command with common arguments
     fn build_command(&self, prompt: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
@@ -91,16 +86,13 @@ impl OpenCodeRunner {
     /// - `text`  — content in `part.text`
     /// - `step_finish` — finish reason in `part.reason`, token counts in `part.tokens`
     /// - `step_start` / other — ignored
-    ///
-    /// The `sessionID` from any line is captured for session resumption.
-    fn parse_ndjson_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn parse_ndjson_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("OpenCode output is not valid UTF-8: {e}"))
         })?;
 
         let mut content_parts: Vec<String> = Vec::new();
         let mut usage: Option<TokenUsage> = None;
-        let mut session_id: Option<String> = None;
         let mut finish_reason: Option<String> = None;
 
         for line in text.lines() {
@@ -112,13 +104,6 @@ impl OpenCodeRunner {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-
-            // Capture session ID from any line
-            if session_id.is_none() {
-                if let Some(sid) = value.get("sessionID").and_then(|v| v.as_str()) {
-                    session_id = Some(sid.to_owned());
-                }
-            }
 
             let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match line_type {
@@ -153,16 +138,14 @@ impl OpenCodeRunner {
 
         let content = content_parts.join("");
 
-        let response = ChatResponse {
+        Ok(ChatResponse {
             content,
             model: "opencode".to_owned(),
             usage,
             finish_reason: finish_reason.or_else(|| Some("stop".to_owned())),
             warnings: None,
             tool_calls: None,
-        };
-
-        Ok((response, session_id))
+        })
     }
 }
 
@@ -176,24 +159,10 @@ impl LlmProvider for OpenCodeRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--session", &sid]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "opencode")?;
 
-        let (response, session_id) = Self::parse_ndjson_response(&output.stdout)?;
-
-        if let Some(sid) = session_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &sid).await;
-            }
-        }
-
-        Ok(response)
+        Self::parse_ndjson_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "opencode"))]
@@ -215,9 +184,8 @@ mod tests {
 {"type":"text","timestamp":1772896674817,"sessionID":"ses_abc123","part":{"type":"text","text":"PONG"}}
 {"type":"step_finish","timestamp":1772896674834,"sessionID":"ses_abc123","part":{"type":"step-finish","reason":"stop","tokens":{"total":14976,"input":14963,"output":13,"reasoning":0}}}"#;
 
-        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "PONG");
-        assert_eq!(sid, Some("ses_abc123".to_owned()));
         assert_eq!(resp.finish_reason, Some("stop".to_owned()));
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 14963);
@@ -231,16 +199,15 @@ mod tests {
 {"type":"text","sessionID":"ses_1","part":{"type":"text","text":"World"}}
 {"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop","tokens":{"total":100,"input":80,"output":20}}}"#;
 
-        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello World");
     }
 
     #[test]
     fn test_parse_ndjson_response_empty_output() {
         let ndjson = b"";
-        let (resp, sid) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
-        assert!(sid.is_none());
         assert!(resp.usage.is_none());
     }
 
@@ -249,7 +216,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"OK"}}
 {"type":"step_finish","sessionID":"ses_x","part":{"type":"step-finish","reason":"stop"}}"#;
 
-        let (resp, _) = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = OpenCodeRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
         assert!(resp.usage.is_none());
     }

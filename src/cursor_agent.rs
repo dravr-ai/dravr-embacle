@@ -33,7 +33,6 @@ struct CursorResponse {
     result: Option<String>,
     #[serde(default)]
     is_error: bool,
-    session_id: Option<String>,
     usage: Option<CursorUsage>,
 }
 
@@ -68,11 +67,6 @@ impl CursorAgentRunner {
         }
     }
 
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the base command with common arguments
     fn build_command(&self, prompt: &str, output_format: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
@@ -101,7 +95,7 @@ impl CursorAgentRunner {
     }
 
     /// Parse a Cursor Agent JSON response into a `ChatResponse`
-    fn parse_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn parse_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("Cursor Agent output is not valid UTF-8: {e}"))
         })?;
@@ -138,7 +132,7 @@ impl CursorAgentRunner {
             tool_calls: None,
         };
 
-        Ok((response, parsed.session_id))
+        Ok(response)
     }
 }
 
@@ -156,24 +150,10 @@ impl LlmProvider for CursorAgentRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt, "json");
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "cursor-agent")?;
 
-        let (response, session_id) = Self::parse_response(&output.stdout)?;
-
-        if let Some(sid) = session_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &sid).await;
-            }
-        }
-
-        Ok(response)
+        Self::parse_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "cursor_agent"))]
@@ -181,12 +161,6 @@ impl LlmProvider for CursorAgentRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt, "stream-json");
-
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

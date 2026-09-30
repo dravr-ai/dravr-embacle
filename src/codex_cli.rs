@@ -58,11 +58,6 @@ impl CodexCliRunner {
         }
     }
 
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the base command with common arguments
     fn build_command(&self, prompt: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);

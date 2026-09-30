@@ -11,12 +11,9 @@
 //! uses [`delegate_provider_base!`] to auto-generate the repetitive
 //! [`LlmProvider`](crate::types::LlmProvider) trait methods.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::config::RunnerConfig;
@@ -34,9 +31,14 @@ pub const HEALTH_CHECK_MAX_OUTPUT: usize = 4096;
 
 /// Shared base struct for all CLI runners.
 ///
-/// Holds the common fields (config, model info, session tracking) that every
-/// CLI runner needs. Individual runners wrap this and add only their
-/// command-building and response-parsing logic.
+/// Holds the common fields (config, model info) that every CLI runner needs.
+/// Individual runners wrap this and add only their command-building and
+/// response-parsing logic.
+///
+/// A runner holds no conversation state between calls. Every request carries
+/// its whole history, and one runner instance serves every caller in the
+/// process — so a CLI session id kept here and passed back as `--resume`
+/// would splice one caller's conversation into the next caller's turn.
 pub struct CliRunnerBase {
     /// Runner configuration (binary path, timeout, extra args, etc.)
     pub(crate) config: RunnerConfig,
@@ -44,8 +46,6 @@ pub struct CliRunnerBase {
     pub(crate) default_model: String,
     /// List of available models for this provider
     pub(crate) available_models: Vec<String>,
-    /// Session ID cache keyed by model name (for multi-turn sessions)
-    pub(crate) session_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl CliRunnerBase {
@@ -60,7 +60,6 @@ impl CliRunnerBase {
             config,
             default_model: resolved_model,
             available_models,
-            session_ids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -72,18 +71,6 @@ impl CliRunnerBase {
     /// Get the list of available models
     pub fn available_models(&self) -> &[String] {
         &self.available_models
-    }
-
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        let mut sessions = self.session_ids.lock().await;
-        sessions.insert(key.to_owned(), session_id.to_owned());
-    }
-
-    /// Get a stored session ID
-    pub async fn get_session(&self, key: &str) -> Option<String> {
-        let sessions = self.session_ids.lock().await;
-        sessions.get(key).cloned()
     }
 
     /// Run a `--version` health check against the runner binary.

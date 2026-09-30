@@ -91,18 +91,20 @@ embacle = "0.32"
 
 | Runner | Binary | Features |
 |--------|--------|----------|
-| Claude Code | `claude` | JSON output, streaming, system prompts, session resume |
+| Claude Code | `claude` | JSON output, streaming, system prompts, unsaved sessions (`--no-session-persistence`) |
 | GitHub Copilot | `copilot` | Text parsing, streaming |
 | Cursor Agent | `cursor-agent` | JSON output, streaming, MCP approval |
-| OpenCode | `opencode` | JSON events, session management |
-| Gemini CLI | `gemini` | JSON/stream-JSON output, streaming, session resume |
+| OpenCode | `opencode` | JSON events |
+| Gemini CLI | `gemini` | JSON/stream-JSON output, streaming |
 | Codex CLI | `codex` | JSONL output, streaming, sandboxed exec mode |
 | Goose CLI | `goose` | JSON/stream-JSON output, streaming, no-session mode |
-| Cline CLI | `cline` | NDJSON output, streaming, session resume via task IDs |
+| Cline CLI | `cline` | NDJSON output, streaming |
 | Continue CLI | `cn` | JSON output, single-shot completions |
-| Warp | `oz` | NDJSON output, conversation resume |
+| Warp | `oz` | NDJSON output |
 | Kiro CLI | `kiro-cli` | ANSI-stripped text output, auto model selection |
 | Kilo Code | `kilo` | NDJSON output, streaming, token tracking, 500+ models via Kilo Gateway |
+
+Every CLI runner is stateless: each `complete()` / `complete_stream()` call starts a fresh CLI session and never resumes an earlier one. A request carries its whole conversation, and one runner instance typically serves every caller in a process, so resuming a previous call's session would put one caller's conversation into another caller's context.
 
 ### HTTP API Runners (feature-flagged)
 

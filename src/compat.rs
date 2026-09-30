@@ -38,8 +38,6 @@ bitflags::bitflags! {
         const STREAMING      = 0b0010;
         /// CLI supports system prompt flag
         const SYSTEM_PROMPT  = 0b0100;
-        /// CLI supports session resume
-        const SESSION_RESUME = 0b1000;
     }
 }
 
@@ -82,19 +80,13 @@ impl CliCapabilities {
     pub const fn system_prompt(&self) -> bool {
         self.features.contains(CliFeatureFlags::SYSTEM_PROMPT)
     }
-
-    /// Whether session resume is supported
-    #[must_use]
-    pub const fn session_resume(&self) -> bool {
-        self.features.contains(CliFeatureFlags::SESSION_RESUME)
-    }
 }
 
 /// Detect capabilities of an installed CLI binary
 ///
 /// Runs the binary with `--version` to obtain the version string, then maps
 /// known capabilities for the runner type. Feature flags (JSON output,
-/// streaming, system prompt, session resume) are determined from a static
+/// streaming, system prompt) are determined from a static
 /// capability table keyed by runner type and version.
 ///
 /// # Errors
@@ -278,29 +270,26 @@ const fn compare_versions(actual: (u32, u32, u32), minimum: (u32, u32, u32)) -> 
 #[must_use]
 const fn capabilities_for_runner(runner_type: CliRunnerType) -> CliFeatureFlags {
     match runner_type {
-        // Claude Code: --output-format json, --output-format stream-json, --system-prompt, --continue
+        // Claude Code: --output-format json, --output-format stream-json, --system-prompt
         CliRunnerType::ClaudeCode => CliFeatureFlags::JSON_OUTPUT
             .union(CliFeatureFlags::STREAMING)
-            .union(CliFeatureFlags::SYSTEM_PROMPT)
-            .union(CliFeatureFlags::SESSION_RESUME),
-        // Copilot: plain text output, line-by-line streaming, no --system-prompt, no session resume
+            .union(CliFeatureFlags::SYSTEM_PROMPT),
+        // Copilot: plain text output, line-by-line streaming, no --system-prompt
         CliRunnerType::Copilot => CliFeatureFlags::STREAMING,
-        // Cursor Agent, Gemini CLI, Goose CLI, Cline CLI, Kilo CLI: JSON + streaming, no system prompt, session resume
+        // Cursor Agent, Gemini CLI, Goose CLI, Cline CLI, Kilo CLI: JSON + streaming, no system prompt
         CliRunnerType::CursorAgent
         | CliRunnerType::GeminiCli
         | CliRunnerType::GooseCli
         | CliRunnerType::ClineCli
-        | CliRunnerType::KiloCli => CliFeatureFlags::JSON_OUTPUT
-            .union(CliFeatureFlags::STREAMING)
-            .union(CliFeatureFlags::SESSION_RESUME),
-        // OpenCode, Continue CLI, Warp oz: JSON output, no streaming, session resume
+        | CliRunnerType::KiloCli => CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::STREAMING),
+        // OpenCode, Continue CLI, Warp oz: JSON output, no streaming
         CliRunnerType::OpenCode | CliRunnerType::ContinueCli | CliRunnerType::WarpCli => {
-            CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::SESSION_RESUME)
+            CliFeatureFlags::JSON_OUTPUT
         }
         // Codex CLI: --json (JSONL), streaming via JSONL events
         CliRunnerType::CodexCli => CliFeatureFlags::JSON_OUTPUT.union(CliFeatureFlags::STREAMING),
-        // Kiro CLI: plain text output (no JSON), no streaming, session resume via --resume
-        CliRunnerType::KiroCli => CliFeatureFlags::SESSION_RESUME,
+        // Kiro CLI: plain text output (no JSON), no streaming
+        CliRunnerType::KiroCli => CliFeatureFlags::empty(),
         // Copilot Headless: ACP protocol, not a CLI runner — capabilities managed by LlmProvider
         #[cfg(feature = "copilot-headless")]
         CliRunnerType::CopilotHeadless => CliFeatureFlags::JSON_OUTPUT
@@ -378,7 +367,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -387,7 +375,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -396,7 +383,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(!flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -405,7 +391,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -426,7 +411,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -435,7 +419,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(!flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -444,7 +427,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -453,7 +435,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]
@@ -462,7 +443,6 @@ mod tests {
         assert!(flags.contains(CliFeatureFlags::JSON_OUTPUT));
         assert!(!flags.contains(CliFeatureFlags::STREAMING));
         assert!(!flags.contains(CliFeatureFlags::SYSTEM_PROMPT));
-        assert!(flags.contains(CliFeatureFlags::SESSION_RESUME));
     }
 
     #[test]

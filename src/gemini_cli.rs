@@ -1,5 +1,5 @@
 // ABOUTME: Gemini CLI runner implementing the `LlmProvider` trait
-// ABOUTME: Wraps the `gemini` CLI with JSON/stream-JSON output parsing and session resume
+// ABOUTME: Wraps the `gemini` CLI with JSON/stream-JSON output parsing, one fresh session per call
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -31,7 +31,6 @@ use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     response: Option<String>,
-    session_id: Option<String>,
     #[serde(default)]
     stats: Option<GeminiStats>,
 }
@@ -79,11 +78,6 @@ impl GeminiCliRunner {
         }
     }
 
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the base command with common arguments
     fn build_command(&self, prompt: &str, output_format: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
@@ -114,7 +108,7 @@ impl GeminiCliRunner {
     /// Parse JSONL output from Gemini CLI for non-streaming complete mode.
     ///
     /// Scans through JSONL lines looking for assistant messages and result stats.
-    fn parse_jsonl_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn parse_jsonl_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("Gemini CLI output is not valid UTF-8: {e}"))
         })?;
@@ -128,22 +122,18 @@ impl GeminiCliRunner {
                 let total = s.total.unwrap_or(input + output);
                 TokenUsage::new(input, output, total)
             });
-            return Ok((
-                ChatResponse {
-                    content,
-                    model: "gemini".to_owned(),
-                    usage,
-                    finish_reason: Some("stop".to_owned()),
-                    warnings: None,
-                    tool_calls: None,
-                },
-                parsed.session_id,
-            ));
+            return Ok(ChatResponse {
+                content,
+                model: "gemini".to_owned(),
+                usage,
+                finish_reason: Some("stop".to_owned()),
+                warnings: None,
+                tool_calls: None,
+            });
         }
 
         // Fall back to JSONL parsing
         let mut content_parts: Vec<String> = Vec::new();
-        let mut session_id: Option<String> = None;
         let mut usage: Option<TokenUsage> = None;
 
         for line in text.lines() {
@@ -158,11 +148,6 @@ impl GeminiCliRunner {
 
             let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match line_type {
-                "init" => {
-                    if let Some(sid) = value.get("session_id").and_then(|v| v.as_str()) {
-                        session_id = Some(sid.to_owned());
-                    }
-                }
                 "message" => {
                     let role = value.get("role").and_then(|v| v.as_str()).unwrap_or("");
                     if role == "assistant" {
@@ -197,17 +182,14 @@ impl GeminiCliRunner {
         }
 
         let content = content_parts.join("");
-        Ok((
-            ChatResponse {
-                content,
-                model: "gemini".to_owned(),
-                usage,
-                finish_reason: Some("stop".to_owned()),
-                warnings: None,
-                tool_calls: None,
-            },
-            session_id,
-        ))
+        Ok(ChatResponse {
+            content,
+            model: "gemini".to_owned(),
+            usage,
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        })
     }
 }
 
@@ -225,24 +207,10 @@ impl LlmProvider for GeminiCliRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt, "json");
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "gemini")?;
 
-        let (response, session_id) = Self::parse_jsonl_response(&output.stdout)?;
-
-        if let Some(sid) = session_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &sid).await;
-            }
-        }
-
-        Ok(response)
+        Self::parse_jsonl_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "gemini"))]
@@ -250,12 +218,6 @@ impl LlmProvider for GeminiCliRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt, "stream-json");
-
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -339,9 +301,8 @@ mod tests {
     #[test]
     fn test_parse_single_json_response() {
         let json = br#"{"session_id":"abc123","response":"hello from gemini","stats":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}"#;
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
+        let resp = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from gemini");
-        assert_eq!(sid, Some("abc123".to_owned()));
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
@@ -351,9 +312,8 @@ mod tests {
     #[test]
     fn test_parse_single_json_response_no_stats() {
         let json = br#"{"response":"hello"}"#;
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
+        let resp = GeminiCliRunner::parse_jsonl_response(json).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello");
-        assert!(sid.is_none());
         assert!(resp.usage.is_none());
     }
 
@@ -365,9 +325,8 @@ mod tests {
 {\"type\":\"message\",\"role\":\"assistant\",\"content\":\"hello from gemini\",\"delta\":true}
 {\"type\":\"result\",\"status\":\"success\",\"stats\":{\"total_tokens\":8628,\"input_tokens\":100,\"output_tokens\":50}}
 ";
-        let (resp, sid) = GeminiCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
+        let resp = GeminiCliRunner::parse_jsonl_response(jsonl).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from gemini");
-        assert_eq!(sid, Some("sess-42".to_owned()));
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 50);

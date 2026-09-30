@@ -51,7 +51,7 @@ struct KiloTokens {
 /// Implements `LlmProvider` by delegating to the `kilo` binary with
 /// `run --auto --format json`. Output is NDJSON with event types:
 /// `text` (content), `step_finish` (tokens/cost), `tool_use`, `error`.
-/// Session resume via `--session <id>`.
+/// Every call starts a fresh session; none is ever resumed.
 pub struct KiloCliRunner {
     base: CliRunnerBase,
 }
@@ -63,11 +63,6 @@ impl KiloCliRunner {
         Self {
             base: CliRunnerBase::new(config, DEFAULT_MODEL, FALLBACK_MODELS),
         }
-    }
-
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
     }
 
     /// Build the command with all arguments
@@ -101,16 +96,13 @@ impl KiloCliRunner {
     /// - `step_finish` — finish reason in `part.reason`, token counts in `part.tokens`, cost in `part.cost`
     /// - `error` — error info in `error.name` and `error.data.message`
     /// - `step_start`, `tool_use`, `reasoning` — ignored
-    ///
-    /// The `sessionID` from any line is captured for session resumption.
-    fn parse_ndjson_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn parse_ndjson_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("Kilo CLI output is not valid UTF-8: {e}"))
         })?;
 
         let mut content_parts: Vec<String> = Vec::new();
         let mut usage: Option<TokenUsage> = None;
-        let mut session_id: Option<String> = None;
         let mut finish_reason: Option<String> = None;
         let mut error_message: Option<String> = None;
 
@@ -123,13 +115,6 @@ impl KiloCliRunner {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-
-            // Capture session ID from any line
-            if session_id.is_none() {
-                if let Some(sid) = value.get("sessionID").and_then(|v| v.as_str()) {
-                    session_id = Some(sid.to_owned());
-                }
-            }
 
             let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match line_type {
@@ -179,16 +164,14 @@ impl KiloCliRunner {
 
         let content = content_parts.join("");
 
-        let response = ChatResponse {
+        Ok(ChatResponse {
             content,
             model: "kilo".to_owned(),
             usage,
             finish_reason: finish_reason.or_else(|| Some("stop".to_owned())),
             warnings: None,
             tool_calls: None,
-        };
-
-        Ok((response, session_id))
+        })
     }
 }
 
@@ -202,24 +185,10 @@ impl LlmProvider for KiloCliRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--session", &sid]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "kilo")?;
 
-        let (response, session_id) = Self::parse_ndjson_response(&output.stdout)?;
-
-        if let Some(sid) = session_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &sid).await;
-            }
-        }
-
-        Ok(response)
+        Self::parse_ndjson_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "kilo"))]
@@ -227,12 +196,6 @@ impl LlmProvider for KiloCliRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
-
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--session", &sid]);
-            }
-        }
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -334,9 +297,8 @@ mod tests {
 {"type":"text","timestamp":1710000001000,"sessionID":"ses_kilo1","part":{"type":"text","text":"Hello from Kilo!"}}
 {"type":"step_finish","timestamp":1710000002000,"sessionID":"ses_kilo1","part":{"type":"step-finish","reason":"endTurn","cost":0.0042,"tokens":{"total":1500,"input":1000,"output":400,"reasoning":100}}}"#;
 
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello from Kilo!");
-        assert_eq!(sid, Some("ses_kilo1".to_owned()));
         assert_eq!(resp.finish_reason, Some("endTurn".to_owned()));
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 1000);
@@ -350,16 +312,15 @@ mod tests {
 {"type":"text","sessionID":"ses_k2","part":{"type":"text","text":"World"}}
 {"type":"step_finish","sessionID":"ses_k2","part":{"type":"step-finish","reason":"stop","tokens":{"total":100,"input":80,"output":20}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Hello World");
     }
 
     #[test]
     fn test_parse_ndjson_response_empty_output() {
         let ndjson = b"";
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
-        assert!(sid.is_none());
         assert!(resp.usage.is_none());
     }
 
@@ -368,7 +329,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k3","part":{"type":"text","text":"OK"}}
 {"type":"step_finish","sessionID":"ses_k3","part":{"type":"step-finish","reason":"stop"}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "OK");
         assert!(resp.usage.is_none());
     }
@@ -388,7 +349,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k5","part":{"type":"text","text":"partial response"}}
 {"type":"error","sessionID":"ses_k5","error":{"name":"ContextOverflowError","data":{"message":"context too long"}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "partial response");
     }
 
@@ -399,9 +360,8 @@ mod tests {
 {"type":"text","timestamp":1710000002000,"sessionID":"ses_k6","part":{"type":"text","text":"Listed files."}}
 {"type":"step_finish","timestamp":1710000003000,"sessionID":"ses_k6","part":{"type":"step-finish","reason":"endTurn","tokens":{"input":500,"output":50}}}"#;
 
-        let (resp, sid) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "Listed files.");
-        assert_eq!(sid, Some("ses_k6".to_owned()));
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 500);
         assert_eq!(usage.completion_tokens, 50);
@@ -413,7 +373,7 @@ mod tests {
         let ndjson = br#"{"type":"text","sessionID":"ses_k7","part":{"type":"text","text":"result"}}
 {"type":"step_finish","sessionID":"ses_k7","part":{"type":"step-finish","reason":"stop","tokens":{"input":200,"output":50,"reasoning":100,"total":350}}}"#;
 
-        let (resp, _) = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = KiloCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "result");
         let usage = resp.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.total_tokens, 350);

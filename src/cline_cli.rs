@@ -1,5 +1,5 @@
 // ABOUTME: Cline CLI runner implementing the `LlmProvider` trait
-// ABOUTME: Wraps the `cline` CLI with NDJSON output parsing and session resume via task IDs
+// ABOUTME: Wraps the `cline` CLI with NDJSON output parsing, one fresh task per call
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -50,11 +50,6 @@ impl ClineCliRunner {
         }
     }
 
-    /// Store a task ID for later session resumption
-    pub async fn set_session(&self, key: &str, task_id: &str) {
-        self.base.set_session(key, task_id).await;
-    }
-
     /// Build the command with all arguments
     fn build_command(&self, prompt: &str) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
@@ -77,14 +72,12 @@ impl ClineCliRunner {
 
     /// Parse NDJSON output from `cline task --json`
     ///
-    /// Scans for `task_started` to capture the task ID, and for
-    /// `say:"completion_result"` to extract the final response text.
-    fn parse_ndjson_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    /// Scans for `say:"completion_result"` to extract the final response text.
+    fn parse_ndjson_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         let text = str::from_utf8(raw).map_err(|e| {
             RunnerError::internal(format!("Cline CLI output is not valid UTF-8: {e}"))
         })?;
 
-        let mut task_id: Option<String> = None;
         let mut content = String::new();
 
         for line in text.lines() {
@@ -98,35 +91,22 @@ impl ClineCliRunner {
             };
 
             let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match line_type {
-                "task_started" => {
-                    if let Some(tid) = value.get("taskId").and_then(|v| v.as_str()) {
-                        task_id = Some(tid.to_owned());
-                    }
+            let say_type = value.get("say").and_then(|v| v.as_str()).unwrap_or("");
+            if line_type == "say" && say_type == "completion_result" {
+                if let Some(t) = value.get("text").and_then(|v| v.as_str()) {
+                    t.clone_into(&mut content);
                 }
-                "say" => {
-                    let say_type = value.get("say").and_then(|v| v.as_str()).unwrap_or("");
-                    if say_type == "completion_result" {
-                        if let Some(t) = value.get("text").and_then(|v| v.as_str()) {
-                            t.clone_into(&mut content);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
 
-        Ok((
-            ChatResponse {
-                content,
-                model: "cline".to_owned(),
-                usage: None,
-                finish_reason: Some("stop".to_owned()),
-                warnings: None,
-                tool_calls: None,
-            },
-            task_id,
-        ))
+        Ok(ChatResponse {
+            content,
+            model: "cline".to_owned(),
+            usage: None,
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        })
     }
 }
 
@@ -140,24 +120,10 @@ impl LlmProvider for ClineCliRunner {
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
 
-        if let Some(model) = &request.model {
-            if let Some(tid) = self.base.get_session(model).await {
-                cmd.args(["--taskId", &tid]);
-            }
-        }
-
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "cline")?;
 
-        let (response, task_id) = Self::parse_ndjson_response(&output.stdout)?;
-
-        if let Some(tid) = task_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &tid).await;
-            }
-        }
-
-        Ok(response)
+        Self::parse_ndjson_response(&output.stdout)
     }
 
     #[instrument(skip_all, fields(runner = "cline"))]
@@ -165,12 +131,6 @@ impl LlmProvider for ClineCliRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let mut cmd = self.build_command(prompt);
-
-        if let Some(model) = &request.model {
-            if let Some(tid) = self.base.get_session(model).await {
-                cmd.args(["--taskId", &tid]);
-            }
-        }
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -262,19 +222,18 @@ mod tests {
 {"type":"say","say":"text","text":"working on it","ts":1234,"partial":false}
 {"type":"say","say":"completion_result","text":"hello from cline","ts":1235}"#;
 
-        let (resp, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "hello from cline");
-        assert_eq!(tid, Some("abc-123".to_owned()));
         assert!(resp.usage.is_none());
     }
 
     #[test]
-    fn test_parse_ndjson_captures_task_id() {
+    fn test_parse_ndjson_task_started_adds_no_content() {
         let ndjson = br#"{"type":"task_started","taskId":"uuid-456"}
 {"type":"say","say":"completion_result","text":"done"}"#;
 
-        let (_, tid) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
-        assert_eq!(tid, Some("uuid-456".to_owned()));
+        let resp = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        assert_eq!(resp.content, "done");
     }
 
     #[test]
@@ -282,7 +241,7 @@ mod tests {
         let ndjson = br#"{"type":"task_started","taskId":"uuid-789"}
 {"type":"say","say":"text","text":"partial output"}"#;
 
-        let (resp, _) = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
+        let resp = ClineCliRunner::parse_ndjson_response(ndjson).unwrap(); // Safe: test assertion
         assert_eq!(resp.content, "");
     }
 

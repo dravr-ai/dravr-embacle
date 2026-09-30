@@ -1,5 +1,5 @@
 // ABOUTME: Claude Code CLI runner implementing the `LlmProvider` trait
-// ABOUTME: Wraps the `claude` CLI with JSON output parsing and session management
+// ABOUTME: Wraps the `claude` CLI with JSON output parsing; every call is a fresh, unsaved session
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -162,7 +162,6 @@ struct ClaudeResponse {
     /// non-retryable 400 instead of a retryable 502.
     #[serde(default)]
     terminal_reason: Option<String>,
-    session_id: Option<String>,
     usage: Option<ClaudeUsage>,
 }
 
@@ -185,8 +184,13 @@ struct ClaudeUsage {
 /// Claude Code CLI runner
 ///
 /// Implements `LlmProvider` by delegating to the `claude` binary with
-/// `--output-format json` for structured responses and optional session
-/// resumption.
+/// `--output-format json` for structured responses.
+///
+/// Every call is a fresh, unsaved CLI session: the request carries its whole
+/// history, and one runner serves every caller in the process, so resuming a
+/// previous call's session would hand one caller's conversation to the next.
+/// `--no-session-persistence` keeps the CLI from writing each prompt to a
+/// transcript under `~/.claude/projects/` that nothing ever reads back.
 pub struct ClaudeCodeRunner {
     base: CliRunnerBase,
 }
@@ -204,11 +208,6 @@ impl ClaudeCodeRunner {
         }
     }
 
-    /// Store a session ID for later resumption
-    pub async fn set_session(&self, key: &str, session_id: &str) {
-        self.base.set_session(key, session_id).await;
-    }
-
     /// Build the base command with common arguments
     ///
     /// When `max_tokens` is `Some`, the `CLAUDE_CODE_MAX_OUTPUT_TOKENS` env var
@@ -222,7 +221,13 @@ impl ClaudeCodeRunner {
         mcp_servers: &[McpServerConfig],
     ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
-        cmd.args(["-p", prompt, "--output-format", output_format]);
+        cmd.args([
+            "-p",
+            prompt,
+            "--output-format",
+            output_format,
+            "--no-session-persistence",
+        ]);
 
         // stream-json requires --verbose flag in Claude Code CLI
         if output_format == "stream-json" {
@@ -348,9 +353,7 @@ impl ClaudeCodeRunner {
     }
 
     /// Turn a parsed result document into the response, or its classified failure.
-    fn response_from(
-        parsed: ClaudeResponse,
-    ) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn response_from(parsed: ClaudeResponse) -> Result<ChatResponse, RunnerError> {
         if let Some(failure) = Self::failure_of(&parsed) {
             return Err(failure);
         }
@@ -367,7 +370,7 @@ impl ClaudeCodeRunner {
             tool_calls: None,
         };
 
-        Ok((response, parsed.session_id))
+        Ok(response)
     }
 
     /// Map one `stream-json` line to a chunk, or to the failure a `result`
@@ -457,12 +460,6 @@ impl LlmProvider for ClaudeCodeRunner {
             &request.mcp_servers,
         );
 
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
-
         let model_name = request
             .model
             .as_deref()
@@ -495,15 +492,7 @@ impl LlmProvider for ClaudeCodeRunner {
         if output.exit_code != 0 && !parsed.is_error {
             self.base.check_exit_code(&output, "claude-code")?;
         }
-        let (response, session_id) = Self::response_from(parsed)?;
-
-        if let Some(sid) = session_id {
-            if let Some(model) = &request.model {
-                self.base.set_session(model, &sid).await;
-            }
-        }
-
-        Ok(response)
+        Self::response_from(parsed)
     }
 
     #[instrument(skip_all, fields(runner = "claude_code"))]
@@ -519,12 +508,6 @@ impl LlmProvider for ClaudeCodeRunner {
             request.max_tokens,
             &request.mcp_servers,
         );
-
-        if let Some(model) = &request.model {
-            if let Some(sid) = self.base.get_session(model).await {
-                cmd.args(["--resume", &sid]);
-            }
-        }
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -562,17 +545,16 @@ mod tests {
     use std::path::PathBuf;
 
     /// Parse a result document straight through to the response, as `complete` does.
-    fn parse_response(raw: &[u8]) -> Result<(ChatResponse, Option<String>), RunnerError> {
+    fn parse_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         ClaudeCodeRunner::response_from(ClaudeCodeRunner::parse_result_document(raw)?)
     }
 
     #[test]
     fn test_parse_response_valid_json() {
         let json = br#"{"result":"Hello world","is_error":false,"session_id":"abc123","usage":{"input_tokens":10,"output_tokens":5}}"#;
-        let (response, session_id) = parse_response(json).unwrap(); // Safe: test assertion
+        let response = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "Hello world");
-        assert_eq!(session_id, Some("abc123".to_owned()));
         assert_eq!(response.model, "claude-code");
         let usage = response.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 10);
@@ -602,7 +584,7 @@ mod tests {
         let json = br#"{"result":"ok","is_error":false,"usage":{
             "input_tokens":2,"output_tokens":7,
             "cache_read_input_tokens":18483,"cache_creation_input_tokens":19681}}"#;
-        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
+        let response = parse_response(json).unwrap(); // Safe: test assertion
         let usage = response.usage.expect("usage present"); // Safe: test assertion
 
         assert_eq!(
@@ -628,7 +610,7 @@ mod tests {
         // or it would inflate every uncached turn.
         let json =
             br#"{"result":"ok","is_error":false,"usage":{"input_tokens":500,"output_tokens":50}}"#;
-        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
+        let response = parse_response(json).unwrap(); // Safe: test assertion
         let usage = response.usage.expect("usage present"); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 500);
         assert_eq!(usage.total_tokens, 550);
@@ -740,17 +722,16 @@ mod tests {
     #[test]
     fn test_parse_response_missing_optional_fields() {
         let json = br#"{"result":"hi","is_error":false}"#;
-        let (response, session_id) = parse_response(json).unwrap(); // Safe: test assertion
+        let response = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "hi");
-        assert!(session_id.is_none());
         assert!(response.usage.is_none());
     }
 
     #[test]
     fn test_parse_response_null_result() {
         let json = br#"{"is_error":false}"#;
-        let (response, _) = parse_response(json).unwrap(); // Safe: test assertion
+        let response = parse_response(json).unwrap(); // Safe: test assertion
         assert_eq!(response.content, "");
     }
 
