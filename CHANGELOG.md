@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.33.0] — 2026-09-30
+
+### Fixed
+
+- fix(claude-code): no memory, CLAUDE.md or project settings from cwd
+- fix(runners)!: never resume a CLI session across calls
+
+### Other
+
+- chore(deps): bump dravr-tronc 3.1.0 -> 3.2.0
+- chore(deps): bump dravr-tronc 3.0.0 -> 3.1.0
+
+
 ## [0.32.0] — 2026-09-27
 
 ### Added
