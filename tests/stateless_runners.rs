@@ -19,6 +19,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::mem;
 use std::os::unix::fs::PermissionsExt;
@@ -51,13 +52,25 @@ const RESUME_FLAGS: &[&str] = &[
     "--fork-session",
 ];
 
-/// A CLI stand-in that appends its argv, one argument per line, to
-/// `argv.log` beside it, then prints `stdout`.
+/// Environment variables the stand-in records beside its argv, as
+/// `env:NAME=value` lines.
+const RECORDED_ENV: &[&str] = &[
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+];
+
+/// A CLI stand-in that appends its argv, one argument per line, and the
+/// [`RECORDED_ENV`] values it was started with to `argv.log` beside it, then
+/// prints `stdout`.
 fn fake_cli(dir: &Path, stdout: &str) -> PathBuf {
     let path = dir.join("fake-cli");
     let log = dir.join("argv.log");
+    let mut env_lines = String::new();
+    for name in RECORDED_ENV {
+        write!(env_lines, " printf 'env:{name}=%s\\n' \"${name}\";").unwrap();
+    }
     let script = format!(
-        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf '%s\\n' '{CALL_END}'; }} >> '{}'\ncat <<'FAKE_EOF'\n{stdout}\nFAKE_EOF\n",
+        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done;{env_lines} printf '%s\\n' '{CALL_END}'; }} >> '{}'\ncat <<'FAKE_EOF'\n{stdout}\nFAKE_EOF\n",
         log.display()
     );
     fs::write(&path, script).unwrap();
@@ -119,6 +132,30 @@ fn assert_no_resume_args(dir: &Path) -> Vec<Vec<String>> {
     calls
 }
 
+/// A Claude Code call that neither saves its session nor reads or writes the
+/// per-directory memory, `CLAUDE.md` and settings every caller shares.
+fn assert_claude_isolated(argv: &[String]) {
+    assert!(
+        argv.iter().any(|a| a == "--no-session-persistence"),
+        "every call is an unsaved session: {argv:?}"
+    );
+    let sources = argv
+        .iter()
+        .position(|a| a == "--setting-sources")
+        .and_then(|i| argv.get(i + 1));
+    assert_eq!(
+        sources.map(String::as_str),
+        Some("user"),
+        "project and local settings from the shared cwd are never loaded: {argv:?}"
+    );
+    for line in [
+        "env:CLAUDE_CODE_DISABLE_AUTO_MEMORY=1",
+        "env:CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
+    ] {
+        assert!(argv.iter().any(|a| a == line), "missing {line}: {argv:?}");
+    }
+}
+
 /// Run `complete()` for both requests and return the two answers.
 async fn complete_twice(runner: &dyn LlmProvider) -> Vec<String> {
     let mut answers = Vec::new();
@@ -146,7 +183,7 @@ async fn stream_twice(runner: &dyn LlmProvider) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn claude_code_complete_never_resumes_and_never_persists() {
+async fn claude_code_complete_never_resumes_and_shares_no_cwd_state() {
     let dir = tempfile::tempdir().unwrap();
     let doc = format!(r#"{{"result":"pong","is_error":false,"session_id":"{SESSION_ID}"}}"#);
     let runner = ClaudeCodeRunner::new(RunnerConfig::new(fake_cli(dir.path(), &doc)));
@@ -154,15 +191,12 @@ async fn claude_code_complete_never_resumes_and_never_persists() {
     assert_eq!(complete_twice(&runner).await, ["pong", "pong"]);
 
     for argv in assert_never_resumed(dir.path()) {
-        assert!(
-            argv.iter().any(|a| a == "--no-session-persistence"),
-            "every call is an unsaved session: {argv:?}"
-        );
+        assert_claude_isolated(&argv);
     }
 }
 
 #[tokio::test]
-async fn claude_code_stream_never_resumes_and_never_persists() {
+async fn claude_code_stream_never_resumes_and_shares_no_cwd_state() {
     let dir = tempfile::tempdir().unwrap();
     let lines = format!(
         "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION_ID}\"}}\n\
@@ -174,10 +208,7 @@ async fn claude_code_stream_never_resumes_and_never_persists() {
     assert_eq!(stream_twice(&runner).await, ["pong", "pong"]);
 
     for argv in assert_never_resumed(dir.path()) {
-        assert!(
-            argv.iter().any(|a| a == "--no-session-persistence"),
-            "every call is an unsaved session: {argv:?}"
-        );
+        assert_claude_isolated(&argv);
     }
 }
 
@@ -194,7 +225,9 @@ async fn claude_code_complete_then_stream_never_resumes() {
     let mut stream = runner.complete_stream(&bob).await.unwrap();
     while stream.next().await.is_some() {}
 
-    assert_never_resumed(dir.path());
+    for argv in assert_never_resumed(dir.path()) {
+        assert_claude_isolated(&argv);
+    }
 }
 
 #[tokio::test]

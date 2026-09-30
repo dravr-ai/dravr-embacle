@@ -91,7 +91,7 @@ embacle = "0.32"
 
 | Runner | Binary | Features |
 |--------|--------|----------|
-| Claude Code | `claude` | JSON output, streaming, system prompts, unsaved sessions (`--no-session-persistence`) |
+| Claude Code | `claude` | JSON output, streaming, system prompts, unsaved sessions with no auto-memory, `CLAUDE.md` or project settings from the shared cwd |
 | GitHub Copilot | `copilot` | Text parsing, streaming |
 | Cursor Agent | `cursor-agent` | JSON output, streaming, MCP approval |
 | OpenCode | `opencode` | JSON events |

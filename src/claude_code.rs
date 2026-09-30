@@ -143,6 +143,36 @@ pub const CREDENTIAL_ENV_KEYS: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC
 /// Fallback model list when no runtime override is available
 const FALLBACK_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
 
+/// Environment set on every `claude` child, after the sandbox clears the
+/// environment, so no call reads or writes state another caller left behind.
+///
+/// Every caller of one runner shares its working directory, and Claude Code
+/// keys its per-project state by that directory. Measured against CLI 2.1.286
+/// on 2026-09-30 in a directory holding a `CLAUDE.md` with a codeword:
+///
+/// - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns auto-memory off outright — it
+///   outranks the `autoMemoryEnabled` setting. Without it the default system
+///   prompt tells the model to keep notes in
+///   `~/.claude/projects/<cwd>/memory/`, which the CLI creates and loads into
+///   every later session in the same directory: a channel from one caller's
+///   turn into the next caller's.
+/// - `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` stops every `CLAUDE.md` (managed, user,
+///   project, nested) reaching the context. Without it the model quoted the
+///   codeword; with it, it saw none.
+const ISOLATION_ENV: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+    ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+];
+
+/// Setting sources the CLI loads: the host's user settings only.
+///
+/// The `project` and `local` sources are read from the working directory every
+/// caller shares. Measured against CLI 2.1.286: a `SessionStart` hook in
+/// `<cwd>/.claude/settings.json` ran on a `-p` call by default, and did not run
+/// with `--setting-sources user`. User settings stay, since they are the host
+/// operator's (an `apiKeyHelper`, for one), not a caller's.
+const SETTING_SOURCES: &str = "user";
+
 /// Claude Code CLI response JSON structure
 #[derive(Debug, Deserialize)]
 struct ClaudeResponse {
@@ -190,7 +220,9 @@ struct ClaudeUsage {
 /// history, and one runner serves every caller in the process, so resuming a
 /// previous call's session would hand one caller's conversation to the next.
 /// `--no-session-persistence` keeps the CLI from writing each prompt to a
-/// transcript under `~/.claude/projects/` that nothing ever reads back.
+/// transcript under `~/.claude/projects/` that nothing ever reads back, and
+/// [`ISOLATION_ENV`] and [`SETTING_SOURCES`] keep it from reading or writing
+/// the per-directory memory, `CLAUDE.md` and settings every caller shares.
 pub struct ClaudeCodeRunner {
     base: CliRunnerBase,
 }
@@ -227,6 +259,8 @@ impl ClaudeCodeRunner {
             "--output-format",
             output_format,
             "--no-session-persistence",
+            "--setting-sources",
+            SETTING_SOURCES,
         ]);
 
         // stream-json requires --verbose flag in Claude Code CLI
@@ -283,7 +317,8 @@ impl ClaudeCodeRunner {
             warn!("Failed to build sandbox policy, running with inherited env");
         }
 
-        // Inject max output tokens after sandbox (env_clear) so the value persists
+        // Inject after the sandbox (env_clear) so the values persist
+        cmd.envs(ISOLATION_ENV.iter().copied());
         if let Some(tokens) = max_tokens {
             cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", tokens.to_string());
         }
