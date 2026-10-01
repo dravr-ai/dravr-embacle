@@ -1090,15 +1090,101 @@ struct TurnAccumulator {
     /// What the CLI itself wrote into the reply stream; never part of
     /// `content`.
     notices: Vec<CliNotice>,
+    /// Where the turn stands in Copilot's Autopilot loop.
+    run: AutopilotRun,
+}
+
+/// Where a turn stands in Copilot's Autopilot loop, read from the ACP stream.
+///
+/// Autopilot keeps one ACP turn open across several model requests. A
+/// response that calls a tool is followed by another request carrying the
+/// tool's result; a response that calls none ends the run, and if the model
+/// never called `task_complete` the runtime starts a *continuation*: it sends
+/// the model an internal control message ("You have not yet marked the task
+/// as complete…") inside the same turn. ACP marks none of this. The wire
+/// carries no frame for the control message and no run boundary; every
+/// `agent_message_chunk` of every request lands in one stream.
+///
+/// What the wire does carry is a `usage_update` at the start of every model
+/// request: the first one of the turn, one after each tool batch, and one when
+/// a continuation starts (recorded on CLI 1.0.90: a reply with no tool call,
+/// then `usage_update`, then the continuation's `task_complete`). So a request
+/// that begins after a response with text and no tool call is a continuation.
+///
+/// The model's reply to the athlete is the text of the run that answered. A
+/// continuation is the model reacting to the runtime's control message, which
+/// tells it outright not to acknowledge that message in visible text. When it
+/// does anyway, it narrates its own turn in the third person — "the 404
+/// persists, I already told the athlete" — and that text, appended with no
+/// separator, reached the athlete as part of the coach's reply. So once a
+/// reply exists, text written in a continuation is withheld. A run that ended
+/// with no reply leaves its continuation's text in place: that text is then
+/// the only answer there is.
+#[derive(Debug, Default)]
+struct AutopilotRun {
+    /// The current model request has produced reply text.
+    request_wrote_text: bool,
+    /// The current model request has called a tool.
+    request_called_tool: bool,
+    /// A continuation started after the model had already replied.
+    continuing_after_reply: bool,
+    /// Bytes of continuation text withheld from the reply.
+    withheld_bytes: usize,
 }
 
 impl TurnAccumulator {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             content: String::new(),
             tool_calls: Vec::new(),
             notices: Vec::new(),
+            run: AutopilotRun::default(),
         }
+    }
+
+    /// A model request has started (`usage_update`).
+    ///
+    /// When the request before it wrote text and called no tool, the run
+    /// ended there and this request is an Autopilot continuation.
+    fn begin_model_request(&mut self) {
+        let run = &mut self.run;
+        let previous_ended_run = run.request_wrote_text && !run.request_called_tool;
+        if previous_ended_run && !run.continuing_after_reply && !self.content.trim().is_empty() {
+            debug!(
+                reply_len = self.content.len(),
+                "ACP: Autopilot continued after the model replied; its text is withheld"
+            );
+            run.continuing_after_reply = true;
+        }
+        run.request_wrote_text = false;
+        run.request_called_tool = false;
+    }
+
+    /// The current model request called a tool.
+    fn record_tool_call(&mut self) {
+        self.run.request_called_tool = true;
+    }
+
+    /// Take a chunk of model text, returning it when it belongs in the reply.
+    ///
+    /// Text written in a continuation after the model replied is withheld
+    /// (see [`AutopilotRun`]) and returns `None`, so no caller streams it.
+    fn accept_text(&mut self, text: &str) -> Option<String> {
+        if self.run.continuing_after_reply {
+            if self.run.withheld_bytes == 0 {
+                warn!(
+                    "ACP: the model wrote text in an Autopilot continuation after its reply; \
+                     withheld from the reply"
+                );
+            }
+            self.run.withheld_bytes += text.len();
+            return None;
+        }
+        if !text.trim().is_empty() {
+            self.run.request_wrote_text = true;
+        }
+        self.content.push_str(text);
+        Some(text.to_owned())
     }
 
     /// The turn as an error, when the CLI answered it and the model did not.
@@ -1221,8 +1307,11 @@ fn notice_error(errors: &str, message: String) -> RunnerError {
 }
 
 /// Process a session/update notification, accumulating content and tool calls.
-fn process_notification(params: &Value, acc: &mut TurnAccumulator) {
-    process_notification_inner(params, acc, None);
+///
+/// Returns the reply text the notification added, if any — what a streaming
+/// caller forwards. A CLI notice and withheld continuation text return `None`.
+fn process_notification(params: &Value, acc: &mut TurnAccumulator) -> Option<String> {
+    process_notification_inner(params, acc, None)
 }
 
 /// Process a session/update notification with optional streaming sink.
@@ -1242,34 +1331,36 @@ fn process_notification_inner(
     params: &Value,
     acc: &mut TurnAccumulator,
     event_tx: Option<&mpsc::UnboundedSender<Result<HeadlessStreamEvent, RunnerError>>>,
-) {
-    let Some(params) = params.get("params").or(Some(params)) else {
-        return;
-    };
+) -> Option<String> {
+    let params = params.get("params").unwrap_or(params);
 
     let Ok(notif) = serde_json::from_value::<schema::SessionNotification>(params.clone()) else {
-        return;
+        return None;
     };
 
     match &notif.update {
         schema::SessionUpdate::AgentMessageChunk(chunk) => {
-            if let schema::ContentBlock::Text(text) = &chunk.content {
-                if let Some(notice) = cli_notice(&text.text) {
-                    warn!(
-                        level = notice.level.label(),
-                        message = %notice.message,
-                        "ACP: the CLI wrote a notice into the reply stream; kept out of the reply"
-                    );
-                    acc.notices.push(notice);
-                    return;
-                }
-                acc.content.push_str(&text.text);
-                if let Some(tx) = event_tx {
-                    let _ = tx.send(Ok(HeadlessStreamEvent::TextDelta(text.text.clone())));
-                }
+            let schema::ContentBlock::Text(text) = &chunk.content else {
+                return None;
+            };
+            if let Some(notice) = cli_notice(&text.text) {
+                warn!(
+                    level = notice.level.label(),
+                    message = %notice.message,
+                    "ACP: the CLI wrote a notice into the reply stream; kept out of the reply"
+                );
+                acc.notices.push(notice);
+                return None;
             }
+            let accepted = acc.accept_text(&text.text)?;
+            if let Some(tx) = event_tx {
+                let _ = tx.send(Ok(HeadlessStreamEvent::TextDelta(accepted.clone())));
+            }
+            return Some(accepted);
         }
+        schema::SessionUpdate::UsageUpdate(_) => acc.begin_model_request(),
         schema::SessionUpdate::ToolCall(tc) => {
+            acc.record_tool_call();
             // ACP carries a title and a status; the name, arguments and
             // result stay `None` because the adapter never sends them.
             let observed = ObservedToolCall {
@@ -1299,6 +1390,7 @@ fn process_notification_inner(
         }
         _ => {}
     }
+    None
 }
 
 /// Serialize a permission outcome through the schema type, so the wire shape
@@ -1551,28 +1643,16 @@ async fn collect_streaming(
                             debug!("ACP: dropped a session/update from another session");
                             continue;
                         }
-                        // Try to extract text delta for streaming
-                        if let Ok(notif) =
-                            serde_json::from_value::<schema::SessionNotification>(params.clone())
-                        {
-                            if let schema::SessionUpdate::AgentMessageChunk(chunk) = &notif.update {
-                                if let schema::ContentBlock::Text(text) = &chunk.content {
-                                    // A CLI notice is recorded below and never
-                                    // streamed as reply text.
-                                    if cli_notice(&text.text).is_some() {
-                                        process_notification(params, &mut acc);
-                                        continue;
-                                    }
-                                    let _ = chunk_tx.send(Ok(StreamChunk {
-                                        delta: text.text.clone(),
-                                        is_final: false,
-                                        finish_reason: None,
-                                    }));
-                                }
-                            }
+                        // Only text the accumulator takes into the reply is
+                        // streamed: never a CLI notice, never a continuation's
+                        // text after the model replied.
+                        if let Some(delta) = process_notification(params, &mut acc) {
+                            let _ = chunk_tx.send(Ok(StreamChunk {
+                                delta,
+                                is_final: false,
+                                finish_reason: None,
+                            }));
                         }
-                        // Also track tool calls for internal accounting
-                        process_notification(params, &mut acc);
                     }
                 }
                 "session/request_permission" => {
@@ -1622,7 +1702,7 @@ async fn handle_server_message(
             "session/update" => {
                 if let Some(params) = msg.get("params") {
                     if notification_is_for_session(params, session_id) {
-                        process_notification(params, acc);
+                        let _ = process_notification(params, acc);
                     } else {
                         debug!("ACP: dropped a session/update from another session");
                     }
@@ -3943,6 +4023,320 @@ mod tests {
         let tc = expect_tool_call(&mut rx);
         assert_eq!(tc.id, "tc_1");
         assert_eq!(tc.title, "Reading file");
+    }
+
+    // -- Autopilot continuations ------------------------------------------
+
+    /// The athlete-facing reply of the 2026-10-01 incident turn (dravr-carnet
+    /// #690), verbatim from the persisted message.
+    const INCIDENT_REPLY: &str = "Je n'arrive pas à récupérer le détail complet de cette sortie \
+        depuis Strava en ce moment (petit pépin technique côté fournisseur) — mais j'ai les \
+        chiffres de base.\n\nEasy Run #30, dimanche 27 septembre : environ 9,9 km en 1h38, avec \
+        seulement 54 m de dénivelé — donc un parcours plat. Ça donne un rythme d'environ \
+        9:54/km, plutôt tranquille pour une sortie \"easy\", ce qui colle bien avec le nom. Par \
+        contre, je n'ai pas la fréquence cardiaque ni les splits pour cette activité, donc je ne \
+        peux pas confirmer que c'était vraiment en zone facile niveau effort — juste que le \
+        rythme l'était.\n\nSi tu veux, je peux réessayer un peu plus tard pour aller chercher le \
+        détail complet.";
+
+    /// What the model wrote in the Autopilot continuation of that turn, and
+    /// what the athlete received glued to the reply.
+    const INCIDENT_CONTINUATION: &str = "Le retour persiste (404 côté Strava) — je l'ai déjà \
+        signalé à l'athlète avec une analyse basée sur les données disponibles (distance, \
+        durée, dénivelé, allure) et une mention honnête de l'absence de fréquence cardiaque et \
+        de splits. J'ai répondu de façon complète compte tenu des données accessibles.";
+
+    const INCIDENT_SESSION: &str = "5796d5e9-7ff0-4d44-935d-c5ee9911b310";
+
+    /// The prompt request id the recorded turns answer.
+    const RECORDED_PROMPT_ID: i64 = 4;
+
+    fn wire_update(session_id: &str, update: &Value) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": session_id, "update": update },
+        })
+        .to_string()
+    }
+
+    fn wire_usage(session_id: &str, used: u64) -> String {
+        wire_update(
+            session_id,
+            &json!({ "sessionUpdate": "usage_update", "used": used, "size": 200_000 }),
+        )
+    }
+
+    fn wire_text(session_id: &str, text: &str) -> String {
+        wire_update(
+            session_id,
+            &json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text },
+            }),
+        )
+    }
+
+    /// A tool call and its completion, as the CLI reports one.
+    fn wire_tool(session_id: &str, id: &str, title: &str, status: &str) -> [String; 2] {
+        [
+            wire_update(
+                session_id,
+                &json!({
+                    "sessionUpdate": "tool_call", "toolCallId": id, "title": title,
+                    "kind": "other", "status": "pending",
+                }),
+            ),
+            wire_update(
+                session_id,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "status": status }),
+            ),
+        ]
+    }
+
+    fn wire_end_turn(prompt_id: i64) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": prompt_id,
+            "result": { "stopReason": "end_turn" },
+        })
+        .to_string()
+    }
+
+    /// Split text into the small deltas a model streams.
+    fn wire_text_chunks(session_id: &str, text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .chunks(37)
+            .map(|c| wire_text(session_id, &c.iter().collect::<String>()))
+            .collect()
+    }
+
+    /// The incident turn's shape on the wire: three tool rounds, the reply in
+    /// a response that calls no tool, then the continuation Autopilot started
+    /// — which retried the activity fetch, narrated the turn, and called
+    /// `task_complete`. Each model request opens with a `usage_update`, as
+    /// recorded on CLI 1.0.90.
+    fn incident_wire() -> String {
+        let s = INCIDENT_SESSION;
+        let mut lines = vec![wire_usage(s, 15_600)];
+        for (n, (id, title)) in [
+            ("t1", "dravr-get_activities"),
+            ("t2", "dravr-analyze_activity"),
+            ("t3", "dravr-get_activity_intelligence"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            lines.extend(wire_tool(s, id, title, "completed"));
+            lines.push(wire_usage(s, 16_000 + n as u64 * 1_000));
+        }
+        lines.extend(wire_text_chunks(s, INCIDENT_REPLY));
+        // The reply's response called no tool: Autopilot continues.
+        lines.push(wire_usage(s, 20_000));
+        lines.extend(wire_tool(s, "t4", "dravr-analyze_activity", "failed"));
+        lines.push(wire_usage(s, 21_000));
+        lines.extend(wire_text_chunks(s, INCIDENT_CONTINUATION));
+        lines.extend(wire_tool(s, "t5", "task_complete", "completed"));
+        lines.push(wire_end_turn(RECORDED_PROMPT_ID));
+        lines.join("\n") + "\n"
+    }
+
+    /// A recorded `copilot --acp` turn (CLI 1.0.90, claude-sonnet-5,
+    /// Autopilot): a preamble, a file read, the answer, then a continuation
+    /// that only called `task_complete`. Trimmed to `session/update` and the
+    /// prompt result; the read's local path is replaced with `/work/note.txt`
+    /// and its diff output dropped. Nothing else is edited.
+    const RECORDED_PREAMBLE_TOOL_ANSWER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"usage_update","used":15614,"size":200000}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Je vais lire le"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" fichier note.txt d"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ans le répertoire courant"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"."}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"tool_call","toolCallId":"toolu_01RqDfTVJJQeGkLxK2GSYHJu","title":"Viewing /work/note.txt","kind":"read","status":"pending","rawInput":{"path":"/work/note.txt"},"locations":[{"path":"/work/note.txt"}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"tool_call_update","toolCallId":"toolu_01RqDfTVJJQeGkLxK2GSYHJu","status":"completed","rawOutput":{"content":"Le mot secret est: érable.\n"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"usage_update","used":15807,"size":200000}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Le mot secret est «"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" érable »."}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"usage_update","used":15982,"size":200000}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"tool_call","toolCallId":"toolu_01HPouXQQpyd51v1UhjHQt5P","title":"task_complete","kind":"other","status":"pending","rawInput":{"summary":"J'ai lu note.txt et communiqué le mot secret : « érable »."}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6b6bb20c-010d-4f6e-9d83-a3b7107143aa","update":{"sessionUpdate":"tool_call_update","toolCallId":"toolu_01HPouXQQpyd51v1UhjHQt5P","status":"completed","content":[{"type":"content","content":{"type":"text","text":"J'ai lu note.txt et communiqué le mot secret : « érable »."}}],"rawOutput":{"content":"J'ai lu note.txt et communiqué le mot secret : « érable ».","detailedContent":"✓ Task completed: J'ai lu note.txt et communiqué le mot secret : « érable »."}}}}
+{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","usage":{"inputTokens":62755,"outputTokens":241,"totalTokens":62996,"thoughtTokens":0,"cachedReadTokens":53945,"cachedWriteTokens":8804}}}
+"#;
+
+    const RECORDED_PREAMBLE_SESSION: &str = "6b6bb20c-010d-4f6e-9d83-a3b7107143aa";
+
+    /// Hand a recorded wire to a collector over a real pipe, as `copilot
+    /// --acp` would write it. `cat` echoes the bytes written to its stdin.
+    async fn replay(wire: &str) -> (AcpTransport, Child) {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap(); // Safe: test setup — `cat` is on every unix runner
+        let mut stdin = child.stdin.take().unwrap(); // Safe: test setup — piped above
+        stdin.write_all(wire.as_bytes()).await.unwrap(); // Safe: test setup
+        stdin.flush().await.unwrap(); // Safe: test setup
+        let stdout = child.stdout.take().unwrap(); // Safe: test setup — piped above
+        (AcpTransport::new(stdin, stdout), child)
+    }
+
+    /// What `complete()` returns for a recorded turn.
+    async fn replay_complete(
+        wire: &str,
+        session_id: &str,
+    ) -> (ChatResponse, Vec<ObservedToolCall>) {
+        let (mut transport, _child) = replay(wire).await;
+        collect_complete(
+            &mut transport,
+            RECORDED_PROMPT_ID,
+            "claude-sonnet-5".to_owned(),
+            PermissionPolicy::DenyAll,
+            session_id,
+        )
+        .await
+        .unwrap() // Safe: test assertion — the recorded turn ends normally
+    }
+
+    /// Every delta `complete_stream()` emits for a recorded turn, joined.
+    async fn replay_complete_stream(wire: &str, session_id: &str) -> String {
+        let (mut transport, _child) = replay(wire).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        collect_streaming(
+            &mut transport,
+            RECORDED_PROMPT_ID,
+            &tx,
+            PermissionPolicy::DenyAll,
+            session_id,
+        )
+        .await
+        .unwrap(); // Safe: test assertion — the recorded turn ends normally
+        drop(tx);
+        let mut streamed = String::new();
+        while let Some(chunk) = rx.recv().await {
+            streamed.push_str(&chunk.unwrap().delta); // Safe: test assertion
+        }
+        streamed
+    }
+
+    /// Every text delta `converse_stream()` emits for a recorded turn, joined,
+    /// and the content of the response it ends with.
+    async fn replay_converse_stream(wire: &str, session_id: &str) -> (String, String) {
+        let (mut transport, _child) = replay(wire).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let response = collect_streaming_with_tools(
+            &mut transport,
+            RECORDED_PROMPT_ID,
+            "claude-sonnet-5".to_owned(),
+            PermissionPolicy::DenyAll,
+            &tx,
+            session_id,
+        )
+        .await
+        .unwrap(); // Safe: test assertion — the recorded turn ends normally
+        drop(tx);
+        let mut streamed = String::new();
+        while let Some(event) = rx.recv().await {
+            let event = event.unwrap(); // Safe: test assertion
+            if let HeadlessStreamEvent::TextDelta(delta) = event {
+                streamed.push_str(&delta);
+            }
+        }
+        (streamed, response.content)
+    }
+
+    #[tokio::test]
+    async fn a_continuation_after_the_reply_is_not_delivered_by_complete() {
+        let (response, tool_calls) = replay_complete(&incident_wire(), INCIDENT_SESSION).await;
+        assert_eq!(response.content, INCIDENT_REPLY);
+        assert_eq!(
+            tool_calls.len(),
+            5,
+            "the continuation's tool calls are still reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_continuation_after_the_reply_is_never_streamed_by_complete_stream() {
+        let streamed = replay_complete_stream(&incident_wire(), INCIDENT_SESSION).await;
+        assert_eq!(streamed, INCIDENT_REPLY);
+    }
+
+    #[tokio::test]
+    async fn a_continuation_after_the_reply_is_never_streamed_by_converse_stream() {
+        let (streamed, content) = replay_converse_stream(&incident_wire(), INCIDENT_SESSION).await;
+        assert_eq!(streamed, INCIDENT_REPLY);
+        assert_eq!(content, INCIDENT_REPLY);
+    }
+
+    /// A preamble the model writes before a tool call is part of the run that
+    /// answers, so it stays: only a continuation is withheld.
+    #[tokio::test]
+    async fn text_before_and_after_a_tool_call_is_one_reply_on_every_path() {
+        let expected = "Je vais lire le fichier note.txt dans le répertoire courant.\
+            Le mot secret est « érable ».";
+        let wire = RECORDED_PREAMBLE_TOOL_ANSWER;
+        let session = RECORDED_PREAMBLE_SESSION;
+
+        let (response, tool_calls) = replay_complete(wire, session).await;
+        assert_eq!(response.content, expected);
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(replay_complete_stream(wire, session).await, expected);
+        let (streamed, content) = replay_converse_stream(wire, session).await;
+        assert_eq!(streamed, expected);
+        assert_eq!(content, expected);
+    }
+
+    /// The continuation's own wording, when the model wrote no reply before
+    /// it, is the only answer there is.
+    #[test]
+    fn a_continuation_after_a_run_with_no_reply_is_kept() {
+        let s = "test-session";
+        let mut acc = TurnAccumulator::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut feed = |line: &str| {
+            let msg: Value = serde_json::from_str(line).unwrap(); // Safe: test fixture
+            process_notification_streaming(&msg, &mut acc, &tx);
+        };
+        feed(&wire_usage(s, 1));
+        feed(&wire_text(s, "  \n"));
+        feed(&wire_usage(s, 2));
+        feed(&wire_text(s, "Your FTP is 250 W."));
+        for line in wire_tool(s, "tc", "task_complete", "completed") {
+            feed(&line);
+        }
+        assert_eq!(acc.content.trim(), "Your FTP is 250 W.");
+        let mut streamed = String::new();
+        while let Ok(Ok(event)) = rx.try_recv() {
+            if let HeadlessStreamEvent::TextDelta(delta) = event {
+                streamed.push_str(&delta);
+            }
+        }
+        assert_eq!(streamed.trim(), "Your FTP is 250 W.");
+    }
+
+    /// A continuation that writes text and only then calls `task_complete` —
+    /// no retried tool — is withheld the same way.
+    #[test]
+    fn a_text_then_task_complete_continuation_is_withheld() {
+        let s = "test-session";
+        let mut acc = TurnAccumulator::new();
+        let mut delivered = String::new();
+        let mut feed = |line: String| {
+            let msg: Value = serde_json::from_str(&line).unwrap(); // Safe: test fixture
+            if let Some(delta) = process_notification(&msg, &mut acc) {
+                delivered.push_str(&delta);
+            }
+        };
+        feed(wire_usage(s, 1));
+        feed(wire_text(s, "Your FTP is 250 W."));
+        feed(wire_usage(s, 2));
+        feed(wire_text(s, "I already gave the athlete their FTP."));
+        for line in wire_tool(s, "tc", "task_complete", "completed") {
+            feed(line);
+        }
+        assert_eq!(delivered, "Your FTP is 250 W.");
+        assert_eq!(acc.content, "Your FTP is 250 W.");
     }
 
     #[test]
