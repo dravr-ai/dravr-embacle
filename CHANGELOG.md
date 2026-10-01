@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.1] — 2026-10-01
+
+### Fixed
+
+- fix(copilot-headless): withhold Autopilot continuation text after reply
+
+
 ## [0.33.0] — 2026-09-30
 
 ### Fixed
