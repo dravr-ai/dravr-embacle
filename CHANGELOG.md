@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.33.2] — 2026-10-02
+
+### Fixed
+
+- fix(process): kill the CLI child when its call is dropped
+
+### Other
+
+- chore(deps): bump dravr-tronc 3.2.0 -> 3.3.0
+
+
 ## [0.33.1] — 2026-10-01
 
 ### Fixed
