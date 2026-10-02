@@ -76,7 +76,8 @@ pub(crate) async fn read_stderr_capped(stream: Option<ChildStderr>, limit: usize
 ///
 /// The command is spawned as a child process. If it does not exit within
 /// `timeout`, it is killed and an error is returned. Output is capped at
-/// `max_output_bytes` to prevent unbounded memory consumption.
+/// `max_output_bytes` to prevent unbounded memory consumption. Dropping the
+/// returned future before it completes kills the child as well.
 ///
 /// # Errors
 ///
@@ -99,6 +100,11 @@ pub async fn run_cli_command(
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // A caller that drops this future has abandoned the call: its turn was
+    // stopped, or its own deadline fired. Without this the child runs to
+    // completion with nobody reading it, holding a runner seat and spending
+    // provider quota on an answer that is thrown away.
+    cmd.kill_on_drop(true);
 
     // Trace-level dump of the resolved program + argv so an operator with
     // `RUST_LOG=embacle::process=trace` can see exactly which CLI runner
