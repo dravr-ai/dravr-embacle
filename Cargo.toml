@@ -150,7 +150,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 # Optional: TOML config file support
 toml = { version = "1.1", optional = true }
-dirs = { version = "6", optional = true }
+dirs = { version = "7", optional = true }
 
 # Optional: shared headless-browser primitives for the web-ui runner
 dravr-browser = { version = "0.1", optional = true }
