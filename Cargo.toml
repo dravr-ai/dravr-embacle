@@ -156,7 +156,7 @@ dirs = { version = "6", optional = true }
 dravr-browser = { version = "0.1", optional = true }
 
 # Optional: OpenTelemetry metrics export
-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.33", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true }
 
 [dev-dependencies]
