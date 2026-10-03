@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0] — 2026-10-03
+
+### Other
+
+- chore(deps): bump dravr-tronc 3.3.0 -> 4.0.0
+
+
 ## [0.33.2] — 2026-10-02
 
 ### Fixed
