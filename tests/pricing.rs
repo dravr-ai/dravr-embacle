@@ -14,7 +14,8 @@
 use std::collections::BTreeSet;
 
 use embacle::pricing::{
-    calculate_cost, calculate_cost_for, lookup_pricing, ModelPricing, TokenCounts, PRICING_TABLE,
+    calculate_cost, calculate_cost_for, cost_from_pricing, lookup_pricing, ModelPricing,
+    TokenCounts, PRICING_TABLE,
 };
 
 #[test]
@@ -302,6 +303,93 @@ fn no_provider_lists_the_same_prefix_twice() {
         assert!(
             seen.insert((*provider, *prefix)),
             "PRICING_TABLE lists ({provider}, {prefix}) more than once"
+        );
+    }
+}
+
+// ============================================================================
+// Claude Haiku on the runners that pass Anthropic usage through
+// ============================================================================
+
+/// Every runner with real Anthropic price rows, by the name it reports.
+const ANTHROPIC_RUNNERS: [&str; 3] = ["copilot_headless", "copilot_sdk", "claude-code"];
+
+/// Haiku 5.5 under Copilot's dotted id and Anthropic's hyphenated one.
+const HAIKU_5_IDS: [&str; 2] = ["claude-haiku-5.5", "claude-haiku-5-5"];
+
+/// Haiku 4.5 under Copilot's id, Anthropic's alias and its dated snapshot.
+const HAIKU_4_IDS: [&str; 3] = [
+    "claude-haiku-4.5",
+    "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001",
+];
+
+/// A cached, tool-using Copilot SDK turn on Haiku: two model calls summed,
+/// 43,538 prompt tokens of which 21,678 were read from cache and 21,854
+/// written to it, 163 completion and 113 reasoning tokens.
+fn cached_tool_turn() -> TokenCounts {
+    TokenCounts::new(43_538, 163)
+        .with_cache(21_678, 21_854)
+        .with_reasoning(113)
+}
+
+#[test]
+fn haiku_5_resolves_to_its_own_row_on_every_anthropic_runner() {
+    for provider in ANTHROPIC_RUNNERS {
+        for model in HAIKU_5_IDS {
+            // $0.10 / $0.50 list; a fall to the Haiku 4 row would read $1 / $5.
+            assert_rates(provider, model, 0.10, 0.50, 0.10, 1.25);
+        }
+    }
+    // A pooled second account prices like the first.
+    assert_rates("claude-code#2", "claude-haiku-5-5", 0.10, 0.50, 0.10, 1.25);
+}
+
+#[test]
+fn haiku_4_5_bills_at_list_price_on_every_anthropic_runner() {
+    for provider in ANTHROPIC_RUNNERS {
+        for model in HAIKU_4_IDS {
+            assert_rates(provider, model, 1.0, 5.0, 0.10, 1.25);
+        }
+    }
+}
+
+#[test]
+fn haiku_5_prices_a_cached_tool_turn() {
+    let counts = cached_tool_turn();
+    let cost = cost_from_pricing(&resolved("copilot_sdk", "claude-haiku-5.5"), &counts);
+
+    // 6 fresh x $0.10/M + 21,678 read x $0.01/M + 21,854 written x $0.125/M
+    // + (163 + 113) output x $0.50/M.
+    let expected = 0.000_000_6 + 0.000_216_78 + 0.002_731_75 + 0.000_138;
+    assert!(
+        (cost - expected).abs() < 1e-12,
+        "expected {expected}, got {cost}"
+    );
+
+    // The table entry point prices it identically.
+    let via_table = calculate_cost_for("copilot_sdk", "claude-haiku-5.5", &counts);
+    assert!(
+        (via_table - cost).abs() < 1e-15,
+        "calculate_cost_for={via_table} cost_from_pricing={cost}"
+    );
+}
+
+#[test]
+fn the_same_turn_on_haiku_4_5_costs_ten_times_haiku_5() {
+    let counts = cached_tool_turn();
+    for provider in ANTHROPIC_RUNNERS {
+        let haiku_5 = calculate_cost_for(provider, "claude-haiku-5-5", &counts);
+        let haiku_4 = calculate_cost_for(provider, "claude-haiku-4-5", &counts);
+        // Every Haiku 4.5 rate is ten times Haiku 5.5's, and both share the
+        // Anthropic cache multipliers, so the turn costs ten times as much.
+        assert!(
+            (haiku_5 - 0.003_087_13).abs() < 1e-12,
+            "{provider}: haiku 5.5 cost {haiku_5}"
+        );
+        assert!(
+            (haiku_4 - 0.030_871_3).abs() < 1e-12,
+            "{provider}: haiku 4.5 cost {haiku_4}"
         );
     }
 }

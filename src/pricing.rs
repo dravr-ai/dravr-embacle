@@ -197,8 +197,21 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "copilot_headless",
+        // Claude Haiku 5.x, under Copilot's id (`claude-haiku-5.5`) and
+        // Anthropic's (`claude-haiku-5-5`) alike. Anthropic lists two rate
+        // cards chosen by prompt length: $0.10/$0.50 for a request whose prompt
+        // is 100K tokens or fewer, $0.50/$2.50 above that. This row carries the
+        // first card only: the usage these runners report covers a whole turn,
+        // which can span several model requests, so no single request's prompt
+        // length reaches the price lookup to choose between the two.
+        "claude-haiku-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        // Claude Haiku 4.5 at list price, one card at every prompt length.
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Copilot SDK (the Rust runtime) — the same Anthropic pass-through as
     // copilot_headless, keyed on the name CopilotSdkRunner reports.
@@ -214,8 +227,15 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "copilot_sdk",
+        // Claude Haiku 5.x; the 100K prompt boundary is described on the
+        // copilot_headless row.
+        "claude-haiku-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Claude Code CLI — same models as copilot_headless. Keyed "claude-code",
     // the name ClaudeCodeRunner reports; CliRunnerType's Display prints the
@@ -235,8 +255,15 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "claude-code",
+        // Claude Haiku 5.x; the 100K prompt boundary is described on the
+        // copilot_headless row.
+        "claude-haiku-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Cohere — Command A and Command R family.
     // The longest matching prefix wins, so `command-a-reasoning` and

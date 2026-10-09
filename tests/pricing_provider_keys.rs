@@ -192,8 +192,13 @@ fn the_claude_code_rows_are_reachable_from_the_name_the_runner_reports() {
     );
     let haiku = calculate_cost(reported, "claude-haiku-4-5", 1_000_000, 0);
     assert!(
-        (haiku - 0.80).abs() < 1e-9,
-        "claude-haiku-4 must price at $0.80/M input; got {haiku}"
+        (haiku - 1.0).abs() < 1e-9,
+        "claude-haiku-4 must price at $1/M input; got {haiku}"
+    );
+    let haiku_5 = calculate_cost(reported, "claude-haiku-5-5", 1_000_000, 0);
+    assert!(
+        (haiku_5 - 0.10).abs() < 1e-9,
+        "claude-haiku-5 must price at $0.10/M input; got {haiku_5}"
     );
 }
 
