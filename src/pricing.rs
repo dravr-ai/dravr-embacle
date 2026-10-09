@@ -156,8 +156,10 @@ const OPENROUTER_PROVIDER: &str = "openrouter";
 /// unreachable, and its models silently bill at \$0.
 ///
 /// Model matching uses prefix comparison — a model name like "gemini-2.0-flash-exp"
-/// matches the prefix "gemini-2.0-flash". Entries are ordered longest-prefix-first
-/// within each provider to ensure the most specific match wins.
+/// matches the prefix "gemini-2.0-flash". When several of a provider's prefixes
+/// match, [`lookup_pricing`] takes the longest, so the most specific row wins
+/// wherever it sits in the table: `gpt-4o-mini` resolves to its own row even
+/// though `gpt-4o` is listed first and also matches it.
 pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     // Gemini models (provider name matches GeminiProvider::name() = "gemini")
     // gemini-flash-lite-latest is a Google-maintained rolling alias to the
@@ -237,8 +239,8 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
     ),
     // Cohere — Command A and Command R family.
-    // Entries are ordered longest-prefix-first so `command-a-reasoning` and
-    // `command-a-vision` match before the bare `command-a` prefix and the
+    // The longest matching prefix wins, so `command-a-reasoning` and
+    // `command-a-vision` resolve ahead of the bare `command-a` prefix and the
     // R-family entries don't accidentally swallow R+ / R7B.
     (
         "cohere",
@@ -326,6 +328,10 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
 
 /// Look up pricing for a (provider, model) pair using prefix matching.
 ///
+/// Of the provider's rows whose prefix the model starts with, the longest
+/// prefix wins, so a broad row (`gpt-4o`) never shadows a specific one
+/// (`gpt-4o-mini`) whatever the table order.
+///
 /// Public so a consumer's override layer can fall through to the table
 /// after its own lookup misses.
 #[must_use]
@@ -333,7 +339,8 @@ pub fn lookup_pricing(provider: &str, model: &str) -> Option<ModelPricing> {
     let provider = pool_family(provider);
     PRICING_TABLE
         .iter()
-        .find(|(p, prefix, _)| *p == provider && model.starts_with(prefix))
+        .filter(|(p, prefix, _)| *p == provider && model.starts_with(prefix))
+        .max_by_key(|(_, prefix, _)| prefix.len())
         .map(|(_, _, pricing)| *pricing)
 }
 

@@ -11,7 +11,11 @@
     clippy::str_to_string
 )]
 
-use embacle::pricing::{calculate_cost, calculate_cost_for, TokenCounts};
+use std::collections::BTreeSet;
+
+use embacle::pricing::{
+    calculate_cost, calculate_cost_for, lookup_pricing, ModelPricing, TokenCounts, PRICING_TABLE,
+};
 
 #[test]
 fn test_known_model_cost() {
@@ -242,4 +246,62 @@ fn cache_counts_are_clamped_to_the_prompt() {
         (cost - expected).abs() < 1e-12,
         "expected {expected}, got {cost}"
     );
+}
+
+// ============================================================================
+// Prefix resolution
+// ============================================================================
+
+/// The row a (provider, model) pair resolves to, or a failure naming the pair.
+fn resolved(provider: &str, model: &str) -> ModelPricing {
+    lookup_pricing(provider, model)
+        .unwrap_or_else(|| panic!("{provider}/{model} resolves to no price row"))
+}
+
+/// Assert a resolved row's four rates.
+fn assert_rates(provider: &str, model: &str, input: f64, output: f64, read: f64, write: f64) {
+    let pricing = resolved(provider, model);
+    let actual = (
+        pricing.input_per_million,
+        pricing.output_per_million,
+        pricing.cache_read_multiplier,
+        pricing.cache_write_multiplier,
+    );
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+    assert!(
+        close(actual.0, input)
+            && close(actual.1, output)
+            && close(actual.2, read)
+            && close(actual.3, write),
+        "{provider}/{model} resolved to (input, output, read, write) = {actual:?}, \
+         expected ({input}, {output}, {read}, {write})"
+    );
+}
+
+/// A broad prefix listed before a specific one must not shadow it: `gpt-4o`
+/// precedes `gpt-4o-mini` in the table and matches it too.
+#[test]
+fn the_longest_matching_prefix_wins_whatever_the_table_order() {
+    assert_rates("openai_api", "gpt-4o-mini", 0.15, 0.60, 0.50, 1.0);
+    assert_rates(
+        "openai_api",
+        "gpt-4o-mini-2024-07-18",
+        0.15,
+        0.60,
+        0.50,
+        1.0,
+    );
+    assert_rates("openai_api", "gpt-4o-2024-08-06", 2.50, 10.0, 0.50, 1.0);
+}
+
+/// Two rows with one (provider, prefix) would leave the winner to table order.
+#[test]
+fn no_provider_lists_the_same_prefix_twice() {
+    let mut seen = BTreeSet::new();
+    for (provider, prefix, _) in PRICING_TABLE {
+        assert!(
+            seen.insert((*provider, *prefix)),
+            "PRICING_TABLE lists ({provider}, {prefix}) more than once"
+        );
+    }
 }
