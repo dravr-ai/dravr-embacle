@@ -12,6 +12,13 @@ use embacle::config::{CliRunnerType, RunnerConfig};
 use embacle::pool::{cli_pool, credential_env_key};
 use embacle::types::ErrorKind;
 
+// The unix tests exec a script they just wrote; see `support` for the
+// ETXTBSY race that makes them retry the spawn.
+#[cfg(unix)]
+mod support;
+#[cfg(unix)]
+use support::retry_text_file_busy;
+
 #[tokio::test]
 async fn accounts_are_named_in_order_and_the_first_keeps_the_runner_name() {
     let tiers = cli_pool(
@@ -125,8 +132,12 @@ async fn each_account_s_child_sees_its_own_token() {
     .unwrap();
     let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
 
-    let first = tiers[0].complete(&request).await.unwrap();
-    let second = tiers[1].complete(&request).await.unwrap();
+    let first = retry_text_file_busy(|| tiers[0].complete(&request))
+        .await
+        .unwrap();
+    let second = retry_text_file_busy(|| tiers[1].complete(&request))
+        .await
+        .unwrap();
     assert_eq!(first.content, "token-of-account-1");
     assert_eq!(second.content, "token-of-account-2");
     assert_eq!(
@@ -168,8 +179,12 @@ async fn a_spent_account_s_refusal_names_that_account() {
     .unwrap();
     let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
 
-    let first = tiers[0].complete(&request).await.unwrap_err();
-    let second = tiers[1].complete(&request).await.unwrap_err();
+    let first = retry_text_file_busy(|| tiers[0].complete(&request))
+        .await
+        .unwrap_err();
+    let second = retry_text_file_busy(|| tiers[1].complete(&request))
+        .await
+        .unwrap_err();
     assert_eq!(second.kind, ErrorKind::RateLimit);
     assert!(
         first.message.starts_with("claude-code: "),

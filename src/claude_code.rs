@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::BTreeMap;
 use std::env;
 use std::io;
 use std::process::Stdio;
@@ -228,6 +229,43 @@ struct ClaudeResponse {
     #[serde(default)]
     terminal_reason: Option<String>,
     usage: Option<ClaudeUsage>,
+    /// Per-model usage, keyed by the full model id the turn ran on
+    /// (`claude-haiku-5-5`, never the `haiku` alias passed to `--model`).
+    /// The response reports the busiest key so the price table, keyed on
+    /// real ids, can find it.
+    /// `Option` because the CLI prints `null` for absent fields, and a `null`
+    /// here must not fail the parse and cost a failure its classification.
+    #[serde(rename = "modelUsage", default)]
+    model_usage: Option<BTreeMap<String, ClaudeModelUsage>>,
+}
+
+/// One model's share of a turn, from the result document's `modelUsage`.
+#[derive(Debug, Deserialize)]
+struct ClaudeModelUsage {
+    #[serde(rename = "inputTokens", default)]
+    input: Option<u64>,
+    #[serde(rename = "outputTokens", default)]
+    output: Option<u64>,
+}
+
+impl ClaudeResponse {
+    /// The model that served most of the turn: the `modelUsage` key with the
+    /// most tokens, ties broken by id so the answer is deterministic.
+    fn served_model(&self) -> Option<&str> {
+        self.model_usage
+            .as_ref()?
+            .iter()
+            .max_by_key(|(id, usage)| {
+                (
+                    usage
+                        .input
+                        .unwrap_or(0)
+                        .saturating_add(usage.output.unwrap_or(0)),
+                    *id,
+                )
+            })
+            .map(|(id, _)| id.as_str())
+    }
 }
 
 /// Token usage from Claude Code CLI
@@ -307,13 +345,7 @@ impl ClaudeCodeRunner {
             cmd.args(["--system-prompt", sys]);
         }
 
-        let model = self
-            .base
-            .config
-            .model
-            .as_deref()
-            .unwrap_or_else(|| self.base.default_model());
-        cmd.args(["--model", model]);
+        cmd.args(["--model", self.sent_model()]);
 
         // `--strict-mcp-config` is a boolean flag: it confines the session to
         // the servers named on this command line, so a developer's own
@@ -431,18 +463,36 @@ impl ClaudeCodeRunner {
         Some(RunnerError::external_service("claude-code", message))
     }
 
+    /// The model passed as `--model`: the configured one, else the default.
+    fn sent_model(&self) -> &str {
+        self.base
+            .config
+            .model
+            .as_deref()
+            .unwrap_or_else(|| self.base.default_model())
+    }
+
     /// Turn a parsed result document into the response, or its classified failure.
-    fn response_from(parsed: ClaudeResponse) -> Result<ChatResponse, RunnerError> {
+    ///
+    /// The response names the model the CLI reports it ran (`modelUsage`),
+    /// else `sent_model`, the value passed as `--model`, never the runner
+    /// name `"claude-code"`: the price table is keyed on model ids, and no
+    /// row matches the runner name.
+    fn response_from(
+        parsed: ClaudeResponse,
+        sent_model: &str,
+    ) -> Result<ChatResponse, RunnerError> {
         if let Some(failure) = Self::failure_of(&parsed) {
             return Err(failure);
         }
 
+        let model = parsed.served_model().unwrap_or(sent_model).to_owned();
         let content = parsed.result.unwrap_or_default();
         let usage = parsed.usage.map(|u| gross_usage(&u));
 
         let response = ChatResponse {
             content,
-            model: "claude-code".to_owned(),
+            model,
             usage,
             finish_reason: Some("stop".to_owned()),
             warnings: None,
@@ -539,13 +589,9 @@ impl LlmProvider for ClaudeCodeRunner {
             &request.mcp_servers,
         );
 
-        let model_name = request
-            .model
-            .as_deref()
-            .unwrap_or_else(|| self.base.default_model());
         debug!(
             binary = %self.base.config.binary_path.display(),
-            model = model_name,
+            model = self.sent_model(),
             has_system_prompt = system.is_some(),
             prompt_len = prompt.len(),
             "Spawning claude CLI"
@@ -571,7 +617,7 @@ impl LlmProvider for ClaudeCodeRunner {
         if output.exit_code != 0 && !parsed.is_error {
             self.base.check_exit_code(&output, "claude-code")?;
         }
-        Self::response_from(parsed)
+        Self::response_from(parsed, self.sent_model())
     }
 
     #[instrument(skip_all, fields(runner = "claude_code"))]
@@ -626,7 +672,7 @@ mod tests {
 
     /// Parse a result document straight through to the response, as `complete` does.
     fn parse_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
-        ClaudeCodeRunner::response_from(ClaudeCodeRunner::parse_result_document(raw)?)
+        ClaudeCodeRunner::response_from(ClaudeCodeRunner::parse_result_document(raw)?, "opus")
     }
 
     #[test]
@@ -635,11 +681,40 @@ mod tests {
         let response = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.content, "Hello world");
-        assert_eq!(response.model, "claude-code");
+        // No `modelUsage`: the response names the model passed as `--model`.
+        assert_eq!(response.model, "opus");
         let usage = response.usage.unwrap(); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn the_response_names_the_model_model_usage_reports() {
+        // Shape measured on CLI 2.1.296, 2026-10-12, `--model haiku`: the
+        // alias goes in, the full id comes back as the `modelUsage` key.
+        let json = br#"{"result":"ok","is_error":false,"usage":{"input_tokens":2,"output_tokens":12},"modelUsage":{"claude-haiku-5-5":{"inputTokens":2,"outputTokens":12,"costUSD":0.0033}}}"#;
+        let response = parse_response(json).unwrap(); // Safe: test assertion
+
+        assert_eq!(response.model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn the_busiest_model_in_model_usage_names_the_turn() {
+        // A turn whose side calls ran on a smaller model is still the main
+        // model's turn.
+        let json = br#"{"result":"ok","is_error":false,"modelUsage":{"claude-haiku-5-5":{"inputTokens":300,"outputTokens":20},"claude-opus-5-5":{"inputTokens":9000,"outputTokens":400}}}"#;
+        let response = parse_response(json).unwrap(); // Safe: test assertion
+
+        assert_eq!(response.model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn a_null_model_usage_keeps_a_quota_refusal_classified() {
+        let json = br#"{"result":"Claude usage limit reached","is_error":true,"api_error_status":429,"modelUsage":null}"#;
+        let err = parse_response(json).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::RateLimit, "{}", err.message);
     }
 
     #[test]

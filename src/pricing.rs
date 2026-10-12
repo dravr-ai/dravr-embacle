@@ -208,8 +208,19 @@ const OPENROUTER_PROVIDER: &str = "openrouter";
 /// unreachable, and its models silently bill at \$0.
 ///
 /// Model matching uses prefix comparison — a model name like "gemini-2.0-flash-exp"
-/// matches the prefix "gemini-2.0-flash". Entries are ordered longest-prefix-first
-/// within each provider to ensure the most specific match wins.
+/// matches the prefix "gemini-2.0-flash". When several of a provider's prefixes
+/// match, [`lookup_pricing`] takes the longest, so the most specific row wins
+/// wherever it sits in the table: `gpt-4o-mini` resolves to its own row even
+/// though `gpt-4o` is listed first and also matches it.
+///
+/// A model is priced under every id a provider reports it as, and only those:
+/// Claude Haiku 5.5 is `claude-haiku-5-5` on the Anthropic API and
+/// `claude-haiku-5.5` on Copilot, and no `claude-haiku-5` family prefix exists,
+/// so a later Haiku never inherits Haiku 5.5's card before it is priced.
+/// Opus 5 and Sonnet 5 are the exception: their exact id (`claude-opus-5`,
+/// `claude-sonnet-5`) is also the stem of every later 5.x id, so under prefix
+/// matching an unpriced Opus or Sonnet 5.x bills its 5.0 card until it gets
+/// a row of its own.
 pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     // Gemini models (provider name matches GeminiProvider::name() = "gemini")
     // gemini-flash-lite-latest is a Google-maintained rolling alias to the
@@ -256,26 +267,143 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     // Copilot headless (embacle) — proxies to Anthropic Claude models
     (
         "copilot_headless",
+        // The Opus 4 family row, $15/$75. Opus 4.6 through 5.5 bill under
+        // their own rows below, which the longest-prefix rule picks ahead of
+        // this one; only Opus 4.5, 4.1 and 4.0 (`claude-opus-4.5`,
+        // `claude-opus-4-5`, `claude-opus-4-1`, `claude-opus-4-0`) resolve
+        // here.
         "claude-opus-4",
         ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
     ),
     (
         "copilot_headless",
-        // Prefix spans every Sonnet generation (claude-sonnet-4, -4.5, -4.6, -5);
-        // all bill at the same $3/$15 Sonnet rate, so a version-agnostic prefix
-        // keeps shadow-COGS attributed instead of falling through to $0 on a bump.
+        // Version-agnostic Sonnet prefix for Sonnet 4.x (claude-sonnet-4,
+        // -4.5, -4.6) at the $3/$15 Sonnet rate, so a bump keeps shadow-COGS
+        // attributed instead of falling through to $0. Sonnet 5 ($2/$10) and
+        // Sonnet 5.5 ($2/$10) bill under their own rows, which the
+        // longest-prefix rule picks ahead of this one.
         "claude-sonnet",
         ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),
     ),
+    // Claude Opus 4.6 through 5.5 and Sonnet 5, each under Copilot's dotted
+    // id and Anthropic's hyphenated one (Opus 5 and Sonnet 5 have no minor
+    // version, so one id serves both). Opus 5.5 is $4/$20 with cache reads at
+    // 0.05x; Opus 5, 4.8, 4.7 and 4.6 are $5/$25; Sonnet 5 is $2/$10.
+    // Copilot's `-fast` tiers keep their own rows below.
     (
         "copilot_headless",
+        "claude-opus-5.5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-5-5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-5",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4.8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4.7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4.6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
+    // list price for either (Anthropic retired both), and fast mode bills at
+    // a premium over the base model ($10/$50 on Opus 4.8 and 5, 2x base), so
+    // these bill at the $15/$75 of the `claude-opus-4` family row rather
+    // than at the $5/$25 base rows they would otherwise prefix-match.
+    (
+        "copilot_headless",
+        "claude-opus-4.7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4.6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-sonnet-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Claude Sonnet 5.5 and Haiku 5.5, each under Copilot's dotted id and
+    // Anthropic's hyphenated one. Exact ids, never a `claude-haiku-5` family
+    // prefix; the longest-prefix rule puts the Sonnet 5.5 rows ahead of the
+    // version-agnostic `claude-sonnet` row above. Haiku 5.5 carries its base
+    // card only ($0.10/$0.50, the card for a prompt of 100K tokens or fewer):
+    // this runner reports one usage for a whole turn, summed over every model
+    // request in it, so no single request's prompt length reaches the lookup
+    // to choose the $0.50/$2.50 long-prompt card the way the `anthropic` rows do.
+    (
+        "copilot_headless",
+        "claude-sonnet-5.5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-sonnet-5-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-haiku-5.5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-haiku-5-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        // Claude Haiku 4.5 at its $1/$5 list price.
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Copilot SDK (the Rust runtime) — the same Anthropic pass-through as
     // copilot_headless, keyed on the name CopilotSdkRunner reports.
     (
         "copilot_sdk",
+        // Opus 4.5, 4.1 and 4.0 only, as on the copilot_headless row.
         "claude-opus-4",
         ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
     ),
@@ -284,35 +412,237 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         "claude-sonnet",
         ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),
     ),
+    // Opus 4.6 through 5.5 and Sonnet 5 under both ids, for the reasons
+    // given on the copilot_headless rows.
     (
         "copilot_sdk",
+        "claude-opus-5.5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-5-5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-5",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4.8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4.7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4.6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
+    // list price for either (Anthropic retired both), and fast mode bills at
+    // a premium over the base model ($10/$50 on Opus 4.8 and 5, 2x base), so
+    // these bill at the $15/$75 of the `claude-opus-4` family row rather
+    // than at the $5/$25 base rows they would otherwise prefix-match.
+    (
+        "copilot_sdk",
+        "claude-opus-4.7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4.6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-sonnet-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Sonnet 5.5 and Haiku 5.5 under both ids, base card only, for the
+    // reasons given on the copilot_headless rows.
+    (
+        "copilot_sdk",
+        "claude-sonnet-5.5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-sonnet-5-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-haiku-5.5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-haiku-5-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        // Claude Haiku 4.5 at its $1/$5 list price.
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Claude Code CLI — same models as copilot_headless. Keyed "claude-code",
     // the name ClaudeCodeRunner reports; CliRunnerType's Display prints the
     // underscore spelling, but name() is what a caller's usage record carries.
     (
         "claude-code",
+        // Opus 4.5, 4.1 and 4.0 only, as on the copilot_headless row.
         "claude-opus-4",
         ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
     ),
     (
         "claude-code",
-        // Version-agnostic Sonnet prefix (claude-sonnet-4, -4.5, -4.6, -5),
-        // mirroring the copilot_headless entry so a model bump keeps shadow-COGS
-        // attributed instead of falling through to $0.
+        // Version-agnostic Sonnet prefix for Sonnet 4.x at $3/$15, mirroring
+        // the copilot_headless entry so a model bump keeps shadow-COGS
+        // attributed instead of falling through to $0. Sonnet 5 and 5.5 have
+        // their own rows, which the longest-prefix rule picks first.
         "claude-sonnet",
         ModelPricing::new(3.0, 15.0).with_cache_rates(0.10, 1.25),
     ),
+    // Opus 4.6 through 5.5 and Sonnet 5 under both ids, for the reasons
+    // given on the copilot_headless rows.
     (
         "claude-code",
+        "claude-opus-5.5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-5-5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-5",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4.8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-8",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4.7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-7",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4.6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-6",
+        ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
+    // list price for either (Anthropic retired both), and fast mode bills at
+    // a premium over the base model ($10/$50 on Opus 4.8 and 5, 2x base), so
+    // these bill at the $15/$75 of the `claude-opus-4` family row rather
+    // than at the $5/$25 base rows they would otherwise prefix-match.
+    (
+        "claude-code",
+        "claude-opus-4.7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-7-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4.6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-6-fast",
+        ModelPricing::new(15.0, 75.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-sonnet-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Sonnet 5.5 and Haiku 5.5 under both ids, base card only, for the
+    // reasons given on the copilot_headless rows.
+    (
+        "claude-code",
+        "claude-sonnet-5.5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-sonnet-5-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-haiku-5.5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-haiku-5-5",
+        ModelPricing::new(0.10, 0.50).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        // Claude Haiku 4.5 at its $1/$5 list price.
         "claude-haiku-4",
-        ModelPricing::new(0.80, 4.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(1.0, 5.0).with_cache_rates(0.10, 1.25),
     ),
     // Cohere — Command A and Command R family.
-    // Entries are ordered longest-prefix-first so `command-a-reasoning` and
-    // `command-a-vision` match before the bare `command-a` prefix and the
+    // The longest matching prefix wins, so `command-a-reasoning` and
+    // `command-a-vision` resolve ahead of the bare `command-a` prefix and the
     // R-family entries don't accidentally swallow R+ / R7B.
     (
         "cohere",
@@ -400,6 +730,10 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
 
 /// Look up pricing for a (provider, model) pair using prefix matching.
 ///
+/// Of the provider's rows whose prefix the model starts with, the longest
+/// prefix wins, so a broad row (`gpt-4o`, `claude-sonnet`) never shadows a
+/// specific one (`gpt-4o-mini`, `claude-sonnet-5.5`) whatever the table order.
+///
 /// Public so a consumer's override layer can fall through to the table
 /// after its own lookup misses.
 #[must_use]
@@ -407,7 +741,8 @@ pub fn lookup_pricing(provider: &str, model: &str) -> Option<ModelPricing> {
     let provider = pool_family(provider);
     PRICING_TABLE
         .iter()
-        .find(|(p, prefix, _)| *p == provider && model.starts_with(prefix))
+        .filter(|(p, prefix, _)| *p == provider && model.starts_with(prefix))
+        .max_by_key(|(_, prefix, _)| prefix.len())
         .map(|(_, _, pricing)| *pricing)
 }
 

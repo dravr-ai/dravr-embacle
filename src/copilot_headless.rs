@@ -2780,6 +2780,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_published_list_carries_the_5_5_sonnet_and_haiku() {
+        // Until a session reports the account's own list, this runner
+        // publishes the catalog, the same one copilot_sdk publishes.
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig::default());
+        let published = runner.available_models();
+        for model in ["claude-sonnet-5.5", "claude-haiku-5.5"] {
+            assert!(
+                published.iter().any(|id| id == model),
+                "{model} missing from {published:?}"
+            );
+        }
+    }
+
     /// Every pool the env var can produce stays inside the memory budget.
     ///
     /// This is the assertion that makes `EMBACLE_ACP_POOL_SIZE` safe to turn

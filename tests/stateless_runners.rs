@@ -33,6 +33,11 @@ use embacle::{
 };
 use tokio_stream::StreamExt;
 
+// Each test execs a script it just wrote; see `support` for the ETXTBSY race
+// that makes every call here retry its spawn.
+mod support;
+use support::retry_text_file_busy;
+
 /// The id every stand-in reports as the session it opened.
 const SESSION_ID: &str = "sess-alice-7f3a";
 
@@ -160,7 +165,8 @@ fn assert_claude_isolated(argv: &[String]) {
 async fn complete_twice(runner: &dyn LlmProvider) -> Vec<String> {
     let mut answers = Vec::new();
     for request in &requests() {
-        answers.push(runner.complete(request).await.unwrap().content);
+        let response = retry_text_file_busy(|| runner.complete(request)).await;
+        answers.push(response.unwrap().content);
     }
     answers
 }
@@ -170,7 +176,9 @@ async fn complete_twice(runner: &dyn LlmProvider) -> Vec<String> {
 async fn stream_twice(runner: &dyn LlmProvider) -> Vec<String> {
     let mut answers = Vec::new();
     for request in &requests() {
-        let mut stream = runner.complete_stream(request).await.unwrap();
+        let mut stream = retry_text_file_busy(|| runner.complete_stream(request))
+            .await
+            .unwrap();
         let mut text = String::new();
         while let Some(chunk) = stream.next().await {
             if let Ok(chunk) = chunk {
@@ -221,8 +229,11 @@ async fn claude_code_complete_then_stream_never_resumes() {
     let runner = ClaudeCodeRunner::new(RunnerConfig::new(fake_cli(dir.path(), &doc)));
     let [alice, bob] = requests();
 
-    assert_eq!(runner.complete(&alice).await.unwrap().content, "pong");
-    let mut stream = runner.complete_stream(&bob).await.unwrap();
+    let answer = retry_text_file_busy(|| runner.complete(&alice)).await;
+    assert_eq!(answer.unwrap().content, "pong");
+    let mut stream = retry_text_file_busy(|| runner.complete_stream(&bob))
+        .await
+        .unwrap();
     while stream.next().await.is_some() {}
 
     for argv in assert_never_resumed(dir.path()) {

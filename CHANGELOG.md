@@ -9,6 +9,8 @@
 - feat(pricing): `anthropic` rows for `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, with their cache read/write rates
 - feat(fallback): `QuotaCooldowns`, a cheaply cloneable quota-cooldown book keyed by tier name (`is_cooling`, `remaining`, `start`, `start_for`, `end`, `duration`), and `FallbackProvider::with_cooldowns` so several chains — a full chain and the chains over its tails — share one book and agree on which tier is cooling; a caller asking a tier outside any chain reads and writes the same book. Without the call a chain keeps a private book of its own; `with_quota_cooldown` now overrides the book's duration for the refusals that chain records. `DEFAULT_QUOTA_COOLDOWN` (15 min) is public, and `QUOTA_COOLDOWN_SKIP` is the `FallthroughReason::Skipped` reason a chain gives for a tier it passes over inside its cooldown, so an observer can tell that skip from its own vetoes
 - feat(pricing)!: `ModelPricing::with_long_prompt_rates` and the new `long_prompt` field — a second rate card above a prompt-length threshold; Haiku 5.5 bills a prompt over 100K tokens at $0.50 / $2.50
+- feat(copilot): `claude-sonnet-5.5` and `claude-haiku-5.5` in the Copilot catalogue, so `copilot_sdk` and `copilot_headless` publish them; each heads its family, and `default_effort_for("claude-haiku-5.5")` is `medium` (Haiku 4.5 still takes no effort)
+- feat(pricing): Claude Haiku 5.5 ($0.10 / $0.50) and Sonnet 5.5 ($2 / $10) on `copilot_headless`, `copilot_sdk` and `claude-code`, under both `claude-haiku-5.5` / `claude-haiku-5-5` and `claude-sonnet-5.5` / `claude-sonnet-5-5`; exact ids, no `claude-haiku-5` family prefix. These runners report a whole turn's summed usage, so Haiku 5.5 bills its base card there; only the `anthropic` row switches to the long-prompt card
 
 ### Changed
 
@@ -17,10 +19,15 @@
 - fix(http-api): HTTP 529 (overloaded) is retried in place like 502/503
 - fix(pool)!: `PooledTier` no longer overwrites `ChatResponse::model` with the tier name; a response keeps the model the account ran, so a pooled per-token tier is priced instead of recorded at $0 (the account is still named by the tier's `name()` and in its errors)
 - fix(http-api): the SSE parser buffers raw bytes and decodes whole lines, so a multi-byte UTF-8 character split across two network chunks is no longer replaced by U+FFFD
+- fix(claude-code)!: `ChatResponse::model` names the model the turn ran on — the busiest `modelUsage` key of the CLI's result document (`claude-haiku-5-5`), else the value passed as `--model` — instead of the runner name `"claude-code"`, which no price row matches, so every Claude Code turn billed $0 whatever model served it
 - fix(claude-code): `Credit balance is too low` is a quota refusal (`RateLimit`), the same policy as an HTTP 402
 
 ### Fixed
 
+- fix(pricing): `lookup_pricing` takes the longest matching prefix instead of the first in table order, so `gpt-4o` no longer shadows `gpt-4o-mini` on `openai_api` and the `claude-sonnet` row no longer shadows `claude-sonnet-5.5`
+- fix(pricing): Claude Haiku 4.5 bills at its $1 / $5 list price on `copilot_headless`, `copilot_sdk` and `claude-code`; it was $0.80 / $4
+- fix(pricing): Claude Opus and Sonnet 5 list prices on `copilot_headless`, `copilot_sdk` and `claude-code`, under both the dotted and the hyphenated id — Opus 5.5 $4 / $20 with cache reads at 0.05x (it had no row, so it billed $0); Opus 5 $5 / $25 (no row before); Opus 4.8, 4.7 and 4.6 $5 / $25 (they billed $15 / $75 through the `claude-opus-4` row); Sonnet 5 $2 / $10 (it billed $3 / $15 through the `claude-sonnet` row). Opus 4.5, 4.1 and 4.0 stay on the `claude-opus-4` row and Sonnet 4.x on `claude-sonnet`. Copilot's `-fast` tiers of Opus 4.7 and 4.6 keep the $15 / $75 they billed before, on rows of their own: the reference lists no price for them, only that fast mode costs more than standard
+- fix(tests): the fake-CLI runner tests retry a spawn that fails with `ETXTBSY` (`Text file busy`), which a concurrent test's fork holding the just-written script's write descriptor causes on Linux
 - fix(claude-code): an OAuth token beats an API key — when `CLAUDE_CODE_OAUTH_TOKEN` reaches the `claude` child (a pool account's `with_env`, or the host's), `ANTHROPIC_API_KEY` is removed from its environment, so a service that sets the key for the Anthropic HTTP tier no longer moves every Claude Code tier off its subscription onto API credit; the key is forwarded only when no token exists
 - fix(claude-code): when the sandbox policy cannot be built, the runner's explicit `with_env` credential is still set on the inherited-environment child
 

@@ -11,7 +11,11 @@
     clippy::str_to_string
 )]
 
-use embacle::pricing::{calculate_cost, calculate_cost_for, TokenCounts};
+use std::collections::BTreeSet;
+
+use embacle::pricing::{
+    calculate_cost, calculate_cost_for, lookup_pricing, ModelPricing, TokenCounts, PRICING_TABLE,
+};
 
 #[test]
 fn test_known_model_cost() {
@@ -333,5 +337,279 @@ fn anthropic_pool_accounts_price_as_their_family() {
     for account in ["anthropic#2", "anthropic#10"] {
         let cost = calculate_cost_for(account, "claude-haiku-5-5", &counts);
         assert!((cost - first).abs() < 1e-12, "{account}: {cost} vs {first}");
+    }
+}
+
+// ============================================================================
+// Prefix resolution
+// ============================================================================
+
+/// The row a (provider, model) pair resolves to, or a failure naming the pair.
+fn resolved(provider: &str, model: &str) -> ModelPricing {
+    lookup_pricing(provider, model)
+        .unwrap_or_else(|| panic!("{provider}/{model} resolves to no price row"))
+}
+
+/// Assert a resolved row's input, output, cache-read and cache-write rates,
+/// and that it carries no long-prompt card unless `long` names one.
+fn assert_rates(provider: &str, model: &str, rates: (f64, f64, f64, f64), long: bool) {
+    let pricing = resolved(provider, model);
+    let actual = (
+        pricing.input_per_million,
+        pricing.output_per_million,
+        pricing.cache_read_multiplier,
+        pricing.cache_write_multiplier,
+    );
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+    assert!(
+        close(actual.0, rates.0)
+            && close(actual.1, rates.1)
+            && close(actual.2, rates.2)
+            && close(actual.3, rates.3),
+        "{provider}/{model} resolved to (input, output, read, write) = {actual:?}, \
+         expected {rates:?}"
+    );
+    assert_eq!(
+        pricing.long_prompt.is_some(),
+        long,
+        "{provider}/{model} long-prompt card: {:?}",
+        pricing.long_prompt
+    );
+}
+
+/// A broad prefix listed before a specific one must not shadow it: `gpt-4o`
+/// precedes `gpt-4o-mini` in the table and matches it too, so a first-match
+/// lookup prices the mini at the full model's $2.50.
+#[test]
+fn the_longest_matching_prefix_wins_whatever_the_table_order() {
+    let mini = (0.15, 0.60, 0.50, 1.0);
+    assert_rates("openai_api", "gpt-4o-mini", mini, false);
+    assert_rates("openai_api", "gpt-4o-mini-2024-07-18", mini, false);
+    assert_rates(
+        "openai_api",
+        "gpt-4o-2024-08-06",
+        (2.50, 10.0, 0.50, 1.0),
+        false,
+    );
+}
+
+/// Two rows with one (provider, prefix) would leave the winner to table order.
+#[test]
+fn no_provider_lists_the_same_prefix_twice() {
+    let mut seen = BTreeSet::new();
+    for (provider, prefix, _) in PRICING_TABLE {
+        assert!(
+            seen.insert((*provider, *prefix)),
+            "PRICING_TABLE lists ({provider}, {prefix}) more than once"
+        );
+    }
+}
+
+// ============================================================================
+// Claude 5.5 and Haiku 4.5 on the runners that pass Anthropic usage through
+// ============================================================================
+
+/// Every runner with real Anthropic price rows, by the name it reports.
+const PASS_THROUGH_RUNNERS: [&str; 3] = ["copilot_headless", "copilot_sdk", "claude-code"];
+
+/// Haiku 5.5: $0.10 / $0.50, Anthropic cache multipliers.
+const HAIKU_5_5: (f64, f64, f64, f64) = (0.10, 0.50, 0.10, 1.25);
+
+/// Sonnet 5.5: $2 / $10, Anthropic cache multipliers.
+const SONNET_5_5: (f64, f64, f64, f64) = (2.0, 10.0, 0.10, 1.25);
+
+#[test]
+fn haiku_5_5_is_priced_under_every_id_a_runner_reports() {
+    for provider in PASS_THROUGH_RUNNERS {
+        // Copilot's dotted id and Anthropic's hyphenated one. The base card
+        // only: these runners report a whole turn's summed usage.
+        for model in ["claude-haiku-5.5", "claude-haiku-5-5"] {
+            assert_rates(provider, model, HAIKU_5_5, false);
+        }
+    }
+    // The Anthropic API reports per request, so it carries the long card.
+    assert_rates("anthropic", "claude-haiku-5-5", HAIKU_5_5, true);
+    // A pooled second account prices like the first.
+    assert_rates("claude-code#2", "claude-haiku-5-5", HAIKU_5_5, false);
+}
+
+#[test]
+fn sonnet_5_5_wins_over_the_version_agnostic_sonnet_row() {
+    for provider in PASS_THROUGH_RUNNERS {
+        // `claude-sonnet` ($3/$15) is listed first and matches these too.
+        for model in ["claude-sonnet-5.5", "claude-sonnet-5-5"] {
+            assert_rates(provider, model, SONNET_5_5, false);
+        }
+        // Earlier Sonnets keep the version-agnostic row.
+        assert_rates(
+            provider,
+            "claude-sonnet-4.5",
+            (3.0, 15.0, 0.10, 1.25),
+            false,
+        );
+    }
+    assert_rates("anthropic", "claude-sonnet-5-5", SONNET_5_5, false);
+}
+
+/// Haiku 5.5 is priced by its exact version: no `claude-haiku-5` family row
+/// lends its card to a Haiku that is not 5.5.
+#[test]
+fn no_other_haiku_5_inherits_the_haiku_5_5_card() {
+    for provider in [
+        "anthropic",
+        "copilot_headless",
+        "copilot_sdk",
+        "claude-code",
+    ] {
+        for model in [
+            "claude-haiku-5",
+            "claude-haiku-5-1",
+            "claude-haiku-5.1",
+            "claude-haiku-5-0",
+        ] {
+            assert!(
+                lookup_pricing(provider, model).is_none(),
+                "{provider}/{model} resolved to {:?}; only Haiku 5.5 is priced",
+                lookup_pricing(provider, model)
+            );
+        }
+    }
+}
+
+#[test]
+fn haiku_4_5_bills_at_its_list_price() {
+    for provider in PASS_THROUGH_RUNNERS {
+        for model in [
+            "claude-haiku-4.5",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            assert_rates(provider, model, (1.0, 5.0, 0.10, 1.25), false);
+        }
+    }
+}
+
+/// A cached, tool-using Copilot SDK turn on Haiku 5.5: two model calls summed,
+/// 43,538 prompt tokens of which 21,678 were read from cache and 21,854
+/// written to it, 163 completion and 113 reasoning tokens.
+#[test]
+fn haiku_5_5_prices_a_cached_tool_turn() {
+    let counts = TokenCounts::new(43_538, 163)
+        .with_cache(21_678, 21_854)
+        .with_reasoning(113);
+    for provider in PASS_THROUGH_RUNNERS {
+        let cost = calculate_cost_for(provider, "claude-haiku-5.5", &counts);
+        // 6 fresh x $0.10/M + 21,678 read x $0.01/M + 21,854 written
+        // x $0.125/M + (163 + 113) output x $0.50/M.
+        let expected = 0.000_000_6 + 0.000_216_78 + 0.002_731_75 + 0.000_138;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "{provider}: expected {expected}, got {cost}"
+        );
+    }
+}
+
+/// A turn whose summed prompt passes 100K stays on the base card on a
+/// pass-through runner; the Anthropic API, which reports one request, does not.
+#[test]
+fn a_long_summed_turn_stays_on_the_base_card_off_the_anthropic_api() {
+    let turn = calculate_cost("copilot_sdk", "claude-haiku-5.5", 150_000, 0);
+    assert!((turn - 0.015).abs() < 1e-12, "{turn}");
+    let request = calculate_cost("anthropic", "claude-haiku-5-5", 150_000, 0);
+    assert!((request - 0.075).abs() < 1e-12, "{request}");
+}
+
+// ============================================================================
+// Claude Opus and Sonnet 5 on the pass-through runners
+// ============================================================================
+
+/// Opus 5.5: $4 / $20, cache reads at 0.05x.
+const OPUS_5_5: (f64, f64, f64, f64) = (4.0, 20.0, 0.05, 1.25);
+
+/// Opus 5, 4.8, 4.7 and 4.6: $5 / $25.
+const OPUS_5_25: (f64, f64, f64, f64) = (5.0, 25.0, 0.10, 1.25);
+
+/// The Opus 4 family row Opus 4.5, 4.1 and 4.0 resolve to.
+const OPUS_4_FAMILY: (f64, f64, f64, f64) = (15.0, 75.0, 0.10, 1.25);
+
+/// Sonnet 5: $2 / $10.
+const SONNET_5: (f64, f64, f64, f64) = (2.0, 10.0, 0.10, 1.25);
+
+/// Sonnet 4.x: the version-agnostic `claude-sonnet` row, $3 / $15.
+const SONNET_4: (f64, f64, f64, f64) = (3.0, 15.0, 0.10, 1.25);
+
+#[test]
+fn opus_5_5_is_priced_under_both_ids() {
+    for provider in PASS_THROUGH_RUNNERS {
+        // `claude-opus-5` ($5/$25) is a prefix of both and must lose to them.
+        for model in ["claude-opus-5.5", "claude-opus-5-5"] {
+            assert_rates(provider, model, OPUS_5_5, false);
+        }
+    }
+}
+
+#[test]
+fn opus_5_and_4_6_through_4_8_bill_five_and_twenty_five() {
+    for provider in PASS_THROUGH_RUNNERS {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4.8",
+            "claude-opus-4-8",
+            "claude-opus-4.7",
+            "claude-opus-4-7",
+            "claude-opus-4.6",
+            "claude-opus-4-6",
+        ] {
+            assert_rates(provider, model, OPUS_5_25, false);
+        }
+    }
+}
+
+#[test]
+fn opus_4_6_and_4_7_fast_tiers_do_not_fall_to_their_base_rows() {
+    // The reference has no list price for these retired fast tiers and says
+    // fast mode costs more than standard, so they bill at the $15/$75 Opus 4
+    // family rate rather than prefix-matching the $5/$25 base rows.
+    for provider in PASS_THROUGH_RUNNERS {
+        for model in [
+            "claude-opus-4.7-fast",
+            "claude-opus-4-7-fast",
+            "claude-opus-4.6-fast",
+            "claude-opus-4-6-fast",
+        ] {
+            assert_rates(provider, model, OPUS_4_FAMILY, false);
+        }
+    }
+}
+
+#[test]
+fn opus_4_5_and_older_keep_the_opus_4_family_row() {
+    for provider in PASS_THROUGH_RUNNERS {
+        for model in [
+            "claude-opus-4",
+            "claude-opus-4.5",
+            "claude-opus-4-5",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-1",
+            "claude-opus-4-0",
+        ] {
+            assert_rates(provider, model, OPUS_4_FAMILY, false);
+        }
+    }
+}
+
+#[test]
+fn sonnet_5_wins_over_the_version_agnostic_sonnet_row() {
+    for provider in PASS_THROUGH_RUNNERS {
+        assert_rates(provider, "claude-sonnet-5", SONNET_5, false);
+        for model in [
+            "claude-sonnet-4.6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4.5",
+            "claude-sonnet-4",
+            "claude-sonnet-4-0",
+        ] {
+            assert_rates(provider, model, SONNET_4, false);
+        }
     }
 }

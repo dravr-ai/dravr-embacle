@@ -149,6 +149,12 @@ pub const CATALOG: &[ModelCandidate] = &[
     },
     // Claude Sonnet
     ModelCandidate {
+        id: "claude-sonnet-5.5",
+        family: Family::ClaudeSonnet,
+        version: (5, 5),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
         id: "claude-sonnet-5",
         family: Family::ClaudeSonnet,
         version: (5, 0),
@@ -173,6 +179,12 @@ pub const CATALOG: &[ModelCandidate] = &[
         tier: Tier::Full,
     },
     // Claude Haiku
+    ModelCandidate {
+        id: "claude-haiku-5.5",
+        family: Family::ClaudeHaiku,
+        version: (5, 5),
+        tier: Tier::Full,
+    },
     ModelCandidate {
         id: "claude-haiku-4.5",
         family: Family::ClaudeHaiku,
@@ -301,12 +313,16 @@ pub fn find(id: &str) -> Option<&'static ModelCandidate> {
 /// Heuristic default reasoning effort for a model id.
 ///
 /// Returns `Medium` for Opus/Sonnet/GPT-5.x (models that benefit from deliberation)
-/// and `None` for Haiku/Gemini/older GPT (flag is ignored or unsupported).
+/// and for Claude Haiku 5.5, whose own default effort is `medium`; `None` for
+/// Haiku 4.5, Gemini and older GPT (the flag is ignored or unsupported there).
+/// Haiku is matched on its exact version: Haiku 4.5 rejects effort, and a
+/// later Haiku earns a default only once it is listed and checked.
 #[must_use]
 pub fn default_effort_for(model_id: &str) -> Option<ReasoningEffort> {
     let candidate = find(model_id)?;
     match candidate.family {
         Family::ClaudeOpus | Family::ClaudeSonnet => Some(ReasoningEffort::Medium),
+        Family::ClaudeHaiku if candidate.version == (5, 5) => Some(ReasoningEffort::Medium),
         Family::Gpt if candidate.version.0 >= 5 => Some(ReasoningEffort::Medium),
         _ => None,
     }
@@ -429,6 +445,45 @@ mod tests {
         // against this list warned about the working model at every startup
         // (dravr-carnet#356) before any session could report the real list.
         assert!(catalog_ids().iter().any(|id| id == "claude-sonnet-5"));
+    }
+
+    #[test]
+    fn catalog_lists_the_5_5_sonnet_and_haiku() {
+        // copilot_sdk publishes `catalog_ids()`, and copilot_headless does
+        // until a session reports the account's own list; a caller that holds
+        // a request to that list would refuse a 5.5 model missing here.
+        let ids = catalog_ids();
+        for model in ["claude-sonnet-5.5", "claude-haiku-5.5"] {
+            assert!(ids.iter().any(|id| id == model), "{model} missing");
+        }
+    }
+
+    #[test]
+    fn the_5_5_models_rank_above_their_predecessors() {
+        assert_eq!(
+            next_preferred("claude-opus-4.5"),
+            Some("claude-sonnet-5.5"),
+            "the newest Sonnet heads its family"
+        );
+        assert_eq!(next_preferred("claude-sonnet-5.5"), Some("claude-sonnet-5"));
+        assert_eq!(
+            next_preferred("claude-sonnet-4"),
+            Some("claude-haiku-5.5"),
+            "the newest Haiku heads its family"
+        );
+        assert_eq!(next_preferred("claude-haiku-5.5"), Some("claude-haiku-4.5"));
+    }
+
+    #[test]
+    fn the_5_5_models_default_to_medium_effort() {
+        assert_eq!(
+            default_effort_for("claude-sonnet-5.5"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            default_effort_for("claude-haiku-5.5"),
+            Some(ReasoningEffort::Medium)
+        );
     }
 
     #[test]

@@ -836,6 +836,20 @@ mod tests {
     }
 
     #[test]
+    fn the_published_list_carries_the_5_5_sonnet_and_haiku() {
+        // The list a caller checks a per-request model against; this runner
+        // never replaces it with the account's own.
+        let runner = CopilotSdkRunner::with_config(CopilotSdkConfig::default());
+        let published = runner.available_models();
+        for model in ["claude-sonnet-5.5", "claude-haiku-5.5"] {
+            assert!(
+                published.iter().any(|id| id == model),
+                "{model} missing from {published:?}"
+            );
+        }
+    }
+
+    #[test]
     fn usage_accumulates_across_calls_and_names_the_served_model() {
         let mut acc = TurnAccumulator::default();
         let first = event(
