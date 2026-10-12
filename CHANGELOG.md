@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0] — 2026-10-12
+
+### Added
+
+- feat(router): Redis quota store and ACP MCP-instructions opt-in
+
+
 ## [0.35.0] — 2026-10-12
 
 ### Added
