@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use tokio_stream::{self as stream, StreamExt};
 
 use embacle::fallback::{
-    Attempt, FallbackObserver, FallbackProvider, FallthroughReason, ResponsePolicy, Tier,
+    Attempt, FallbackObserver, FallbackProvider, FallthroughReason, QuotaCooldowns, ResponsePolicy,
+    Tier, QUOTA_COOLDOWN_SKIP,
 };
 use embacle::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
@@ -273,6 +274,42 @@ async fn a_vetoed_primary_is_never_called_and_the_skip_is_reported() {
         secondary.seen_models(),
         vec![None],
         "own_model_per_tier clears the model on the forwarded request"
+    );
+}
+
+/// A tier inside its quota cooldown is passed over without asking the
+/// observer, and the skip carries `QUOTA_COOLDOWN_SKIP`, so an observer that
+/// pages on its own vetoes can tell the two apart.
+#[tokio::test]
+async fn a_cooling_tier_is_skipped_with_the_cooldown_reason() {
+    let primary = Fake::new("primary", Script::Says("should not be asked"));
+    let secondary = Fake::new("secondary", Script::Says("from the secondary"));
+    let observer = Recording::new(vec![]);
+    let book = QuotaCooldowns::default();
+    book.start("primary");
+
+    let response = chain(
+        &[Arc::clone(&primary), Arc::clone(&secondary)],
+        Arc::clone(&observer),
+    )
+    .with_cooldowns(book)
+    .complete(&a_turn())
+    .await
+    .expect("the secondary answers");
+
+    assert_eq!(response.content, "from the secondary");
+    assert_eq!(primary.calls(), 0, "a cooling tier is not asked");
+    assert_eq!(
+        observer.events(),
+        vec![
+            Event::Fallthrough {
+                from: 0,
+                to: 1,
+                reason: format!("skipped:{QUOTA_COOLDOWN_SKIP}")
+            },
+            Event::Success { position: 1 },
+        ],
+        "the observer is not consulted for a cooling tier, and the skip names the cooldown"
     );
 }
 

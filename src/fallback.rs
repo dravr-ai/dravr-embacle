@@ -38,13 +38,37 @@
 //! caller with its diagnostic intact. Capabilities are the bitwise OR of all
 //! inner providers.
 //!
+//! ## Quota cooldown
+//!
+//! A tier that refuses on quota ([`ErrorKind::RateLimit`] — a spent
+//! subscription window, a 429, an HTTP 402 credit exhaustion) is passed over
+//! for a cooldown window instead of being asked again on every turn. The
+//! window lives in a [`QuotaCooldowns`] book keyed by the tier's
+//! [`LlmProvider::name`] (`anthropic#2` for a pooled account). By default each
+//! chain keeps a private book; [`FallbackProvider::with_cooldowns()`] hands
+//! several chains — a full chain and the chains over its tails, say — one
+//! shared book, so a tier refused in one is passed over in all of them, and a
+//! caller that asks a tier outside any chain can read and write the same book
+//! with [`QuotaCooldowns::is_cooling()`] and [`QuotaCooldowns::start()`].
+//! Tier names in a book must therefore name one account each.
+//!
+//! The book is keyed by name, not position, in a private book too: two tiers
+//! of one chain that share a name share a window, so a refusal from either
+//! passes over both and an answer from either ends it. A
+//! [`RouterProvider`](crate::router::RouterProvider) tier is named by its
+//! active backend, so its refusal is recorded under the backend that was
+//! active and the router is passed over only while the backend active on the
+//! next call is the one cooling.
+//!
 //! [`RouterProvider`](crate::router::RouterProvider) is the deliberate
 //! sibling: it routes *proactively* on quota readings, where this chain reacts
 //! to outcomes. The two compose.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -223,6 +247,150 @@ type TierCall<'r, T> = Pin<Box<dyn Future<Output = Result<T, RunnerError>> + Sen
 type TierMethod<'m, T> =
     &'m (dyn for<'r> Fn(&'r dyn LlmProvider, &'r ChatRequest) -> TierCall<'r, T> + Sync);
 
+/// How long a refused account is passed over by default.
+///
+/// A chain or a book can say otherwise. Long enough that a burst of turns does
+/// not pay a refusal each, short enough that a window that reset is noticed
+/// within the quarter hour.
+pub const DEFAULT_QUOTA_COOLDOWN: Duration = Duration::from_mins(15);
+
+/// The [`FallthroughReason::Skipped`] reason a chain gives when it passes over
+/// a tier inside its quota cooldown, rather than because an observer vetoed it.
+///
+/// Nothing failed on that hop — the tier was not asked — and its refusal was
+/// already reported when the window started, so an observer that pages on
+/// fallthroughs can tell this skip from its own vetoes by comparing with this.
+pub const QUOTA_COOLDOWN_SKIP: &str = "quota cooldown";
+
+/// Which tiers are being passed over after a quota refusal, keyed by
+/// [`LlmProvider::name`].
+///
+/// Cloning is cheap and every clone is the same book: hand one to several
+/// [`FallbackProvider`]s with [`FallbackProvider::with_cooldowns()`] and a
+/// tier refused in any of them is passed over in all of them until its window
+/// ends. A window expires on its own — nothing has to clear it — and a tier
+/// that answers ends its window early.
+///
+/// The state sits behind a `std` mutex held for one map read or write, never
+/// across an await.
+#[derive(Clone)]
+pub struct QuotaCooldowns {
+    inner: Arc<CooldownState>,
+}
+
+struct CooldownState {
+    duration: Duration,
+    windows: Mutex<HashMap<String, Window>>,
+}
+
+/// One tier's cooldown: when it started and how long it runs. Kept as a
+/// start and a length rather than an end instant, so no window length — not
+/// even `Duration::MAX` — overflows an `Instant`.
+#[derive(Clone, Copy)]
+struct Window {
+    started: Instant,
+    length: Duration,
+}
+
+impl Window {
+    /// What is left of the window, or `None` once it has run out.
+    fn left(self) -> Option<Duration> {
+        self.length
+            .checked_sub(self.started.elapsed())
+            .filter(|left| !left.is_zero())
+    }
+}
+
+impl QuotaCooldowns {
+    /// An empty book whose [`start()`](Self::start) cools a tier for
+    /// `duration`.
+    #[must_use]
+    pub fn new(duration: Duration) -> Self {
+        Self {
+            inner: Arc::new(CooldownState {
+                duration,
+                windows: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// How long [`start()`](Self::start) cools a tier.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.inner.duration
+    }
+
+    /// Whether `name` is inside a cooldown window right now. An expired
+    /// window is dropped on the way.
+    #[must_use]
+    pub fn is_cooling(&self, name: &str) -> bool {
+        let mut windows = self.lock();
+        match windows.get(name).copied().map(Window::left) {
+            Some(Some(_)) => true,
+            Some(None) => {
+                windows.remove(name);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// How long `name` stays cooling, or `None` when it is not.
+    #[must_use]
+    pub fn remaining(&self, name: &str) -> Option<Duration> {
+        self.lock().get(name).copied().and_then(Window::left)
+    }
+
+    /// Note a quota refusal from `name`: pass it over for [`duration()`](Self::duration).
+    pub fn start(&self, name: &str) {
+        self.start_for(name, self.inner.duration);
+    }
+
+    /// Note a quota refusal from `name`: pass it over for `duration`. A
+    /// window already running past that is kept, so a short window recorded
+    /// by one chain never cuts short a longer one recorded by another.
+    pub fn start_for(&self, name: &str, duration: Duration) {
+        let window = Window {
+            started: Instant::now(),
+            length: duration,
+        };
+        let mut windows = self.lock();
+        let slot = windows.entry(name.to_owned()).or_insert(window);
+        if slot.left().unwrap_or_default() < duration {
+            *slot = window;
+        }
+    }
+
+    /// `name` answered: whatever window it carried is over.
+    pub fn end(&self, name: &str) {
+        self.lock().remove(name);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Window>> {
+        self.inner
+            .windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Default for QuotaCooldowns {
+    /// An empty book cooling a tier for [`DEFAULT_QUOTA_COOLDOWN`].
+    fn default() -> Self {
+        Self::new(DEFAULT_QUOTA_COOLDOWN)
+    }
+}
+
+impl fmt::Debug for QuotaCooldowns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cooling = self.lock().len();
+        f.debug_struct("QuotaCooldowns")
+            .field("duration", &self.inner.duration)
+            .field("entries", &cooling)
+            .finish()
+    }
+}
+
 /// Provider that tries multiple inner providers in order, returning the first success.
 ///
 /// # Construction
@@ -233,7 +401,9 @@ type TierMethod<'m, T> =
 /// Use [`FallbackProvider::with_retry()`] to enable per-provider retry
 /// with exponential backoff on transient errors,
 /// [`FallbackProvider::with_fallthrough()`] to choose what moves a request
-/// on, and [`FallbackProvider::with_observer()`] to watch every hop.
+/// on, [`FallbackProvider::with_observer()`] to watch every hop, and
+/// [`FallbackProvider::with_cooldowns()`] to share quota cooldowns with other
+/// chains.
 pub struct FallbackProvider {
     providers: Vec<Box<dyn LlmProvider>>,
     display_name: String,
@@ -244,18 +414,13 @@ pub struct FallbackProvider {
     /// writes to; the chain only reads through it.
     observer: Option<Arc<dyn FallbackObserver>>,
     /// How long a tier that refused on quota is passed over before it is
-    /// asked again. See [`FallbackProvider::with_quota_cooldown`].
-    quota_cooldown: Duration,
-    /// Per tier: the instant until which it is passed over, set when it
-    /// refused on quota. A `std` mutex: held for a read or a write of one
-    /// slot, never across an await.
-    cooldown_until: Mutex<Vec<Option<Instant>>>,
+    /// asked again, when this chain overrides the book's duration. See
+    /// [`FallbackProvider::with_quota_cooldown`].
+    quota_cooldown: Option<Duration>,
+    /// Which tiers are cooling, by name: private to this chain unless
+    /// [`FallbackProvider::with_cooldowns`] shared one.
+    cooldowns: QuotaCooldowns,
 }
-
-/// A refused account is asked again after this long, unless the chain says
-/// otherwise. Long enough that a burst of turns does not pay a refusal each,
-/// short enough that a window that reset is noticed within the quarter hour.
-const DEFAULT_QUOTA_COOLDOWN: Duration = Duration::from_mins(15);
 
 impl FallbackProvider {
     /// Create a fallback chain from a non-empty list of providers.
@@ -302,7 +467,6 @@ impl FallbackProvider {
             }
         }
 
-        let tiers = providers.len();
         Ok(Self {
             providers,
             display_name,
@@ -310,8 +474,8 @@ impl FallbackProvider {
             retry_config,
             policy: ResponsePolicy::permissive(),
             observer: None,
-            quota_cooldown: DEFAULT_QUOTA_COOLDOWN,
-            cooldown_until: Mutex::new(vec![None; tiers]),
+            quota_cooldown: None,
+            cooldowns: QuotaCooldowns::default(),
         })
     }
 
@@ -325,46 +489,50 @@ impl FallbackProvider {
     /// costs one refusal per cooldown rather than one per turn, and needs no
     /// parsing of a reset time out of vendor prose. The last tier is never
     /// passed over: a chain with nowhere else to go asks it and returns its
-    /// answer. Default: 15 minutes.
+    /// answer. Default: the book's [`QuotaCooldowns::duration`] — 15 minutes
+    /// for the private book a chain starts with. Set here, it overrides the
+    /// book's duration for the refusals this chain records.
     #[must_use]
     pub const fn with_quota_cooldown(mut self, cooldown: Duration) -> Self {
-        self.quota_cooldown = cooldown;
+        self.quota_cooldown = Some(cooldown);
         self
+    }
+
+    /// Keep quota cooldowns in `book` instead of a private one.
+    ///
+    /// Every chain holding a clone of the same book agrees on which tiers are
+    /// cooling: a tier refused on quota in one chain is passed over in the
+    /// others for the window, keyed by its [`LlmProvider::name`]. Without this
+    /// call a chain keeps its own book.
+    #[must_use]
+    pub fn with_cooldowns(mut self, book: QuotaCooldowns) -> Self {
+        self.cooldowns = book;
+        self
+    }
+
+    /// The book this chain reads and writes its quota cooldowns in.
+    #[must_use]
+    pub const fn cooldowns(&self) -> &QuotaCooldowns {
+        &self.cooldowns
     }
 
     /// Whether `position` is being passed over after a quota refusal.
     fn in_cooldown(&self, position: usize) -> bool {
-        let slots = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        slots
-            .get(position)
-            .copied()
-            .flatten()
-            .is_some_and(|until| Instant::now() < until)
+        self.cooldowns.is_cooling(self.providers[position].name())
     }
 
     /// Note a quota refusal from `position`: pass it over for the cooldown.
     fn start_cooldown(&self, position: usize) {
-        let mut slots = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(slot) = slots.get_mut(position) {
-            *slot = Some(Instant::now() + self.quota_cooldown);
-        }
+        let name = self.providers[position].name();
+        let duration = self
+            .quota_cooldown
+            .unwrap_or_else(|| self.cooldowns.duration());
+        self.cooldowns.start_for(name, duration);
     }
 
     /// A tier answered: whatever cooldown it carried is over.
     fn end_cooldown(&self, position: usize) {
-        let mut slots = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(slot) = slots.get_mut(position) {
-            *slot = None;
-        }
+        self.cooldowns.end(self.providers[position].name());
     }
 
     /// Choose what moves a request from one tier to the next.
@@ -486,7 +654,7 @@ impl FallbackProvider {
 
             if has_successor {
                 let verdict = if self.in_cooldown(position) {
-                    Attempt::Skip("quota cooldown")
+                    Attempt::Skip(QUOTA_COOLDOWN_SKIP)
                 } else {
                     self.before_attempt(tier)
                 };
@@ -1105,6 +1273,56 @@ mod tests {
         assert_eq!(fallback.backoff_delay(2), Duration::from_millis(400));
         // attempt 3: 100 * 2^3 = 800ms -> capped to 500ms
         assert_eq!(fallback.backoff_delay(3), Duration::from_millis(500));
+    }
+
+    // ========================================================================
+    // Quota cooldown book
+    // ========================================================================
+
+    #[test]
+    fn a_book_cools_a_name_and_ends_on_request() {
+        let book = QuotaCooldowns::new(Duration::from_hours(1));
+        assert!(!book.is_cooling("anthropic"));
+        book.start("anthropic");
+        assert!(book.is_cooling("anthropic"));
+        assert!(!book.is_cooling("anthropic#2"), "names are separate");
+        assert!(book.remaining("anthropic").is_some());
+        book.end("anthropic");
+        assert!(!book.is_cooling("anthropic"));
+        assert!(book.remaining("anthropic").is_none());
+    }
+
+    #[test]
+    fn clones_of_a_book_are_one_book() {
+        let book = QuotaCooldowns::default();
+        assert_eq!(book.duration(), DEFAULT_QUOTA_COOLDOWN);
+        let other = book.clone();
+        other.start("claude-code#2");
+        assert!(book.is_cooling("claude-code#2"));
+    }
+
+    #[test]
+    fn a_shorter_window_never_cuts_a_longer_one_short() {
+        let book = QuotaCooldowns::new(Duration::from_hours(1));
+        book.start("anthropic");
+        book.start_for("anthropic", Duration::ZERO);
+        assert!(book.is_cooling("anthropic"));
+    }
+
+    #[test]
+    fn an_unbounded_window_does_not_overflow() {
+        let book = QuotaCooldowns::new(Duration::MAX);
+        book.start("anthropic");
+        assert!(book.is_cooling("anthropic"));
+        assert!(book.remaining("anthropic") > Some(Duration::from_secs(u64::from(u32::MAX))));
+    }
+
+    #[test]
+    fn an_expired_window_is_not_cooling() {
+        let book = QuotaCooldowns::new(Duration::ZERO);
+        book.start("anthropic");
+        assert!(!book.is_cooling("anthropic"));
+        assert!(book.remaining("anthropic").is_none());
     }
 
     #[tokio::test]

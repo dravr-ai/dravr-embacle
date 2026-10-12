@@ -32,7 +32,7 @@ use tokio::time::sleep;
 use async_trait::async_trait;
 use serde_json::json;
 
-use embacle::fallback::{is_empty_completion, FallbackProvider, ResponsePolicy};
+use embacle::fallback::{is_empty_completion, FallbackProvider, QuotaCooldowns, ResponsePolicy};
 use embacle::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
     RunnerError, ToolCallRequest,
@@ -551,4 +551,125 @@ async fn a_provider_fault_is_not_a_cooldown() {
         3,
         "a fault may clear on the next turn; only a quota refusal is held off"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared cooldown book: chains that share one agree on who is cooling
+// ---------------------------------------------------------------------------
+
+/// The platform runs a full chain and, beside it, a chain over its tail; both
+/// hold the same account. A refusal recorded by one is honoured by the other
+/// for the window, then the account is asked again.
+#[tokio::test]
+async fn chains_sharing_a_book_pass_over_a_tier_the_other_saw_refuse() {
+    let book = QuotaCooldowns::new(Duration::from_millis(200));
+    let (spent, spent_calls) = Fake::scripted("anthropic#2", Scripted::QuotaRefusal);
+    let (second, _) = Fake::scripted("claude-code", Scripted::Says("pong"));
+    let full = FallbackProvider::new(vec![spent, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_cooldowns(book.clone());
+    let (spent_again, spent_again_calls) = Fake::scripted("anthropic#2", Scripted::QuotaRefusal);
+    let (third, third_calls) = Fake::scripted("gemini", Scripted::Says("pong"));
+    let tail = FallbackProvider::new(vec![spent_again, third])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_cooldowns(book.clone());
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    full.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(spent_calls.load(Ordering::SeqCst), 1);
+    assert!(book.is_cooling("anthropic#2"), "the refusal is in the book");
+
+    tail.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(
+        spent_again_calls.load(Ordering::SeqCst),
+        0,
+        "the other chain does not ask an account the book says is cooling"
+    );
+    assert_eq!(third_calls.load(Ordering::SeqCst), 1);
+
+    sleep(Duration::from_millis(250)).await;
+    assert!(
+        !book.is_cooling("anthropic#2"),
+        "the window expires on its own"
+    );
+    tail.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(
+        spent_again_calls.load(Ordering::SeqCst),
+        1,
+        "after the window the account is asked again"
+    );
+}
+
+/// Without a shared book each chain keeps its own: a refusal in one chain
+/// says nothing to another.
+#[tokio::test]
+async fn chains_without_a_shared_book_keep_their_own_cooldowns() {
+    let (spent, spent_calls) = Fake::scripted("anthropic#2", Scripted::QuotaRefusal);
+    let (second, _) = Fake::scripted("claude-code", Scripted::Says("pong"));
+    let one = FallbackProvider::new(vec![spent, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict());
+    let (spent_again, spent_again_calls) = Fake::scripted("anthropic#2", Scripted::QuotaRefusal);
+    let (third, _) = Fake::scripted("gemini", Scripted::Says("pong"));
+    let other = FallbackProvider::new(vec![spent_again, third])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict());
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    one.complete(&request).await.unwrap(); // Safe: test assertion
+    assert!(one.cooldowns().is_cooling("anthropic#2"));
+    assert!(!other.cooldowns().is_cooling("anthropic#2"));
+    other.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(spent_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spent_again_calls.load(Ordering::SeqCst),
+        1,
+        "a private book does not hear about another chain's refusal"
+    );
+}
+
+/// A caller that asks a tier outside any chain — a tool loop calling the
+/// chain head alone — records the refusal in the book, and the chains that
+/// share it pass the tier over.
+#[tokio::test]
+async fn a_refusal_recorded_outside_the_chain_is_honoured_by_it() {
+    let book = QuotaCooldowns::new(Duration::from_hours(1));
+    let (head, head_calls) = Fake::scripted("anthropic", Scripted::Says("head"));
+    let (second, _) = Fake::scripted("claude-code", Scripted::Says("second"));
+    let chain = FallbackProvider::new(vec![head, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_cooldowns(book.clone());
+
+    book.start("anthropic");
+    let reply = chain
+        .complete(&ChatRequest::new(vec![ChatMessage::user("ping")]))
+        .await
+        .unwrap(); // Safe: test assertion
+    assert_eq!(reply.content, "second");
+    assert_eq!(head_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A chain's own `with_quota_cooldown` overrides the book's duration for the
+/// refusals that chain records.
+#[tokio::test]
+async fn a_chains_quota_cooldown_overrides_the_books_duration() {
+    let book = QuotaCooldowns::new(Duration::from_hours(1));
+    let (spent, spent_calls) = Fake::scripted("anthropic#2", Scripted::QuotaRefusal);
+    let (second, _) = Fake::scripted("claude-code", Scripted::Says("pong"));
+    let chain = FallbackProvider::new(vec![spent, second])
+        .unwrap() // Safe: test setup
+        .with_fallthrough(ResponsePolicy::strict())
+        .with_cooldowns(book.clone())
+        .with_quota_cooldown(Duration::from_millis(100));
+    let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+
+    chain.complete(&request).await.unwrap(); // Safe: test assertion
+    let left = book.remaining("anthropic#2").unwrap(); // Safe: test assertion
+    assert!(left <= Duration::from_millis(100), "{left:?}");
+    sleep(Duration::from_millis(150)).await;
+    chain.complete(&request).await.unwrap(); // Safe: test assertion
+    assert_eq!(spent_calls.load(Ordering::SeqCst), 2);
 }

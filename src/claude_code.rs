@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::io;
 use std::process::Stdio;
 use std::str;
@@ -142,7 +143,37 @@ const DEFAULT_MODEL: &str = "opus";
 /// turn with `Not logged in · Please run /login` (exit 1, no API call) while
 /// the `--version` health check keeps passing — the shape of the
 /// dravr-platform outage of 2026-09-21.
-pub const CREDENTIAL_ENV_KEYS: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+///
+/// They are not forwarded together: when an OAuth token reaches the child,
+/// `ANTHROPIC_API_KEY` is withheld, so the subscription is never displaced by
+/// API credit (see `withholds_api_key`).
+pub const CREDENTIAL_ENV_KEYS: &[&str] = &[OAUTH_TOKEN_KEY, API_KEY_KEY];
+
+/// The subscription login `claude` reads, first of [`CREDENTIAL_ENV_KEYS`].
+const OAUTH_TOKEN_KEY: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The API key `claude` reads, second of [`CREDENTIAL_ENV_KEYS`].
+const API_KEY_KEY: &str = "ANTHROPIC_API_KEY";
+
+/// Whether the child must not see `ANTHROPIC_API_KEY`: an OAuth token reaches
+/// it, either set on the runner (`explicit`, a pool account's
+/// [`RunnerConfig::with_env`]) or from the host (`host_oauth`).
+///
+/// The Claude Code CLI prefers an API key over the OAuth token when it sees
+/// both, so a service that sets `ANTHROPIC_API_KEY` for an Anthropic HTTP tier
+/// would move every `claude` tier off its subscription onto API credit. The
+/// subscription wins: the key reaches the child only when no token does. An
+/// empty value is no credential.
+fn withholds_api_key(explicit: &[(String, String)], host_oauth: Option<&str>) -> bool {
+    let explicit_oauth = explicit
+        .iter()
+        .rev()
+        .find(|(key, _)| key == OAUTH_TOKEN_KEY)
+        .map(|(_, value)| value.as_str());
+    explicit_oauth
+        .or(host_oauth)
+        .is_some_and(|token| !token.is_empty())
+}
 
 /// Fallback model list when no runtime override is available
 const FALLBACK_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
@@ -319,6 +350,15 @@ impl ClaudeCodeRunner {
             );
         } else {
             warn!("Failed to build sandbox policy, running with inherited env");
+            // The runner's own `with_env` values, its credential among them,
+            // still reach the child.
+            cmd.envs(self.base.config.env.iter().map(|(k, v)| (k, v)));
+        }
+
+        // An OAuth subscription outranks an API key, in either branch above.
+        let host_oauth = env::var(OAUTH_TOKEN_KEY).ok();
+        if withholds_api_key(&self.base.config.env, host_oauth.as_deref()) {
+            cmd.env_remove(API_KEY_KEY);
         }
 
         // Inject after the sandbox (env_clear) so the values persist
@@ -581,6 +621,7 @@ impl LlmProvider for ClaudeCodeRunner {
 mod tests {
     use super::*;
     use crate::types::{ErrorKind, McpHeader};
+    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     /// Parse a result document straight through to the response, as `complete` does.
@@ -693,6 +734,67 @@ mod tests {
             assert!(keys.iter().any(|k| k == key), "{key} must reach the child");
         }
         assert!(keys.iter().any(|k| k == "HOME"), "the defaults stay");
+    }
+
+    #[test]
+    fn an_oauth_token_withholds_the_api_key() {
+        let pooled = vec![(OAUTH_TOKEN_KEY.to_owned(), "sk-ant-oat-2".to_owned())];
+        assert!(withholds_api_key(&pooled, None), "a pool account's token");
+        assert!(
+            withholds_api_key(&[], Some("sk-ant-oat-1")),
+            "the host's token"
+        );
+        assert!(
+            withholds_api_key(&pooled, Some("sk-ant-oat-1")),
+            "both: still the subscription"
+        );
+    }
+
+    #[test]
+    fn the_api_key_is_forwarded_only_without_a_token() {
+        assert!(!withholds_api_key(&[], None));
+        let key_only = vec![(API_KEY_KEY.to_owned(), "sk-ant-api".to_owned())];
+        assert!(!withholds_api_key(&key_only, None));
+        assert!(!withholds_api_key(&[], Some("")), "an empty token is none");
+    }
+
+    #[test]
+    fn an_explicit_token_decides_over_the_hosts() {
+        let blanked = vec![(OAUTH_TOKEN_KEY.to_owned(), String::new())];
+        assert!(
+            !withholds_api_key(&blanked, Some("sk-ant-oat-1")),
+            "the explicit (empty) value is what the child sees"
+        );
+    }
+
+    /// A pool account carries its token through `with_env`; the child it
+    /// builds has `ANTHROPIC_API_KEY` removed, whatever the host holds.
+    #[test]
+    fn a_pooled_account_never_hands_the_child_the_api_key() {
+        let runner = ClaudeCodeRunner::new(
+            RunnerConfig::new(PathBuf::from("/bin/true"))
+                .with_env(OAUTH_TOKEN_KEY, "sk-ant-oat-2")
+                .with_env(API_KEY_KEY, "sk-ant-api"),
+        );
+        let cmd = runner.build_command("hi", None, "json", None, &[]);
+        // After the sandbox's env_clear a removal is an absence, not an entry.
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        let set: Vec<_> = envs
+            .iter()
+            .filter(|(_, value)| value.is_some())
+            .map(|(key, _)| *key)
+            .collect();
+        assert!(
+            !set.contains(&OsStr::new(API_KEY_KEY)),
+            "the key never reaches the child: {set:?}"
+        );
+        assert!(
+            envs.contains(&(
+                OsStr::new(OAUTH_TOKEN_KEY),
+                Some(OsStr::new("sk-ant-oat-2"))
+            )),
+            "the account's token reaches the child: {set:?}"
+        );
     }
 
     #[test]

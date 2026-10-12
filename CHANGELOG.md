@@ -7,15 +7,22 @@
 - feat(http-api): `AnthropicProvider` over the Anthropic Messages API — Claude Haiku / Sonnet / Opus 5.5 (default `claude-haiku-5-5`), streaming, tool use with merged parallel tool results, vision, prompt-cache breakpoints (tools, system, conversation tail), gross usage with cache read/write counts, `ANTHROPIC_EFFORT` / `ANTHROPIC_THINKING`
 - feat(pool): `provider_pool` names any already-built providers as pool accounts (`<name>#N`); `AnthropicConfig::pool_from_env` reads `ANTHROPIC_API_KEY`, `ANTHROPIC_API_KEY_2`, … as one account per Anthropic organization
 - feat(pricing): `anthropic` rows for `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, with their cache read/write rates
+- feat(fallback): `QuotaCooldowns`, a cheaply cloneable quota-cooldown book keyed by tier name (`is_cooling`, `remaining`, `start`, `start_for`, `end`, `duration`), and `FallbackProvider::with_cooldowns` so several chains — a full chain and the chains over its tails — share one book and agree on which tier is cooling; a caller asking a tier outside any chain reads and writes the same book. Without the call a chain keeps a private book of its own; `with_quota_cooldown` now overrides the book's duration for the refusals that chain records. `DEFAULT_QUOTA_COOLDOWN` (15 min) is public, and `QUOTA_COOLDOWN_SKIP` is the `FallthroughReason::Skipped` reason a chain gives for a tier it passes over inside its cooldown, so an observer can tell that skip from its own vetoes
 - feat(pricing)!: `ModelPricing::with_long_prompt_rates` and the new `long_prompt` field — a second rate card above a prompt-length threshold; Haiku 5.5 bills a prompt over 100K tokens at $0.50 / $2.50
 
 ### Changed
 
+- fix(fallback): quota cooldowns are keyed by tier name, not tier position, in a chain's private book too — two tiers with the same name in one chain share a window (a refusal from either passes over both, an answer from either ends it), and a `RouterProvider` tier is keyed by its active backend, so it is passed over only while the backend active on the next call is the one cooling
 - fix(http-api)!: HTTP 402 (credit balance exhausted) maps to `ErrorKind::RateLimit` for every HTTP provider, so a fallback chain cools the spent tier down instead of retrying it in place; it was `ExternalService`
 - fix(http-api): HTTP 529 (overloaded) is retried in place like 502/503
 - fix(pool)!: `PooledTier` no longer overwrites `ChatResponse::model` with the tier name; a response keeps the model the account ran, so a pooled per-token tier is priced instead of recorded at $0 (the account is still named by the tier's `name()` and in its errors)
 - fix(http-api): the SSE parser buffers raw bytes and decodes whole lines, so a multi-byte UTF-8 character split across two network chunks is no longer replaced by U+FFFD
 - fix(claude-code): `Credit balance is too low` is a quota refusal (`RateLimit`), the same policy as an HTTP 402
+
+### Fixed
+
+- fix(claude-code): an OAuth token beats an API key — when `CLAUDE_CODE_OAUTH_TOKEN` reaches the `claude` child (a pool account's `with_env`, or the host's), `ANTHROPIC_API_KEY` is removed from its environment, so a service that sets the key for the Anthropic HTTP tier no longer moves every Claude Code tier off its subscription onto API credit; the key is forwarded only when no token exists
+- fix(claude-code): when the sandbox policy cannot be built, the runner's explicit `with_env` credential is still set on the inherited-environment child
 
 
 ## [0.34.0] — 2026-10-03

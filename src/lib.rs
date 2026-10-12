@@ -193,7 +193,8 @@ pub use factory::{
 };
 pub use fallback::{
     is_empty_completion, Attempt, FallThrough, FallbackObserver, FallbackProvider,
-    FallthroughReason, ResponsePolicy, RetryConfig, Tier,
+    FallthroughReason, QuotaCooldowns, ResponsePolicy, RetryConfig, Tier, DEFAULT_QUOTA_COOLDOWN,
+    QUOTA_COOLDOWN_SKIP,
 };
 pub use gemini_cli::GeminiCliRunner;
 pub use goose_cli::GooseCliRunner;
