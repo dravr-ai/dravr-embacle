@@ -117,6 +117,9 @@ pub mod quota;
 pub mod quota_http;
 /// Where routing state lives, behind a trait so a shared store is a plugin.
 pub mod quota_store;
+/// Routing state shared through Redis across every instance spending one account.
+#[cfg(feature = "quota-redis")]
+pub mod quota_store_redis;
 /// Budget-driven routing across several providers, with a pluggable strategy.
 pub mod router;
 /// Environment sandboxing and tool policy

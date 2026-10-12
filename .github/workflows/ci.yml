@@ -75,6 +75,14 @@ jobs:
       # both features pull no extra dependency.
       - name: HTTP API provider tests
         run: cargo test --workspace --features http-api,copilot-headless,copilot-sdk,web-ui,agui,quota-http
+      # RedisQuotaStore's tests start a real redis-server per test (and stop
+      # one to prove the outage path), so the binary must be on PATH.
+      - name: Shared quota store tests (Redis)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server
+          cargo test --features quota-redis --test quota_store_redis
+          cargo test --features quota-redis --lib -- quota_store router
 
   # The live Copilot tests drive the REAL binaries — `copilot --acp` and the
   # `copilot-runtime` pair the SDK loads — against a model this job provisions

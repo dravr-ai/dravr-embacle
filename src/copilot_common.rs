@@ -64,6 +64,19 @@ impl PermissionPolicy {
     }
 }
 
+/// The Copilot CLI flag that folds every MCP server's `initialize`
+/// instructions into the model's SYSTEM prompt.
+///
+/// Without it the CLI folds only the instructions of servers on its own
+/// allowlist, and a caller's server — handed over per call, never allowlisted —
+/// is not one of them. The CLI has no `--system-prompt` flag, so this is the one
+/// channel through which a caller's server instructions (an identity anchor,
+/// say) reach the system layer rather than the prompt body, where the model
+/// reads them as the user talking. Both CLI-spawning providers pass it: the
+/// `-p` runner in `copilot.rs` and the `--acp` runner in `copilot_headless.rs`.
+pub(crate) const ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG: &str =
+    "--allow-all-mcp-server-instructions";
+
 /// Default number of conversation history turns rendered into a prompt.
 /// Each "turn" is one user or assistant message.
 pub const DEFAULT_MAX_HISTORY_TURNS: usize = 20;

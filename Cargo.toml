@@ -116,6 +116,9 @@ http-api = ["dep:reqwest", "tokio/sync"]
 # The quota vocabulary and policy in `quota` are always available; this only adds
 # the checkers that reach the network.
 quota-http = ["dep:reqwest", "tokio/sync"]
+# Enable RedisQuotaStore: router quota state shared across every process that
+# spends one account's budget. A plain TCP client, no HTTP stack.
+quota-redis = ["dep:redis", "tokio/sync"]
 # Enable browser-driven web-UI provider (drives Claude.ai via a headless profile)
 web-ui = ["dep:dravr-browser", "dep:toml", "tokio/sync"]
 # Enable TOML-based configuration file loading
@@ -147,6 +150,10 @@ github-copilot-sdk = { version = "1.0.14", default-features = false, optional = 
 
 # Optional: HTTP client for the http-api providers
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+
+# Optional: shared router quota state (quota-redis feature). Same major as
+# dravr-platform's, so a consumer that already speaks Redis builds one copy.
+redis = { version = "0.28", default-features = false, features = ["tokio-comp", "connection-manager", "script"], optional = true }
 
 # Optional: TOML config file support
 toml = { version = "1.1", optional = true }

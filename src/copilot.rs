@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
+use crate::copilot_common::ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG;
 use crate::copilot_models::{
     catalog_ids, classify_model_error, default_effort_for, ReasoningEffort,
 };
@@ -178,7 +179,7 @@ impl CopilotRunner {
             // with a persona to impose can otherwise only put it in the prompt
             // body — where the model reads it as the user talking and answers
             // as itself. This is the one channel that reaches the system layer.
-            cmd.arg("--allow-all-mcp-server-instructions");
+            cmd.arg(ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG);
         }
 
         // Prevent reading project AGENTS.md instructions
@@ -396,6 +397,31 @@ mod tests {
             .collect();
         assert!(!args.contains(&"--model"));
         assert!(!args.contains(&"--reasoning-effort"));
+    }
+
+    #[test]
+    fn build_command_allows_mcp_server_instructions_only_with_servers() {
+        let args_of = |servers: &[McpServerConfig]| -> Vec<String> {
+            runner()
+                .build_command("hi", None, true, servers)
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let servers = [McpServerConfig {
+            name: "dravr".to_owned(),
+            transport: McpTransport::Http {
+                url: "http://127.0.0.1:9/mcp".to_owned(),
+                headers: vec![],
+            },
+        }];
+        assert!(args_of(&servers)
+            .iter()
+            .any(|a| a == "--allow-all-mcp-server-instructions"));
+        assert!(!args_of(&[])
+            .iter()
+            .any(|a| a == "--allow-all-mcp-server-instructions"));
     }
 
     #[test]

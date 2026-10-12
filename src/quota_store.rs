@@ -11,13 +11,13 @@
 //! deployment question, not a routing one — a single process is happy with a
 //! lock, and several processes sharing one account are not.
 //!
-//! So it sits behind [`QuotaStore`]. [`InMemoryQuotaStore`] is what ships and
-//! what a single process wants; a Redis or Postgres implementation is a new
-//! type in a new file, with no change to the router or to the strategy. The
-//! trait is async because a shared store performs I/O even though the
-//! in-memory one never blocks.
+//! So it sits behind [`QuotaStore`]. [`InMemoryQuotaStore`] is the default and
+//! what a single process wants. Several processes spending one account share
+//! `RedisQuotaStore` (feature `quota-redis`), with no change to the router or
+//! to the strategy. The trait is async because a shared store performs I/O
+//! even though the in-memory one never blocks.
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -62,11 +62,40 @@ pub trait QuotaStore: Send + Sync {
     async fn set_penalty(&self, index: usize, until: Option<SystemTime>);
 }
 
+/// A shared handle is a store too, so several routers — or a router and the
+/// code that inspects it — can hold one store.
+#[async_trait]
+impl<T: QuotaStore + ?Sized> QuotaStore for Arc<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    async fn load(&self, len: usize) -> Vec<BackendState> {
+        (**self).load(len).await
+    }
+
+    async fn record_reading(
+        &self,
+        index: usize,
+        snapshots: Vec<QuotaSnapshot>,
+        observed_at: SystemTime,
+    ) {
+        (**self).record_reading(index, snapshots, observed_at).await;
+    }
+
+    async fn set_penalty(&self, index: usize, until: Option<SystemTime>) {
+        (**self).set_penalty(index, until).await;
+    }
+}
+
 /// Routing state held in this process, and nowhere else.
 ///
 /// Correct for a single process and the default for that reason. Under
 /// several processes sharing one account, each keeps its own view of a budget
-/// they jointly spend — see the `LIMITATION` on `RouterProvider`.
+/// they jointly spend; those processes want `RedisQuotaStore` instead.
+///
+/// Routers in one process can share it through an `Arc`, so a penalty one of
+/// them learns steers the others.
 #[derive(Debug, Default)]
 pub struct InMemoryQuotaStore {
     state: RwLock<Vec<BackendState>>,

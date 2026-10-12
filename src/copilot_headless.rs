@@ -28,6 +28,7 @@ use tracing::{debug, field, info, instrument, trace, warn, Span};
 use crate::copilot_common::{
     render_turn, system_prompt, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
     HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
+    ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG,
 };
 use crate::copilot_headless_config::CopilotHeadlessConfig;
 use crate::copilot_models::catalog_ids;
@@ -560,6 +561,40 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
     Ok(path)
 }
 
+/// Build the `copilot --acp` command line without spawning it.
+///
+/// `--allow-all-mcp-server-instructions` is passed unconditionally: on ACP the
+/// MCP servers arrive per session in `session/new`, after the warm subprocess is
+/// already running, so whether a turn will carry a server is unknown at spawn.
+/// Without the flag a caller's server — never on the CLI's allowlist — has its
+/// `initialize` instructions dropped instead of folded into the system prompt.
+/// The scratch [`session_cwd`] a host gets when it configures none keeps a
+/// project's `.mcp.json` servers out of the session, so the fold reaches the
+/// caller's servers and the CLI's own builtins, whose instructions the
+/// allowlist already folds. The cwd does not scope servers the CLI reads from
+/// the host user's own Copilot config under `$HOME`; the flag folds those too.
+fn acp_command(
+    cli_path: &Path,
+    github_token: Option<&str>,
+    model: &str,
+    session_cwd: &Path,
+) -> Command {
+    let mut cmd = Command::new(cli_path);
+    cmd.arg("--acp");
+    if !model.is_empty() {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.arg(ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.current_dir(session_cwd);
+    if let Some(token) = github_token {
+        cmd.env("COPILOT_GITHUB_TOKEN", token);
+    }
+    cmd
+}
+
 /// Spawn the copilot --acp subprocess with piped stdio, pinning `model`.
 ///
 /// Pinning happens two ways, because the `--acp` server resolves its model
@@ -576,7 +611,7 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
 /// The subprocess runs in `session_cwd` (see [`session_cwd`]), created here if
 /// it does not exist; unset, that is a scratch directory, not the host's cwd.
 fn spawn_copilot(
-    cli_path: &PathBuf,
+    cli_path: &Path,
     github_token: Option<&str>,
     model: &str,
     session_cwd: &Path,
@@ -596,23 +631,10 @@ fn spawn_copilot(
         ),
     }
 
-    let mut cmd = Command::new(cli_path);
-    cmd.arg("--acp");
-    if !model.is_empty() {
-        cmd.arg("--model").arg(model);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
     fs::create_dir_all(session_cwd).map_err(|e| {
         RunnerError::internal(format!("create session cwd {}: {e}", session_cwd.display()))
     })?;
-    cmd.current_dir(session_cwd);
-
-    if let Some(token) = github_token {
-        cmd.env("COPILOT_GITHUB_TOKEN", token);
-    }
+    let mut cmd = acp_command(cli_path, github_token, model, session_cwd);
 
     info!(
         cli_path = %cli_path.display(),
@@ -684,7 +706,7 @@ async fn set_autopilot_mode(
 /// Returns the transport and session id ready for prompting.
 /// Times out after [`acp_session_timeout`] to detect hung copilot processes early.
 async fn setup_session(
-    cli_path: &PathBuf,
+    cli_path: &Path,
     github_token: Option<&str>,
     model: &str,
     session_cwd: &Path,
@@ -848,7 +870,7 @@ impl AcpProcess {
     /// On any handshake failure the subprocess is killed before the error
     /// is returned so callers never leak a half-initialized child.
     async fn spawn_and_initialize(
-        cli_path: &PathBuf,
+        cli_path: &Path,
         github_token: Option<&str>,
         model: &str,
         session_cwd: &Path,
@@ -2106,7 +2128,7 @@ impl CopilotHeadlessRunner {
     async fn ensure_fit_process(
         &self,
         guard: &mut OwnedMutexGuard<Option<AcpProcess>>,
-        cli_path: &PathBuf,
+        cli_path: &Path,
         model: &str,
         caller: &'static str,
     ) -> Result<(), RunnerError> {
@@ -3581,6 +3603,48 @@ mod tests {
             runner.capabilities().supports_sdk_tool_calling(),
             "mcp_tool_calling=true routes tool turns through the ACP converse() loop"
         );
+    }
+
+    fn acp_args(model: &str) -> Vec<String> {
+        acp_command(
+            Path::new("copilot"),
+            None,
+            model,
+            Path::new("/tmp/embacle-acp-test"),
+        )
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    /// The ACP spawn opts in to MCP server instructions, so the loopback tool
+    /// host's `initialize` instructions reach the system prompt as they do on
+    /// the `-p` runner (carnet#507).
+    #[test]
+    fn acp_command_allows_all_mcp_server_instructions() {
+        let args = acp_args("gpt-5.4");
+        assert_eq!(args.first().map(String::as_str), Some("--acp"));
+        assert!(
+            args.iter()
+                .any(|a| a == "--allow-all-mcp-server-instructions"),
+            "ACP spawn must pass --allow-all-mcp-server-instructions, got {args:?}"
+        );
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model flag should be present"); // Safe: test assertion
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("gpt-5.4"));
+    }
+
+    /// An unpinned model drops `--model` but keeps the instructions opt-in.
+    #[test]
+    fn acp_command_without_model_still_allows_mcp_server_instructions() {
+        let args = acp_args("");
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(args
+            .iter()
+            .any(|a| a == "--allow-all-mcp-server-instructions"));
     }
 
     #[test]

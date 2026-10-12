@@ -540,6 +540,17 @@ let chain = FallbackProvider::new(vec![primary, secondary, tertiary])?
 
 `health_check` is `Ok(true)` as soon as any tier is healthy; otherwise the last tier's outcome is returned verbatim. `RouterProvider` is the deliberate sibling: it routes proactively on quota readings, where the chain reacts to outcomes, and the two compose.
 
+`RouterProvider` keeps its readings and penalties in a `QuotaStore`. The default, `InMemoryQuotaStore`, is per-process; routers in one process can share it through an `Arc`. Several processes spending one account's budget share `RedisQuotaStore` (feature `quota-redis`), keyed by account, so a reading or a quota refusal one instance sees steers every instance's next turn:
+
+```rust
+let store = RedisQuotaStore::connect(&redis_url, "claude-max-team")
+    .await?
+    .with_backend_keys(["claude_code", "copilot_headless"]);
+let router = RouterProvider::new(backends, Box::new(PreferInOrder))?.with_store(Box::new(store));
+```
+
+Each Redis operation is bounded by `OPERATION_TIMEOUT` (500 ms); when Redis is unreachable the store answers from this process's own view, which is exactly the in-memory default.
+
 ## AG-UI Progress Events (feature flag)
 
 Enable the `agui` feature to expose the

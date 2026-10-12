@@ -26,9 +26,12 @@
 //! makes a strategy trivial to test and makes round-robin, or weighting, or
 //! anything else, a small self-contained type rather than a rewrite.
 //!
-//! ## Limitations
+//! ## Where state lives
 //!
-//! Routing state is per-process — see the marker on `RouterProvider.state`.
+//! Readings and penalties live in a [`QuotaStore`]. The default is
+//! per-process; instances that share one account's budget pass a shared store
+//! (`RedisQuotaStore`, feature `quota-redis`) to [`RouterProvider::with_store`]
+//! so a reading or a refusal one of them sees steers them all.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -185,11 +188,9 @@ impl RoutingStrategy for PreferInOrder {
 pub struct RouterProvider {
     backends: Vec<Backend>,
     strategy: Box<dyn RoutingStrategy>,
-    /// LIMITATION(registre#410): `RouterProvider.store` defaults to
-    /// `InMemoryQuotaStore`, which is per-process, so N instances serving one
-    /// account each keep their own view of a budget they jointly spend. The
-    /// trait is the seam a shared store plugs into without touching the router
-    /// or the strategy; nothing here needs to change to close it.
+    /// Readings and penalties. Defaults to `InMemoryQuotaStore`, which is
+    /// per-process; N instances serving one account pass a shared store so
+    /// they keep one view of the budget they jointly spend.
     store: Box<dyn QuotaStore>,
     /// Which backend answered last, so `name()` reports the truth.
     ///
@@ -247,9 +248,10 @@ impl RouterProvider {
 
     /// Swap the state store — the seam a shared implementation plugs into.
     ///
-    /// The default is [`InMemoryQuotaStore`], correct for one process. A Redis
-    /// or Postgres store is a different type passed here, with no change to
-    /// routing or to the strategy.
+    /// The default is [`InMemoryQuotaStore`], correct for one process. Several
+    /// processes spending one account pass `RedisQuotaStore` (feature
+    /// `quota-redis`); routers in one process can share an
+    /// `Arc<InMemoryQuotaStore>`. Neither changes routing or the strategy.
     #[must_use]
     pub fn with_store(mut self, store: Box<dyn QuotaStore>) -> Self {
         self.store = store;
@@ -973,6 +975,63 @@ mod tests {
         assert_eq!(
             r.content, "answered by copilot_headless",
             "the router must act on state it did not gather, or a shared store buys nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_one_router_learns_steers_another_sharing_its_store() {
+        // The issue's third consequence, closed: a penalty is learned once, not
+        // once per router. Router A is refused for quota; router B — which was
+        // never refused and has no checker of its own — must step aside
+        // without spending a turn on the provider A already found exhausted.
+        let shared = Arc::new(InMemoryQuotaStore::new());
+
+        let refused = TestProvider::scripted(
+            "claude-code",
+            vec![Err(RunnerError::rate_limit(
+                "claude-code",
+                "usage limit reached",
+            ))],
+        );
+        let first = RouterProvider::new(
+            vec![
+                Backend::metered(
+                    Box::new(refused),
+                    Box::new(FakeChecker::at_percent("c", 5.0, 9_999_999_999)),
+                ),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+            ],
+            Box::new(PreferInOrder),
+        )
+        .unwrap() // Safe: test assertion
+        .with_store(Box::new(Arc::clone(&shared)));
+        let r = first.complete(&request()).await.unwrap(); // Safe: test assertion
+        assert_eq!(r.content, "answered by copilot_headless");
+
+        let untouched = Arc::new(AtomicU32::new(0));
+        let second = RouterProvider::new(
+            vec![
+                Backend::unmetered(Box::new(TestProvider::counted(
+                    "claude-code",
+                    Arc::clone(&untouched),
+                ))),
+                Backend::unmetered(Box::new(TestProvider::ok("copilot_headless"))),
+            ],
+            Box::new(PreferInOrder),
+        )
+        .unwrap() // Safe: test assertion
+        .with_store(Box::new(Arc::clone(&shared)));
+        let r = second.complete(&request()).await.unwrap(); // Safe: test assertion
+        assert_eq!(r.content, "answered by copilot_headless");
+        assert_eq!(
+            untouched.load(Ordering::Relaxed),
+            0,
+            "the second router must not pay its own failed turn to learn what the first already knows"
+        );
+        assert_eq!(
+            shared.load(2).await[0].penalty_until,
+            Some(at(9_999_999_999)),
+            "the penalty runs to the reset the shared reading named"
         );
     }
 
