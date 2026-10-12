@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.35.0] — 2026-10-12
+
+### Added
+
+- feat(fallback): shared quota cooldown book; claude OAuth beats API key
+- feat(http-api): Anthropic Messages API provider and HTTP key pool
+
+### Fixed
+
+- fix(pricing): Claude Haiku 5.5 in the Copilot catalogue and pricing
+
+### Other
+
+- chore(deps): bump dravr-tronc 4.1.0 -> 4.2.0
+- chore(deps): bump dravr-tronc 4.0.0 -> 4.1.0
+
+
 ## [Unreleased]
 
 ### Added
