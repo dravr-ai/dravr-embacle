@@ -130,8 +130,13 @@ async fn each_account_s_child_sees_its_own_token() {
     assert_eq!(first.content, "token-of-account-1");
     assert_eq!(second.content, "token-of-account-2");
     assert_eq!(
-        second.model, "claude-code#2",
-        "the response names its account"
+        tiers[1].name(),
+        "claude-code#2",
+        "the tier names its account"
+    );
+    assert_eq!(
+        second.model, first.model,
+        "a response keeps the model the runner reported: it is what pricing reads"
     );
 }
 

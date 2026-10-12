@@ -104,6 +104,9 @@ fn test_every_default_model_has_pricing() {
         ("gemini", "gemini-2.5-flash"),
         ("gemini", "gemini-2.0-flash"),
         ("groq", "llama-3.3-70b-versatile"),
+        ("anthropic", "claude-haiku-5-5"),
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-opus-5-5"),
     ];
     for (provider, model) in production_models {
         let cost = calculate_cost(provider, model, 1000, 1000);
@@ -242,4 +245,93 @@ fn cache_counts_are_clamped_to_the_prompt() {
         (cost - expected).abs() < 1e-12,
         "expected {expected}, got {cost}"
     );
+}
+
+// ============================================================================
+// Anthropic Messages API (the "anthropic" provider and its pool accounts)
+// ============================================================================
+
+/// Each 5.5 model's input, output, cache-read and cache-write rates, per
+/// million tokens: (model, input, output, cache read, cache write).
+const ANTHROPIC_5_5_RATES: &[(&str, f64, f64, f64, f64)] = &[
+    ("claude-haiku-5-5", 0.10, 0.50, 0.01, 0.125),
+    ("claude-sonnet-5-5", 2.0, 10.0, 0.20, 2.50),
+    ("claude-opus-5-5", 4.0, 20.0, 0.20, 5.0),
+];
+
+/// Rates are checked on a 100K-token prompt, the largest that every model
+/// bills on its base card; the expected cost is a tenth of the per-MTok rate.
+#[test]
+fn anthropic_5_5_models_price_every_rate() {
+    for &(model, input, output, read, write) in ANTHROPIC_5_5_RATES {
+        let tokens = 100_000;
+        let tenth = |rate: f64| rate / 10.0;
+        let fresh = calculate_cost("anthropic", model, tokens, 0);
+        assert!(
+            (fresh - tenth(input)).abs() < 1e-9,
+            "{model} input: {fresh}"
+        );
+        let out = calculate_cost("anthropic", model, 0, tokens);
+        assert!((out - tenth(output)).abs() < 1e-9, "{model} output: {out}");
+        let cached = calculate_cost_for(
+            "anthropic",
+            model,
+            &TokenCounts::new(tokens, 0).with_cache(tokens, 0),
+        );
+        assert!(
+            (cached - tenth(read)).abs() < 1e-9,
+            "{model} cache read: {cached}"
+        );
+        let written = calculate_cost_for(
+            "anthropic",
+            model,
+            &TokenCounts::new(tokens, 0).with_cache(0, tokens),
+        );
+        assert!(
+            (written - tenth(write)).abs() < 1e-9,
+            "{model} cache write: {written}"
+        );
+    }
+}
+
+/// Haiku 5.5 bills a prompt above 100K tokens on its second card — input,
+/// cache and output alike — and a prompt of exactly 100K on the first.
+#[test]
+fn haiku_5_5_bills_a_long_prompt_on_its_second_rate_card() {
+    let at_threshold = calculate_cost("anthropic", "claude-haiku-5-5", 100_000, 1_000);
+    // 100_000 × $0.10 + 1_000 × $0.50, per million tokens
+    let base = 0.0105;
+    assert!((at_threshold - base).abs() < 1e-12, "{at_threshold}");
+
+    let above = calculate_cost("anthropic", "claude-haiku-5-5", 100_001, 1_000);
+    // 100_001 × $0.50 + 1_000 × $2.50, per million tokens
+    let long = 0.052_500_5;
+    assert!((above - long).abs() < 1e-12, "{above}");
+
+    // The threshold reads the gross prompt, cached tokens included, and the
+    // cache multipliers apply to the long-card input rate.
+    let cached = calculate_cost_for(
+        "anthropic#2",
+        "claude-haiku-5-5",
+        &TokenCounts::new(150_000, 0).with_cache(140_000, 0),
+    );
+    // 10_000 fresh × $0.50 + 140_000 cache reads × $0.05, per million tokens
+    let expected = 0.012;
+    assert!((cached - expected).abs() < 1e-12, "{cached}");
+
+    // Models with one card are unaffected by prompt length
+    let sonnet = calculate_cost("anthropic", "claude-sonnet-5-5", 1_000_000, 0);
+    assert!((sonnet - 2.0).abs() < 1e-9, "{sonnet}");
+}
+
+/// A second (or tenth) pool account bills exactly as the first.
+#[test]
+fn anthropic_pool_accounts_price_as_their_family() {
+    let counts = TokenCounts::new(40_000, 900).with_cache(30_000, 5_000);
+    let first = calculate_cost_for("anthropic", "claude-haiku-5-5", &counts);
+    assert!(first > 0.0);
+    for account in ["anthropic#2", "anthropic#10"] {
+        let cost = calculate_cost_for(account, "claude-haiku-5-5", &counts);
+        assert!((cost - first).abs() < 1e-12, "{account}: {cost} vs {first}");
+    }
 }

@@ -8,13 +8,14 @@
 //!
 //! [`map_http_error`] is the single site that turns an HTTP status into a
 //! [`RunnerError`] kind. It matters for a fallback chain: a 401/403 is the
-//! provider's credential, a 408/504 is its latency, a 429 is its quota, and a
-//! 400/422 is *the request* — only the first three are the provider's fault.
+//! provider's credential, a 408/504 is its latency, a 402 (spent credit) or a
+//! 429 is its quota, and a 400/422 is *the request* — only the first four are
+//! the provider's fault.
 //! A provider with a vendor-specific exception (Cohere's empty-completion
 //! 422) decides that before delegating here.
 //!
 //! [`HttpRetryConfig`] is the in-place retry policy the providers apply to the
-//! initial HTTP request: on 429/502/503 and on connect/timeout transport
+//! initial HTTP request: on 429/502/503/529 and on connect/timeout transport
 //! errors, with exponential backoff and jitter. Once a stream's bytes flow,
 //! the request is not retried.
 
@@ -49,6 +50,10 @@ pub fn build_client(timeout: Duration) -> Result<reqwest::Client, RunnerError> {
 ///
 /// - 401 / 403 → `AuthFailure`
 /// - 408 / 504 → `Timeout`
+/// - 402 → `RateLimit`: the account's prepaid credit is spent. A quota
+///   refusal, not an outage — no in-place retry can buy more credit, and a
+///   [`FallbackProvider`](crate::fallback::FallbackProvider) holds the tier
+///   in quota cooldown while the next account or provider answers
 /// - 429 → `RateLimit`, carrying the wait the vendor asked for when its
 ///   message states one (`Please retry in 6.4s`, `try again in 2s`)
 /// - 400 / 422 → `InvalidRequest`
@@ -62,7 +67,8 @@ pub fn map_http_error(provider: &'static str, status: StatusCode, message: &str)
             RunnerError::auth_failure(format!("{provider} API authentication failed: {message}"))
         }
         408 | 504 => RunnerError::timeout(format!("{provider}: HTTP {status}: {message}")),
-        429 => RunnerError::rate_limit(provider, rate_limit_message(message)),
+        402 => RunnerError::rate_limit(provider, format!("credit balance exhausted: {message}")),
+        429 => rate_limit_error(provider, message, None),
         400 | 422 => {
             RunnerError::invalid_request(format!("{provider} API validation error: {message}"))
         }
@@ -110,14 +116,36 @@ pub fn retry_after_seconds(message: &str) -> Option<u64> {
     } else {
         value
     };
+    Some(whole_seconds(seconds))
+}
+
+/// A wait in seconds as whole seconds, rounded up and at least one: a vendor
+/// that says "retry in 0.2s" still means "not right now".
+#[must_use]
+pub fn whole_seconds(seconds: f64) -> u64 {
+    // Safe cast: max(1.0) maps a negative or NaN wait to 1.0, and `as`
+    // saturates a value above u64::MAX.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some(seconds.ceil().max(1.0) as u64)
+    let rounded = seconds.ceil().max(1.0) as u64;
+    rounded
+}
+
+/// A quota refusal (`RateLimit`) for a 429. `wait_seconds` is the wait the
+/// vendor sent out of band (a `retry-after` header); without one, the wait
+/// is read from the vendor's message when it states one.
+pub fn rate_limit_error(
+    provider: &'static str,
+    api_message: &str,
+    wait_seconds: Option<u64>,
+) -> RunnerError {
+    let wait = wait_seconds.or_else(|| retry_after_seconds(api_message));
+    RunnerError::rate_limit(provider, rate_limit_message(api_message, wait))
 }
 
 /// The message a 429 carries: the wait when the vendor states one, the
 /// vendor's own text otherwise.
-fn rate_limit_message(api_message: &str) -> String {
-    match retry_after_seconds(api_message) {
+fn rate_limit_message(api_message: &str, wait_seconds: Option<u64>) -> String {
+    match wait_seconds {
         Some(seconds) => format!("Rate limit reached. Please try again in {seconds} seconds."),
         None if api_message.trim().is_empty() => {
             "Rate limit reached. Please wait a moment and try again.".to_owned()
@@ -204,9 +232,10 @@ impl HttpRetryConfig {
     }
 }
 
-/// One attempt's failure, with the retry decision the attempt made about
-/// itself: a 429/502/503, a connect or timeout transport error, or an
-/// unreadable body is worth another try; a 401 or a 400 is not.
+/// One attempt's failure, with the retry decision the attempt made about itself.
+///
+/// A 429/502/503/529, a connect or timeout transport error, or an unreadable
+/// body is worth another try; a 401 or a 400 is not.
 #[derive(Debug)]
 pub struct AttemptError {
     /// The error the caller sees if this attempt was the last
@@ -244,7 +273,7 @@ impl AttemptError {
         }
     }
 
-    /// A non-success status the provider already mapped: retryable on 429/502/503
+    /// A non-success status the provider already mapped: retryable on 429/502/503/529
     #[must_use]
     pub const fn from_status(status: StatusCode, error: RunnerError) -> Self {
         Self {
@@ -293,9 +322,10 @@ where
 /// - 429 Too Many Requests (rate limiting)
 /// - 503 Service Unavailable (temporary overload)
 /// - 502 Bad Gateway (upstream issues)
+/// - 529 Overloaded (Anthropic's temporary capacity refusal)
 #[must_use]
 pub const fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 429 | 502 | 503)
+    matches!(status, 429 | 502 | 503 | 529)
 }
 
 /// Check if a request error is retryable (connection/timeout errors)
@@ -376,6 +406,21 @@ mod tests {
         assert!(err.message.starts_with("acme:"));
     }
 
+    /// A spent prepaid credit is a quota refusal: the chain moves on and
+    /// cools the tier down, and nobody retries it in place.
+    #[test]
+    fn map_http_error_payment_required_is_a_quota_refusal() {
+        let err = map_http_error("acme", StatusCode::PAYMENT_REQUIRED, "Insufficient credits");
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert!(err.kind.is_provider_fault());
+        assert!(!err.kind.is_transient());
+        assert!(!is_retryable_status(402));
+        assert_eq!(
+            err.message,
+            "acme: credit balance exhausted: Insufficient credits"
+        );
+    }
+
     #[test]
     fn map_http_error_rate_limit_without_a_wait_carries_the_message() {
         let err = map_http_error("acme", StatusCode::TOO_MANY_REQUESTS, "too many requests");
@@ -418,7 +463,9 @@ mod tests {
         assert!(is_retryable_status(429));
         assert!(is_retryable_status(502));
         assert!(is_retryable_status(503));
+        assert!(is_retryable_status(529));
         assert!(!is_retryable_status(200));
+        assert!(!is_retryable_status(402));
         assert!(!is_retryable_status(400));
         assert!(!is_retryable_status(401));
         assert!(!is_retryable_status(404));

@@ -111,6 +111,7 @@ Every CLI runner is stateless: each `complete()` / `complete_stream()` call star
 | Runner | Feature Flag | Features |
 |--------|-------------|----------|
 | OpenAI API | `http-api` | `OpenAiCompatibleProvider` on `OPENAI_API_*`: the OpenAI API or any endpoint serving it, streaming, tool calling, vision, model discovery |
+| Anthropic API | `http-api` | Messages API (Claude Haiku / Sonnet / Opus 5.5), streaming, tool use, vision, prompt-cache breakpoints, cache read/write usage, a key pool across organizations |
 | Google Gemini | `http-api` | Generative Language API, streaming, function calling, cache-read usage, retries thinking-only answers |
 | Cohere | `http-api` | v2 chat API (Command A / Command R), typed SSE envelope, tool calling, billed-units usage |
 | Groq | `http-api` | OpenAI-shaped chat on LPU inference, streaming, tool calling, 429 wait parsing |
@@ -485,13 +486,40 @@ Each `XConfig::from_env()` reads its own variables; `XConfig::new(api_key)` and 
 
 | Provider | `name()` | Required | Optional |
 |----------|----------|----------|----------|
+| `AnthropicProvider` | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY_2`, `ANTHROPIC_API_KEY_3`, … (pool), `ANTHROPIC_DEFAULT_MODEL` (`claude-haiku-5-5`), `ANTHROPIC_BASE_URL` (`https://api.anthropic.com`), `ANTHROPIC_MAX_TOKENS` (`16000`), `ANTHROPIC_EFFORT` (`low`…`max`), `ANTHROPIC_THINKING` (`adaptive` / `disabled`), `ANTHROPIC_MAX_RETRIES`, `ANTHROPIC_INITIAL_RETRY_DELAY_MS`, `ANTHROPIC_MAX_RETRY_DELAY_MS` |
 | `GeminiProvider` | `gemini` | `GEMINI_API_KEY` | `GEMINI_DEFAULT_MODEL` (`gemini-flash-lite-latest`), `GEMINI_MAX_RETRIES`, `GEMINI_INITIAL_RETRY_DELAY_MS`, `GEMINI_MAX_RETRY_DELAY_MS` |
 | `CohereProvider` | `cohere` | `COHERE_API_KEY` | `COHERE_DEFAULT_MODEL` (`command-a-03-2025`), `COHERE_MAX_RETRIES`, `COHERE_INITIAL_RETRY_DELAY_MS`, `COHERE_MAX_RETRY_DELAY_MS` |
 | `GroqProvider` | `groq` | `GROQ_API_KEY` | `GROQ_DEFAULT_MODEL` (`llama-3.3-70b-versatile`), `GROQ_MAX_RETRIES`, `GROQ_INITIAL_RETRY_DELAY_MS`, `GROQ_MAX_RETRY_DELAY_MS` |
 | `OpenRouterProvider` | `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_DEFAULT_MODEL` (`meta-llama/llama-3.3-70b-instruct`), `OPENROUTER_SITE_URL`, `OPENROUTER_APP_TITLE`, `OPENROUTER_MAX_RETRIES`, `OPENROUTER_INITIAL_RETRY_DELAY_MS`, `OPENROUTER_MAX_RETRY_DELAY_MS` |
 | `OpenAiCompatibleProvider` | `ollama` / `vllm` / `localai` / `local` | — | `LOCAL_LLM_BASE_URL` (`http://localhost:11434/v1`), `LOCAL_LLM_MODEL` (`qwen2.5:14b-instruct`), `LOCAL_LLM_API_KEY` |
 
-Every provider maps HTTP statuses the same way (`embacle::http_api::client::map_http_error`): 401/403 → `AuthFailure`, 408/504 → `Timeout`, 429 → `RateLimit` carrying the vendor's wait, 400/422 → `InvalidRequest`, anything else → `ExternalService`. Retries in place on 429/502/503 and on connect/timeout transport errors follow `HttpRetryConfig` (3 retries, 500 ms initial, 5 s cap). Cohere's "no valid response generated" 400/422 is the one vendor exception: a provider fault, so a fallback chain moves on. Every provider's usage is priced by `embacle::pricing`, keyed on its `name()`.
+Every provider maps HTTP statuses the same way (`embacle::http_api::client::map_http_error`): 401/403 → `AuthFailure`, 408/504 → `Timeout`, 402 (prepaid credit exhausted) → `RateLimit` with a `credit balance exhausted` message, 429 → `RateLimit` carrying the vendor's wait, 400/422 → `InvalidRequest`, anything else → `ExternalService`. A 402 is never retried in place. Retries in place on 429/502/503/529 and on connect/timeout transport errors follow `HttpRetryConfig` (3 retries, 500 ms initial, 5 s cap, exponential backoff — the vendor's stated wait is reported in the message, not slept on). Vendor exceptions: Cohere's "no valid response generated" 400/422 is a provider fault, so a fallback chain moves on; Anthropic's 413 and "prompt is too long" 400 are `ContextLength`, its 404 is `ModelUnavailable`, its 429 message carries the `retry-after` header's wait, and every Anthropic `RateLimit` (429 or 402) leaves the tier on the first refusal with no in-place retry, so a fallback chain cools it down and a pool's next account answers at once. A 529 overload is retried in place on each Anthropic account. Every provider's usage is priced by `embacle::pricing`, keyed on its `name()`.
+
+The Anthropic provider leaves `thinking` unset by default so the model's adaptive default applies (lower `ANTHROPIC_EFFORT` to think less), and gates a configured `thinking` / `effort` per model so a mode the requested model refuses is left off rather than sent as a 400. A tool continuation replays text and `tool_use` blocks without the earlier signed thinking blocks: the API accepts it, though Anthropic's contract is to pass them back, so the model re-derives its reasoning after each tool result. A `tool_use` or `tool_result` without its partner travels as text. It sends `temperature` / `top_p` only to legacy models that accept them (the 5.5 family refuses them), downgrades a forced `tool_choice` to `auto` on the models that refuse it, and places three cache breakpoints: the last tool, the last system block, and the automatic conversation tail. A `stop_reason: "refusal"` discards any partial output and is returned empty with `finish_reason: "refusal"` — an empty completion, which `ResponsePolicy::strict()` moves past; a stream cannot recall the deltas it sent, so a streaming consumer checks the final chunk's reason.
+
+### HTTP credential pools
+
+`embacle::pool::provider_pool` turns already-built providers — one per API key — into ordered tiers for a `FallbackProvider`: account 1 keeps the provider's name, account N is `<name>#N`, a response keeps the model id the account ran, and every account prices as its family. `AnthropicConfig::pool_from_env()` reads `ANTHROPIC_API_KEY`, `ANTHROPIC_API_KEY_2`, … up to the first unset or blank key, one per Anthropic organization with its own prepaid credit:
+
+```rust
+use embacle::fallback::FallbackProvider;
+use embacle::http_api::{AnthropicConfig, AnthropicProvider};
+use embacle::pool::provider_pool;
+use embacle::types::LlmProvider;
+
+fn chain() -> Result<FallbackProvider, embacle::types::RunnerError> {
+    let client = reqwest::Client::new();
+    let accounts = AnthropicConfig::pool_from_env()?
+        .into_iter()
+        .map(|config| {
+            Box::new(AnthropicProvider::with_client(config, client.clone())) as Box<dyn LlmProvider>
+        })
+        .collect();
+    FallbackProvider::new(provider_pool(accounts)?)
+}
+```
+
+A spent account answers 402, which is a `RateLimit`: the chain cools it down and the next account serves. `cli_pool` does the same for CLI runners, each account's token riding as explicit child environment.
 
 ## Fallback chains
 
@@ -838,6 +866,7 @@ Your Application
             │   └── KiloCliRunner       → spawns `kilo run --auto --format json`
             │
             ├── HTTP API Runners (behind feature flags)
+            │   ├── AnthropicProvider     → Anthropic Messages API
             │   ├── GeminiProvider        → Google Generative Language API
             │   ├── CohereProvider        → Cohere v2 chat
             │   ├── GroqProvider          → Groq (OpenAI-shaped)

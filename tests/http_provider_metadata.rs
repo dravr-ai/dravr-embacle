@@ -13,8 +13,8 @@
 #![cfg(feature = "http-api")]
 
 use embacle::http_api::{
-    CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
-    OpenRouterConfig, OpenRouterProvider,
+    AnthropicConfig, AnthropicProvider, CohereConfig, CohereProvider, GeminiConfig, GeminiProvider,
+    GroqConfig, GroqProvider, OpenRouterConfig, OpenRouterProvider,
 };
 use embacle::types::LlmProvider;
 
@@ -121,4 +121,41 @@ fn openrouter_provider_metadata() {
     assert!(provider
         .available_models()
         .contains(&"anthropic/claude-3.5-sonnet".to_owned()));
+}
+
+// ============================================================================
+// AnthropicProvider
+// ============================================================================
+
+#[test]
+fn anthropic_provider_metadata() {
+    let provider =
+        AnthropicProvider::with_client(AnthropicConfig::new("test-key"), reqwest::Client::new());
+    assert_eq!(provider.name(), "anthropic");
+    assert_eq!(provider.display_name(), "Anthropic API");
+    assert_eq!(provider.default_model(), "claude-haiku-5-5");
+    assert!(provider
+        .available_models()
+        .contains(&"claude-opus-5-5".to_owned()));
+    let caps = provider.capabilities();
+    assert!(caps.supports_streaming());
+    assert!(caps.supports_function_calling());
+    assert!(caps.supports_vision());
+    assert!(caps.supports_system_messages());
+    assert!(!caps.supports_sdk_tool_calling());
+    assert!(
+        !caps.supports_temperature(),
+        "Haiku 5.5 refuses sampling parameters"
+    );
+}
+
+#[test]
+fn anthropic_debug_redacts_api_key() {
+    let provider = AnthropicProvider::with_client(
+        AnthropicConfig::new("sk-ant-super-secret"),
+        reqwest::Client::new(),
+    );
+    let debug_output = format!("{provider:?}");
+    assert!(!debug_output.contains("sk-ant-super-secret"));
+    assert!(debug_output.contains("[REDACTED]"));
 }

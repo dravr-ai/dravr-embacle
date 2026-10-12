@@ -10,8 +10,8 @@
 //! [`CompletionRequest::new`] builds and reads the answer through
 //! [`parse_response`] and [`parse_stream_frame`]. What differs between them
 //! stays in their own modules: the base URL and authentication, `OpenRouter`'s
-//! ranking headers and its 402 wording, Groq billing plain counts, the local
-//! endpoints' "is the server running?" hints.
+//! ranking headers, Groq billing plain counts, the local endpoints' "is the
+//! server running?" hints.
 //!
 //! The request carries what the provider's [`LlmCapabilities`] say it takes.
 //! `temperature`, `max_tokens`, tools, `tool_choice` and the tool-call history

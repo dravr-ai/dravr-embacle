@@ -1,25 +1,36 @@
-// ABOUTME: A pool of CLI runners of one type, one per credential, as ordered tiers of a chain
-// ABOUTME: A spent account moves the turn to the next account before the chain leaves the runner type
+// ABOUTME: A pool of providers of one kind, one per credential, as ordered tiers of a chain
+// ABOUTME: A spent account moves the turn to the next account before the chain leaves the provider kind
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
 //! # Credential pools
 //!
-//! One account's quota must never dead-end a turn. A pool is N runners of one
-//! CLI type built from N credentials, each carrying its own token as explicit
-//! child environment ([`RunnerConfig::with_env`]), so the sandbox's clearing of
-//! the process environment never matters and every runner logs in as its own
-//! account. Handed to a [`FallbackProvider`](crate::fallback::FallbackProvider)
-//! in order, they are ordinary tiers: account 1 serves every turn until it
-//! refuses on quota, the chain moves to account 2, and the refused account is
-//! held in cooldown until it is worth asking again.
+//! One account's quota must never dead-end a turn. A pool is N providers of
+//! one kind built from N credentials, one account each. Handed to a
+//! [`FallbackProvider`](crate::fallback::FallbackProvider) in order, they are
+//! ordinary tiers: account 1 serves every turn until it refuses on quota
+//! ([`ErrorKind::RateLimit`](crate::types::ErrorKind::RateLimit) — a spent
+//! subscription window, a 429, an HTTP API's exhausted prepaid credit), the
+//! chain moves to account 2, and the refused account is held in cooldown
+//! until it is worth asking again.
 //!
-//! Attribution stays per account. Tier N is named `<runner>#<N>` (the first
-//! keeps the runner's own name), and its responses report that name as their
-//! `model`, so a health snapshot, a quota alert label or a usage row says
-//! which account served. Pricing keys on the family before the `#`
-//! ([`crate::pricing::pool_family`]), so every account bills as its runner.
+//! [`provider_pool`] is the provider-agnostic builder: it takes accounts the
+//! caller already built — an HTTP provider per API key, such as one
+//! `AnthropicProvider` per `AnthropicConfig::pool_from_env` entry (feature
+//! `http-api`) — and names them. [`cli_pool`] builds the accounts of a CLI runner
+//! type itself, each carrying its own token as explicit child environment
+//! ([`RunnerConfig::with_env`]), so the sandbox's clearing of the process
+//! environment never matters and every runner logs in as its own account.
+//!
+//! Attribution stays per account. Tier N is named `<provider>#<N>` (the first
+//! keeps the provider's own name), so a health snapshot, a quota alert label
+//! or a usage row keyed on the serving tier's [`name`](LlmProvider::name) says
+//! which account served. A response keeps the `model` the account actually
+//! ran (`claude-haiku-5-5`, never `anthropic#2`): pricing looks the pair up
+//! as (tier name, model), keys the tier on the family before the `#`
+//! ([`crate::pricing::pool_family`]) and the model on its id prefix, so every
+//! account bills as its provider.
 //!
 //! There is no load spreading. Spreading turns across accounts would hide a
 //! spent account until the last one dies, which is the failure this exists to
@@ -56,10 +67,11 @@ pub const fn credential_env_key(runner_type: CliRunnerType) -> Option<&'static s
 /// One account of a pool: a runner under a per-account name.
 ///
 /// Every call is the inner runner's. Only the naming differs: [`name`] is the
-/// pooled name, a completion's `model` reports it, and an error that names
-/// the runner (`claude-code: usage limit reached`) names the account instead
-/// (`claude-code#2: …`) — a quota alert reads the tier from that text, so a
-/// spent second account must not be reported as the first.
+/// pooled name, and an error that names the runner (`claude-code: usage limit
+/// reached`) names the account instead (`claude-code#2: …`) — a quota alert
+/// reads the tier from that text, so a spent second account must not be
+/// reported as the first. A completion's `model` is left as the runner
+/// reported it: it is what the call is priced on.
 ///
 /// [`name`]: LlmProvider::name
 pub struct PooledTier {
@@ -116,13 +128,10 @@ impl LlmProvider for PooledTier {
     }
 
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
-        let mut response = self
-            .inner
+        self.inner
             .complete(request)
             .await
-            .map_err(|e| self.rename(e))?;
-        self.name.clone_into(&mut response.model);
-        Ok(response)
+            .map_err(|e| self.rename(e))
     }
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
@@ -164,12 +173,44 @@ fn renamed(mut error: RunnerError, runner: &str, account: &str) -> RunnerError {
     error
 }
 
+/// Name already-built accounts as the tiers of one pool, in the order given.
+///
+/// Account 1 keeps its provider's name; account N is `<name>#N`. Every
+/// account should be the same kind of provider over its own credential —
+/// one HTTP provider per API key, one CLI runner per token. The list is what
+/// a [`FallbackProvider`](crate::fallback::FallbackProvider) takes,
+/// optionally followed by tiers of other kinds.
+///
+/// # Errors
+///
+/// [`ErrorKind::Config`](crate::types::ErrorKind::Config) when `accounts` is
+/// empty.
+pub fn provider_pool(
+    accounts: Vec<Box<dyn LlmProvider>>,
+) -> Result<Vec<Box<dyn LlmProvider>>, RunnerError> {
+    if accounts.is_empty() {
+        return Err(empty_pool());
+    }
+    Ok(accounts
+        .into_iter()
+        .enumerate()
+        .map(|(position, account)| {
+            Box::new(PooledTier::new(account, position)) as Box<dyn LlmProvider>
+        })
+        .collect())
+}
+
+/// The error for a pool with no account
+fn empty_pool() -> RunnerError {
+    RunnerError::config("a credential pool needs at least one credential")
+}
+
 /// Build one tier per credential, in the order given.
 ///
 /// Each runner is `base` with that credential set under the runner type's
-/// [`credential_env_key`]. The list is what a
-/// [`FallbackProvider`](crate::fallback::FallbackProvider) takes, optionally
-/// followed by tiers of other types.
+/// [`credential_env_key`], named through [`provider_pool`]. The list is what
+/// a [`FallbackProvider`](crate::fallback::FallbackProvider) takes,
+/// optionally followed by tiers of other types.
 ///
 /// # Errors
 ///
@@ -182,9 +223,7 @@ pub async fn cli_pool(
     credentials: &[String],
 ) -> Result<Vec<Box<dyn LlmProvider>>, RunnerError> {
     if credentials.is_empty() {
-        return Err(RunnerError::config(
-            "a credential pool needs at least one credential",
-        ));
+        return Err(empty_pool());
     }
     let Some(key) = credential_env_key(runner_type) else {
         return Err(RunnerError::config(format!(
@@ -193,11 +232,10 @@ pub async fn cli_pool(
         )));
     };
 
-    let mut tiers: Vec<Box<dyn LlmProvider>> = Vec::with_capacity(credentials.len());
-    for (position, credential) in credentials.iter().enumerate() {
+    let mut accounts: Vec<Box<dyn LlmProvider>> = Vec::with_capacity(credentials.len());
+    for credential in credentials {
         let config = base.clone().with_env(key, credential.as_str());
-        let runner = create_runner_with_config(runner_type, config).await?;
-        tiers.push(Box::new(PooledTier::new(runner, position)));
+        accounts.push(create_runner_with_config(runner_type, config).await?);
     }
-    Ok(tiers)
+    provider_pool(accounts)
 }

@@ -33,8 +33,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use embacle::http_api::{
-    CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
+    AnthropicConfig, AnthropicProvider, CohereConfig, CohereProvider, GeminiConfig, GeminiProvider,
+    GroqConfig, GroqProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig,
+    OpenRouterProvider,
 };
 use embacle::pricing::{
     calculate_cost, is_not_per_token_metered, NOT_PER_TOKEN_METERED_PROVIDERS, PRICING_TABLE,
@@ -112,6 +113,7 @@ fn local_name(provider_name: &str) -> &'static str {
 async fn native_provider_names() -> Vec<&'static str> {
     let client = reqwest::Client::new();
     vec![
+        AnthropicProvider::with_client(AnthropicConfig::new("test-key"), client.clone()).name(),
         GeminiProvider::with_client(GeminiConfig::new("test-key"), client.clone()).name(),
         GroqProvider::with_client(GroqConfig::new("test-key"), client.clone()).name(),
         CohereProvider::with_client(CohereConfig::new("test-key"), client.clone()).name(),

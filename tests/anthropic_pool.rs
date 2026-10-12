@@ -1,0 +1,311 @@
+// ABOUTME: The Anthropic provider as pool accounts, against a local listener: names, headers, a spent credit, a fallback
+// ABOUTME: Pins that a 402 on account 1 reaches the chain as a quota refusal naming that account, and account 2 answers
+//
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 dravr.ai
+
+//! Each test serves canned HTTP answers from a listener on `127.0.0.1`, so no
+//! request leaves the machine.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::str_to_string
+)]
+#![cfg(feature = "http-api")]
+
+use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+
+use embacle::fallback::{FallbackProvider, ResponsePolicy};
+use embacle::http_api::client::HttpRetryConfig;
+use embacle::http_api::{AnthropicConfig, AnthropicProvider};
+use embacle::metrics::MetricsProvider;
+use embacle::pool::provider_pool;
+use embacle::types::{ChatMessage, ChatRequest, ErrorKind, LlmProvider};
+
+/// One request as the listener received it
+struct Recorded {
+    path: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl Recorded {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// A complete HTTP/1.1 answer that closes its connection
+fn http(status: u16, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} Canned\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Read one request: headers up to the blank line, then `Content-Length` bytes
+async fn read_request(stream: &mut TcpStream) -> Recorded {
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut buf).await.expect("read request");
+        assert!(n > 0, "connection closed before the headers ended");
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&raw[..header_end]).to_string();
+    let mut lines = head.lines();
+    let path = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_owned();
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .collect();
+    let length: usize = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+    while raw.len() < header_end + length {
+        let n = stream.read(&mut buf).await.expect("read body");
+        assert!(n > 0, "connection closed before the body ended");
+        raw.extend_from_slice(&buf[..n]);
+    }
+    Recorded {
+        path,
+        headers,
+        body: String::from_utf8_lossy(&raw[header_end..header_end + length]).to_string(),
+    }
+}
+
+/// Serve `answers` in order, one connection each, and return what was asked
+async fn serve(answers: Vec<String>) -> (String, JoinHandle<Vec<Recorded>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let handle = tokio::spawn(async move {
+        let mut recorded = Vec::new();
+        for answer in answers {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            recorded.push(read_request(&mut stream).await);
+            stream.write_all(answer.as_bytes()).await.expect("write");
+            stream.shutdown().await.ok();
+        }
+        recorded
+    });
+    (base, handle)
+}
+
+/// An account that may retry in place: a status that must not be retried
+/// shows up as a second recorded request if it is.
+fn account(key: &str, base: &str) -> Box<dyn LlmProvider> {
+    let config = AnthropicConfig::new(key)
+        .with_base_url(base)
+        .with_retry(HttpRetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 1,
+            max_delay_ms: 1,
+        });
+    Box::new(AnthropicProvider::with_client(
+        config,
+        reqwest::Client::new(),
+    ))
+}
+
+/// A 429 with the `retry-after` header Anthropic sends
+fn rate_limited() -> String {
+    let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#;
+    format!(
+        "HTTP/1.1 429 Canned\r\nContent-Type: application/json\r\nretry-after: 30\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+const ANSWER: &str = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5",
+    "content":[{"type":"text","text":"Bonjour"}],"stop_reason":"end_turn",
+    "usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":600,"cache_creation_input_tokens":0}}"#;
+
+const SPENT: &str = r#"{"type":"error","error":{"type":"billing_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+
+#[test]
+fn accounts_are_named_in_order_and_the_first_keeps_the_provider_name() {
+    let tiers = provider_pool(vec![
+        account("key-1", "http://127.0.0.1:9"),
+        account("key-2", "http://127.0.0.1:9"),
+        account("key-3", "http://127.0.0.1:9"),
+    ])
+    .expect("a pool of three accounts builds");
+    let names: Vec<&str> = tiers.iter().map(|t| t.name()).collect();
+    assert_eq!(names, ["anthropic", "anthropic#2", "anthropic#3"]);
+    assert_eq!(tiers[0].display_name(), "Anthropic API");
+    assert_eq!(tiers[1].display_name(), "Anthropic API (account 2)");
+    assert_eq!(tiers[2].default_model(), "claude-haiku-5-5");
+}
+
+#[test]
+fn an_empty_provider_pool_is_a_config_error() {
+    let Err(err) = provider_pool(Vec::new()) else {
+        panic!("an empty pool must be refused");
+    };
+    assert_eq!(err.kind, ErrorKind::Config);
+}
+
+#[tokio::test]
+async fn a_spent_account_refuses_as_a_quota_error_naming_the_account() {
+    let (base, server) = serve(vec![http(402, SPENT)]).await;
+    let tiers = provider_pool(vec![
+        account("key-1", "http://127.0.0.1:9"),
+        account("key-2", &base),
+    ])
+    .expect("pool");
+    let err = tiers[1]
+        .complete(&ChatRequest::new(vec![ChatMessage::user("hi")]))
+        .await
+        .expect_err("a spent credit refuses");
+    assert_eq!(err.kind, ErrorKind::RateLimit);
+    assert!(
+        err.message
+            .starts_with("anthropic#2: credit balance exhausted"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("key-2"));
+    let recorded = server.await.expect("server");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "a spent credit is never retried in place"
+    );
+}
+
+#[tokio::test]
+async fn the_chain_moves_from_a_spent_account_to_the_next_one() {
+    let (base, server) = serve(vec![http(402, SPENT), http(200, ANSWER)]).await;
+    let tiers =
+        provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
+    let chain = FallbackProvider::new(tiers).expect("chain");
+    let request = ChatRequest::new(vec![
+        ChatMessage::system("coach"),
+        ChatMessage::user("salut"),
+    ]);
+    let response = chain.complete(&request).await.expect("account 2 answers");
+    assert_eq!(response.content, "Bonjour");
+    assert_eq!(
+        response.model, "claude-haiku-5-5",
+        "the response keeps the model the account ran; the tier name says which account"
+    );
+    let usage = response.usage.expect("usage");
+    assert_eq!(usage.prompt_tokens, 605);
+    assert_eq!(usage.cached_read_tokens, Some(600));
+
+    let recorded = server.await.expect("server");
+    assert_eq!(recorded.len(), 2);
+    let keys: Vec<Option<&str>> = recorded.iter().map(|r| r.header("x-api-key")).collect();
+    assert_eq!(keys, [Some("key-1"), Some("key-2")]);
+    for request in &recorded {
+        assert_eq!(request.path, "/v1/messages");
+        assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
+        let body: Value = serde_json::from_str(&request.body).expect("JSON body");
+        assert_eq!(body["model"], "claude-haiku-5-5");
+        assert_eq!(body["system"][0]["text"], "coach");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+    assert_eq!(
+        recorded[0].body, recorded[1].body,
+        "both accounts receive the same bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_account_hands_the_turn_on_without_retrying_in_place() {
+    let (base, server) = serve(vec![rate_limited(), http(200, ANSWER)]).await;
+    let tiers =
+        provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
+    let chain = FallbackProvider::new(tiers).expect("chain");
+    let response = chain
+        .complete(&ChatRequest::new(vec![ChatMessage::user("salut")]))
+        .await
+        .expect("account 2 answers");
+    assert_eq!(response.content, "Bonjour");
+
+    let recorded = server.await.expect("server");
+    let keys: Vec<Option<&str>> = recorded.iter().map(|r| r.header("x-api-key")).collect();
+    assert_eq!(
+        keys,
+        [Some("key-1"), Some("key-2")],
+        "account 1 is asked once, then account 2"
+    );
+}
+
+#[tokio::test]
+async fn an_overload_is_retried_in_place_on_the_same_account() {
+    let overloaded =
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+    let (base, server) = serve(vec![http(529, overloaded), http(200, ANSWER)]).await;
+    let response = account("key-1", &base)
+        .complete(&ChatRequest::new(vec![ChatMessage::user("salut")]))
+        .await
+        .expect("the retry answers");
+    assert_eq!(response.content, "Bonjour");
+    let recorded = server.await.expect("server");
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded
+        .iter()
+        .all(|r| r.header("x-api-key") == Some("key-1")));
+}
+
+#[tokio::test]
+async fn every_pool_account_prices_its_usage() {
+    let (base, server) = serve(vec![http(200, ANSWER), http(200, ANSWER)]).await;
+    let tiers =
+        provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
+    let request = ChatRequest::new(vec![ChatMessage::user("salut")]);
+    for tier in tiers {
+        let name = tier.name();
+        let metered = MetricsProvider::new(tier);
+        let response = metered.complete(&request).await.expect("answers");
+        assert_eq!(response.model, "claude-haiku-5-5", "{name}");
+        let report = metered.report().expect("report");
+        // On Haiku 5.5: 5 fresh × $0.10 + 600 cache reads × $0.01 + 2 output
+        // × $0.50, per million tokens
+        let expected = 7.5e-6;
+        assert!(
+            (report.total_cost - expected).abs() < 1e-15,
+            "{name}: {} vs {expected}",
+            report.total_cost
+        );
+    }
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn a_strict_chain_moves_past_a_refusal_that_followed_partial_output() {
+    let refused = r#"{"id":"msg_r","type":"message","role":"assistant","model":"claude-haiku-5-5",
+        "content":[{"type":"text","text":"Sure, the first step is"}],
+        "stop_reason":"refusal","stop_details":{"category":"general_harms"},
+        "usage":{"input_tokens":5,"output_tokens":6}}"#;
+    let (base, server) = serve(vec![http(200, refused), http(200, ANSWER)]).await;
+    let tiers =
+        provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
+    let chain = FallbackProvider::new(tiers)
+        .expect("chain")
+        .with_fallthrough(ResponsePolicy::strict());
+    let response = chain
+        .complete(&ChatRequest::new(vec![ChatMessage::user("salut")]))
+        .await
+        .expect("the next tier answers");
+    assert_eq!(response.content, "Bonjour");
+    assert_eq!(server.await.expect("server").len(), 2);
+}

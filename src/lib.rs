@@ -138,7 +138,7 @@ pub mod warp_cli;
 pub mod config_file;
 
 // HTTP API providers (behind feature flag)
-/// HTTP API providers: Gemini, Cohere, Groq, `OpenRouter`, OpenAI-compatible
+/// HTTP API providers: Anthropic, Gemini, Cohere, Groq, `OpenRouter`, OpenAI-compatible
 #[cfg(feature = "http-api")]
 pub mod http_api;
 
@@ -243,8 +243,9 @@ pub use config_file::{
 // HTTP API provider re-exports (behind feature flag)
 #[cfg(feature = "http-api")]
 pub use http_api::{
-    CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
+    AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking, CohereConfig,
+    CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
 };
 
 #[cfg(feature = "web-ui")]

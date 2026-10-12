@@ -112,9 +112,12 @@ fn gross_usage(u: &ClaudeUsage) -> TokenUsage {
 /// as the `type`. Matching those rather than inventing phrasing means this
 /// keeps working when the prose around them changes.
 ///
-/// `credit balance too low` is deliberately NOT here. It reads like a limit
-/// but never resets on a clock, so routing away from it and waiting would wait
-/// forever; it stays an ordinary external-service failure.
+/// A spent prepaid credit (`Credit balance is too low`, an API-key login) is
+/// a quota refusal too, the same policy as the HTTP providers' 402: it does
+/// not reset on a clock, but a fallback chain's quota cooldown does not wait
+/// for a reset either — it passes the tier over for one cooldown window and
+/// asks again, so a spent account costs one refusal per window instead of a
+/// failed attempt on every turn, and answers again once credit is added.
 fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
     if terminal_reason.is_some_and(|r| {
         r.eq_ignore_ascii_case("rate_limit") || r.eq_ignore_ascii_case("billing_error")
@@ -126,6 +129,7 @@ fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
         || lower.contains("rate_limit_error")
         || lower.contains("billing_error")
         || lower.contains("rate limited")
+        || (lower.contains("credit balance") && lower.contains("too low"))
 }
 
 /// Default model for Claude Code
@@ -717,11 +721,12 @@ mod tests {
     }
 
     #[test]
-    fn a_low_credit_balance_is_not_a_quota_refusal() {
-        // It reads like a limit but never resets on a clock. Routing away and
-        // waiting for a reset would wait forever, so it stays an ordinary
-        // failure the caller can see and act on.
-        assert!(!is_quota_refusal(None, "credit balance is too low"));
+    fn a_low_credit_balance_is_a_quota_refusal() {
+        // The same policy as an HTTP 402: the chain cools the account down
+        // and asks the next one, rather than failing on it every turn.
+        assert!(is_quota_refusal(None, "Credit balance is too low"));
+        assert!(is_quota_refusal(None, "credit balance too low"));
+        assert!(!is_quota_refusal(None, "your balance looks fine"));
     }
 
     #[test]

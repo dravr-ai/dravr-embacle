@@ -52,10 +52,15 @@ const DONE_SENTINEL: &str = "[DONE]";
 /// SSE streams are newline-delimited. TCP does not guarantee alignment between
 /// network chunks and SSE event boundaries. This parser buffers incomplete lines
 /// and emits complete events only when a full line (terminated by `\n`) is available.
+///
+/// The buffer holds raw bytes and a line is decoded only once it is complete,
+/// so a multi-byte UTF-8 character split across two chunks (an `é` in a
+/// French reply) is reassembled before decoding instead of becoming two
+/// replacement characters.
 #[derive(Debug, Default)]
 pub struct SseParser {
     /// Accumulated bytes not yet terminated by a newline
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl SseParser {
@@ -71,13 +76,13 @@ impl SseParser {
     /// are extracted, parsed as SSE events, and returned. Any trailing partial line
     /// remains in the buffer for the next `feed()` call.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseEvent> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
+        self.buffer.extend_from_slice(bytes);
 
         let mut events = Vec::new();
-        while let Some(newline_pos) = self.buffer.find('\n') {
-            let line = self.buffer[..newline_pos].trim_end_matches('\r').to_owned();
-            self.buffer.drain(..=newline_pos);
-            events.extend(parse_line(&line));
+        while let Some(newline_pos) = self.buffer.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.buffer.drain(..=newline_pos).collect();
+            let text = String::from_utf8_lossy(&line[..newline_pos]);
+            events.extend(parse_line(text.trim_end_matches('\r')));
         }
         events
     }
@@ -88,7 +93,9 @@ impl SseParser {
     /// (no trailing newline), attempt to parse it as an SSE event.
     pub fn flush(&mut self) -> Vec<SseEvent> {
         let remaining = mem::take(&mut self.buffer);
-        parse_line(&remaining).into_iter().collect()
+        parse_line(&String::from_utf8_lossy(&remaining))
+            .into_iter()
+            .collect()
     }
 }
 
@@ -295,6 +302,23 @@ mod tests {
         let mut parser = SseParser::new();
         let events = parser.feed(b"data:{\"ok\":true}\n\n");
         assert_eq!(events, vec![SseEvent::Data("{\"ok\":true}".to_owned())]);
+    }
+
+    #[test]
+    fn a_character_split_across_chunks_is_reassembled() {
+        let mut parser = SseParser::new();
+        let line = "data: {\"text\":\"café\"}\n\n".as_bytes();
+        // Split inside the two bytes of 'é' (0xC3 0xA9)
+        let split = line
+            .iter()
+            .position(|b| *b == 0xC3)
+            .expect("the line holds an é") // Safe: test assertion
+            + 1;
+        assert!(parser.feed(&line[..split]).is_empty());
+        assert_eq!(
+            parser.feed(&line[split..]),
+            vec![SseEvent::Data("{\"text\":\"café\"}".to_owned())]
+        );
     }
 
     #[test]

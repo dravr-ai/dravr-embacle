@@ -681,12 +681,17 @@ async fn generate_id_unique_across_concurrent_tasks() {
 async fn provider_resolver_round_trip_via_completions() {
     let _guard = ENV_MUTEX.lock().await;
     env::remove_var("EMBACLE_API_KEY");
+    // Pin the runner to a binary that cannot exist, so every machine takes the
+    // path CI takes. With a real `copilot` on PATH the request reaches the
+    // installed runtime's live model catalog, and once that catalog drops the
+    // model below the runner answers ModelUnavailable → 404, failing a routing
+    // test on a fact about the developer's install.
+    env::set_var("COPILOT_BINARY", "/nonexistent/embacle-test/copilot");
 
     let app = test_app();
 
-    // A single-model request with a provider prefix using a model id that
-    // exists in the Copilot catalog so resolution does not trip on the
-    // ModelUnavailable → 404 shortcut.
+    // A single-model request with a provider prefix: what is under test is
+    // that the prefix is parsed and the request reaches the runner layer.
     let body = serde_json::json!({
         "model": "copilot:claude-opus-4.7",
         "messages": [{"role": "user", "content": "test"}]
@@ -703,15 +708,15 @@ async fn provider_resolver_round_trip_via_completions() {
         )
         .await
         .expect("send request");
+    env::remove_var("COPILOT_BINARY");
 
-    // Verify correct routing: provider prefix is parsed and forwarded to the
-    // runner layer. The result depends on binary availability — 5xx (binary
-    // missing or invocation failure) or 2xx (actual completion). Either way it
-    // must NOT be a 4xx, which would indicate a routing/parsing error.
+    // The prefix was parsed and the request forwarded to the runner layer,
+    // which fails on the missing binary: a 5xx. A 4xx would mean the routing
+    // or parsing rejected it before it got there.
     let status = response.status();
     assert!(
-        !status.is_client_error(),
-        "expected non-4xx for provider-prefixed model, got {status}"
+        status.is_server_error(),
+        "expected 5xx from the missing runner binary, got {status}"
     );
 }
 

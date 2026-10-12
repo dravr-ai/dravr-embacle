@@ -240,13 +240,12 @@ impl OpenRouterProvider {
 
     /// Parse an error response from the `OpenRouter` API: the vendor's
     /// message when the body is its JSON envelope, `HTTP <status>` otherwise;
-    /// the status decides the kind. A 402 (credit balance exhausted) is an
-    /// external-service error like any other non-4xx-class refusal.
+    /// the status decides the kind. A 402 (credit balance exhausted) carries
+    /// the vendor's bare message, which [`client::map_http_error`] turns into
+    /// a `RateLimit` quota refusal like every other provider's 402.
     fn parse_error_response(status: StatusCode, body: &str) -> RunnerError {
         let message = match chat_completions::error_detail(body) {
-            Some(detail) if status == StatusCode::PAYMENT_REQUIRED => {
-                format!("credit balance exhausted: {}", detail.message)
-            }
+            Some(detail) if status == StatusCode::PAYMENT_REQUIRED => detail.message,
             _ => chat_completions::describe_error(PROVIDER_NAME, status, body),
         };
         client::map_http_error(PROVIDER_NAME, status, &message)
@@ -505,11 +504,14 @@ mod tests {
     }
 
     #[test]
-    fn a_402_is_an_external_service_error_a_429_a_rate_limit() {
+    fn a_402_and_a_429_are_both_rate_limits() {
         let body = r#"{"error":{"message":"Insufficient credits","type":"payment"}}"#;
         let err = OpenRouterProvider::parse_error_response(StatusCode::PAYMENT_REQUIRED, body);
-        assert_eq!(err.kind, ErrorKind::ExternalService);
-        assert!(err.message.contains("credit balance exhausted"));
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert_eq!(
+            err.message,
+            "openrouter: credit balance exhausted: Insufficient credits"
+        );
         let body = r#"{"error":{"message":"Rate limit exceeded: free-models-per-minute"}}"#;
         let err = OpenRouterProvider::parse_error_response(StatusCode::TOO_MANY_REQUESTS, body);
         assert_eq!(err.kind, ErrorKind::RateLimit);

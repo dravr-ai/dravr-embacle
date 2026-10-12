@@ -1,5 +1,5 @@
 # ABOUTME: Standalone LLM runner library wrapping 12 AI CLI tools, ACP, and HTTP APIs as pluggable providers
-# ABOUTME: CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo), ACP, and HTTP (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible)
+# ABOUTME: CLI tools (Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo), ACP, and HTTP (Anthropic, Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible)
 
 [workspace]
 members = [".", "crates/embacle-mcp", "crates/embacle-server", "crates/embacle-tool-host"]
@@ -9,7 +9,7 @@ name = "embacle"
 version = "0.34.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "LLM runner library — 12 AI CLI tools, ACP, and HTTP APIs (Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
+description = "LLM runner library — 12 AI CLI tools, ACP, and HTTP APIs (Anthropic, Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
 repository = "https://github.com/dravr-ai/dravr-embacle"
 homepage = "https://github.com/dravr-ai/dravr-embacle"
 documentation = "https://docs.rs/embacle"
@@ -107,7 +107,7 @@ copilot-headless = ["dep:agent-client-protocol-schema", "tokio/sync"]
 # `.cargo/config.toml` keeps the SDK's build script from downloading and embedding
 # the CLI; the runtime pair is a file `COPILOT_RUNTIME_PATH` names at run time.
 copilot-sdk = ["dep:github-copilot-sdk", "tokio/sync"]
-# Enable the HTTP API providers: Gemini, Cohere, Groq, OpenRouter, and any
+# Enable the HTTP API providers: Anthropic, Gemini, Cohere, Groq, OpenRouter, and any
 # OpenAI-compatible endpoint (the OpenAI API, Ollama, vLLM, LocalAI) —
 # reqwest-based, with the shared SSE parser, retry policy, HTTP error mapping
 # and OpenAI wire format in `http_api`.

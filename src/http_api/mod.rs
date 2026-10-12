@@ -1,4 +1,4 @@
-// ABOUTME: HTTP API providers — Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible — and what they share
+// ABOUTME: HTTP API providers — Anthropic, Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible — and what they share
 // ABOUTME: One HTTP error mapping, one SSE parser, one retry policy, one OpenAI wire format; vendor quirks stay per provider
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -11,6 +11,7 @@
 //!
 //! | Provider | Type | `name()` | Env (`from_env`) |
 //! |---|---|---|---|
+//! | Anthropic Messages API | [`AnthropicProvider`](anthropic::AnthropicProvider) | `anthropic` | `ANTHROPIC_API_KEY` (pool: `ANTHROPIC_API_KEY_2`, `_3`, …), `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MAX_TOKENS`, `ANTHROPIC_EFFORT`, `ANTHROPIC_THINKING`, `ANTHROPIC_MAX_RETRIES`, `ANTHROPIC_INITIAL_RETRY_DELAY_MS`, `ANTHROPIC_MAX_RETRY_DELAY_MS` |
 //! | Google Gemini | [`GeminiProvider`](gemini::GeminiProvider) | `gemini` | `GEMINI_API_KEY`, `GEMINI_DEFAULT_MODEL`, `GEMINI_MAX_RETRIES`, `GEMINI_INITIAL_RETRY_DELAY_MS`, `GEMINI_MAX_RETRY_DELAY_MS` |
 //! | Cohere | [`CohereProvider`](cohere::CohereProvider) | `cohere` | `COHERE_API_KEY`, `COHERE_DEFAULT_MODEL`, `COHERE_MAX_RETRIES`, `COHERE_INITIAL_RETRY_DELAY_MS`, `COHERE_MAX_RETRY_DELAY_MS` |
 //! | Groq | [`GroqProvider`](groq::GroqProvider) | `groq` | `GROQ_API_KEY`, `GROQ_DEFAULT_MODEL`, `GROQ_MAX_RETRIES`, `GROQ_INITIAL_RETRY_DELAY_MS`, `GROQ_MAX_RETRY_DELAY_MS` |
@@ -23,10 +24,11 @@
 //! policy), [`sse`] (the line-buffering Server-Sent Events parser) and, for
 //! Groq, `OpenRouter` and the OpenAI-compatible provider, one `OpenAI`
 //! chat-completions wire format (request body, response, usage, stream
-//! frames, error envelope). What they do not share — Gemini's
-//! `system_instruction` hoisting and thinking-only retries, Cohere's typed
-//! event envelope and its rule that a content-less message sinks the whole
-//! request, `OpenRouter`'s ranking headers and 402 wording, Groq billing the
+//! frames, error envelope). What they do not share — Anthropic's content
+//! blocks, tool-result pairing, cache breakpoints and `retry-after` header,
+//! Gemini's `system_instruction` hoisting and thinking-only retries,
+//! Cohere's typed event envelope and its rule that a content-less message
+//! sinks the whole request, `OpenRouter`'s ranking headers, Groq billing the
 //! plain token counts, the self-hosted endpoints' "is the server running?"
 //! hints — stays in each provider's own module.
 //!
@@ -38,6 +40,8 @@
 //! No request URL is ever written to a log by this module: Gemini's API key
 //! travels in the query string, so a URL in a log line is a key in a log line.
 
+/// Anthropic Messages API provider (Claude Haiku, Sonnet, Opus).
+pub mod anthropic;
 /// The `OpenAI` chat-completions wire format shared by Groq, `OpenRouter` and
 /// the OpenAI-compatible provider.
 mod chat_completions;
@@ -57,6 +61,7 @@ pub mod openrouter;
 /// Line-buffering Server-Sent Events parser shared by every streaming provider.
 pub mod sse;
 
+pub use anthropic::{AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking};
 pub use cohere::{CohereConfig, CohereProvider};
 pub use gemini::{GeminiConfig, GeminiProvider};
 pub use groq::{GroqConfig, GroqProvider};

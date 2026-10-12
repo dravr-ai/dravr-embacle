@@ -64,6 +64,27 @@ pub struct ModelPricing {
     /// Fraction of `input_per_million` at which cache-write tokens bill.
     #[serde(default = "default_cache_write_rate")]
     pub cache_write_multiplier: f64,
+    /// A second rate card for long prompts, when the model has one: a
+    /// request whose gross prompt exceeds its threshold bills every token —
+    /// input, cache and output — at the long-prompt rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_prompt: Option<LongPromptRates>,
+}
+
+/// The rate card a model switches to when a request's prompt is long.
+///
+/// Claude Haiku 5.5 bills \$0.10 / \$0.50 per million tokens for a prompt of
+/// 100K tokens or fewer and \$0.50 / \$2.50 above that; the cache
+/// multipliers apply to the long-prompt input rate the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LongPromptRates {
+    /// The largest gross prompt (fresh + cache read + cache write) that still
+    /// bills on the base card
+    pub above_prompt_tokens: i64,
+    /// USD per 1 million input tokens above the threshold
+    pub input_per_million: f64,
+    /// USD per 1 million output tokens above the threshold
+    pub output_per_million: f64,
 }
 
 /// Serde default for [`ModelPricing::cache_read_multiplier`], so an operator
@@ -87,6 +108,37 @@ impl ModelPricing {
             output_per_million,
             cache_read_multiplier: DEFAULT_CACHE_READ_RATE,
             cache_write_multiplier: DEFAULT_CACHE_WRITE_RATE,
+            long_prompt: None,
+        }
+    }
+
+    /// Bill a request whose gross prompt exceeds `above_prompt_tokens` at
+    /// the given input / output rates instead of the base card.
+    #[must_use]
+    pub const fn with_long_prompt_rates(
+        mut self,
+        above_prompt_tokens: i64,
+        input_per_million: f64,
+        output_per_million: f64,
+    ) -> Self {
+        self.long_prompt = Some(LongPromptRates {
+            above_prompt_tokens,
+            input_per_million,
+            output_per_million,
+        });
+        self
+    }
+
+    /// The (input, output) rates per million tokens for a request with a gross prompt
+    /// of `prompt_tokens`: the long-prompt card above its threshold, the base
+    /// card otherwise.
+    #[must_use]
+    pub fn rates_for_prompt(&self, prompt_tokens: i64) -> (f64, f64) {
+        match self.long_prompt {
+            Some(long) if prompt_tokens > long.above_prompt_tokens => {
+                (long.input_per_million, long.output_per_million)
+            }
+            _ => (self.input_per_million, self.output_per_million),
         }
     }
 
@@ -175,6 +227,28 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     ("gemini", "gemini-2.5-pro", ModelPricing::new(1.25, 10.0)),
     ("gemini", "gemini-2.5-flash", ModelPricing::new(0.15, 0.60)),
     ("gemini", "gemini-2.0-flash", ModelPricing::new(0.075, 0.30)),
+    // Anthropic Messages API (AnthropicProvider::name() = "anthropic"; pool
+    // accounts "anthropic#N" price through pool_family). Cache reads bill at
+    // 0.10x input — 0.05x on Opus 5.5 ($0.20/MTok) — and 5-minute cache
+    // writes at 1.25x. Haiku 5.5 has two rate cards: $0.10/$0.50 for a
+    // prompt of 100K tokens or fewer, $0.50/$2.50 above that.
+    (
+        "anthropic",
+        "claude-opus-5-5",
+        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+    ),
+    (
+        "anthropic",
+        "claude-sonnet-5-5",
+        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "anthropic",
+        "claude-haiku-5-5",
+        ModelPricing::new(0.10, 0.50)
+            .with_cache_rates(0.10, 1.25)
+            .with_long_prompt_rates(100_000, 0.50, 2.50),
+    ),
     // Groq models
     ("groq", "llama-3.3-70b", ModelPricing::new(0.59, 0.79)),
     ("groq", "mixtral", ModelPricing::new(0.24, 0.24)),
@@ -522,14 +596,14 @@ pub fn cost_from_pricing(pricing: &ModelPricing, counts: &TokenCounts) -> f64 {
     let cached_write = counts.cached_write.clamp(0, prompt - cached_read);
     let fresh_prompt = prompt - cached_read - cached_write;
 
-    let input = pricing.input_per_million;
+    let (input, output) = pricing.rates_for_prompt(prompt);
     let fresh_prompt_cost = fresh_prompt as f64 * input / divisor;
     let cached_read_cost = cached_read as f64 * input * pricing.cache_read_multiplier / divisor;
     let cached_write_cost = cached_write as f64 * input * pricing.cache_write_multiplier / divisor;
     // Providers that report reasoning tokens exclude them from the completion
     // count, so they are added rather than carved out.
     let output_tokens = counts.completion.max(0) + counts.reasoning.max(0);
-    let output_cost = output_tokens as f64 * pricing.output_per_million / divisor;
+    let output_cost = output_tokens as f64 * output / divisor;
 
     fresh_prompt_cost + cached_read_cost + cached_write_cost + output_cost
 }
