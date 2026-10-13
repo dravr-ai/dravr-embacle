@@ -31,3 +31,7 @@ pnpm-lock.yaml
 
 # Documentation directory (symlink created per-machine by obsidian-vault-setup skill)
 claude_docs
+
+# The private agent knowledge (dravr-ai/dravr-savoir): a clone kept by .build/ci/savoir.sh,
+# which .claude/skills and AGENTS.md's import point into.
+.savoir/

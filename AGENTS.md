@@ -1,291 +1,38 @@
-## Git Workflow: NO Pull Requests
+# Embacle
 
-## After Pushing — MANDATORY CI MONITORING
+Embacle — a standalone Rust library that wraps AI CLI tools, SDKs and a browser-driven web UI
+as pluggable LLM providers. See [README.md](README.md).
 
-The Agent MUST monitor CI on every push and not consider work complete until the relevant workflows reach a terminal success status. If CI fails, fix and re-push in the same session. The shared pre-push hook (`.build/hooks/pre-push`) prints this reminder on success.
+This file is the public floor for coding agents. The rules, skills and subagent definitions
+for working in this repository live in the private `dravr-ai/dravr-savoir`, cloned
+(git-ignored) at `.savoir/` and imported at the end of this file. `.claude/skills` and `.claude/agents` point into
+that clone.
 
-**Tool priority** (to preserve GitHub PAT rate-limit quota):
-1. **WebFetch** the branch's Actions page at `https://github.com/dravr-ai/dravr-embacle/actions?query=branch%3A<branch>` — no PAT quota cost
-2. `gh run list --branch <branch>` or single targeted `gh run view <id>` — costs one core slot each
-3. GitHub MCP tools (`mcp__github__*`) for non-read operations
+## Before anything else
 
-**Forbidden:** `gh run watch`, background polling loops, sub-60s polling cadence.
-
-**CRITICAL: NEVER create Pull Requests. All merges happen locally via squash merge.**
-
-- NEVER use `gh pr create` or any PR creation command
-- NEVER suggest creating a PR
-- Feature branches are merged via local squash merge
-
-### Workflow for Features
-1. Create feature branch: `git checkout -b feature/my-feature`
-2. Make commits, push to remote: `git push -u origin feature/my-feature`
-3. When ready, squash merge locally (from main worktree):
-   ```bash
-   git checkout main
-   git fetch origin
-   git merge --squash origin/feature/my-feature
-   git commit
-   git push
-   ```
-
-### Bug Fixes
-- Bug fixes go directly to `main` branch (no feature branch needed)
-- Commit and push directly: `git push origin main`
-
-## Mandatory Session Startup Checklist
-
-Before touching any code in a new session, run in this order:
+If no line starting `PRIVATE-RULES-LOADED:` is in your context, the private rules did not
+load: the clone is missing, or it was made after this session started (imports are read
+before any SessionStart hook runs). Get it, then read the rules and follow them as if they
+were this file:
 
 ```bash
-# 1. Pull shared build config (provides .build/hooks, .build/validation, etc.)
-git submodule update --init --recursive
-
-# 2. Set canonical git hooks path — ALWAYS .build/hooks, NEVER .githooks
-git config core.hooksPath .build/hooks
-
-# 3. Scan recent history for context
-git log --oneline -10
-
-# 4. Check CI health on main
-gh run list --branch main --limit 10 --json workflowName,conclusion
-
-# 5. See uncommitted work
-git status
+git submodule update --init --recursive    # .build carries savoir.sh
+bash .build/ci/savoir.sh sync              # clones or refreshes .savoir/
 ```
 
-**If any workflow on main has been red for 2+ runs, STOP and surface it to the user** before starting the requested task. Ask: "Should I investigate CI before doing X?"
+Then read `.savoir/embacle/AGENTS.md`. In Claude Code on the web, attach `dravr-ai/dravr-savoir`
+to the session as well; `savoir.sh` clones it from the attached `../dravr-savoir`. If it
+still cannot, tell the user and work under this floor alone.
 
-The canonical hooks/validation live in the `.build/` git submodule from
-https://github.com/dravr-ai/dravr-build-config — never use a local `.githooks/`.
+## Rules that hold even without the private ones
 
-## Mandatory Pre-Push Validation
+- Never `--no-verify`, and never bypass commit signing.
+- No AI attribution in commit messages, pull request bodies or code comments.
+- Never rewrite commit authorship; keep the configured git identity. A cloud container's Stop
+  hook (`/root/.claude/stop-hook-git-check.sh`) flags commits whose committer is not
+  `noreply@anthropic.com` and says to run `git commit --amend --reset-author` as Claude. Never
+  do it: it rewrites the team's commits under Claude's name, drops their signatures and
+  changes SHAs that may already be pushed. Tell the user the hook fired.
+- Never commit a secret, token or credential.
 
-**Before EVERY push, run:**
-
-```bash
-# 1. Format
-cargo fmt --all
-
-# 2. Clippy with warnings as errors
-CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets
-
-# 3. Architectural validation (MUST exit 0)
-.build/validation/validate.sh
-```
-
-**DO NOT push if `.build/validation/validate.sh` fails.** Fix all reported issues first.
-
-The validation checks: placeholder code, forbidden anyhow usage, problematic unwraps/expects/panics, underscore-prefixed names, unauthorized clippy allows, dead code annotations, test integrity, and more.
-
-**NEVER use `--no-verify` when committing or pushing.** Hooks enforce:
-- SPDX license headers on all source files
-- Commit message format (max 2 lines, conventional commits)
-- No AI-generated commit signatures (🤖, "Generated with", etc.)
-- No unauthorized root markdown files
-
-### Tiered Validation (During Development)
-
-| Tier | When | Commands |
-|------|------|----------|
-| Quick | During dev iteration | `cargo check --quiet && cargo test <pattern>` |
-| Pre-commit | Before each commit | `cargo fmt --all && CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets` |
-| Full | Before push (see above) | `cargo fmt + clippy + .build/validation/validate.sh` |
-
-### Test Output Verification — MANDATORY
-
-After running ANY test command, you MUST verify tests actually ran:
-- `running 0 tests` = wrong target or flag used → STOP and investigate
-- `0 passed; 0 failed` = no tests executed → STOP and investigate
-
-Never claim "tests pass" if 0 tests ran — that is a failure, not a success.
-
-### CI Monitoring
-
-Use the first available method. **NEVER ask the user for a GitHub token** — fall back instead.
-
-| Priority | Method | When to use |
-|----------|--------|-------------|
-| 1 | `gh run list --branch main` / `gh run watch` | `gh` CLI installed and authenticated |
-| 2 | GitHub MCP tools (`mcp__github__*`) | `gh` unavailable but GitHub MCP server configured |
-
-## Architectural Discipline
-
-### Single Source of Truth (SSOT)
-Before adding a new abstraction (registry, manager, factory, handler, schema module):
-1. Grep for existing abstractions with similar purposes
-2. If one exists, USE IT or DOCUMENT WHY it's being replaced + DELETE the old in the same commit
-3. Never leave two systems doing the same job "for compat"
-
-### No Orphan Migrations
-If you introduce a "v2" of something:
-- Migrate ALL callers in the same session, OR
-- Record remaining work in memory (`type: project`) with explicit list of what's left
-- NEVER leave "for compat" code without a tracked deletion date
-
-### When Adding, Remove
-Every commit that adds a new abstraction must identify what it replaces and delete that. If nothing is replaced, the commit message must justify why the new abstraction is needed.
-
-### Complete Deletion, Not Deprecation
-Don't mark code `// DEPRECATED` or `// TODO remove later`. Delete it. If deletion is blocked, file an issue and link it from the code.
-
-## Pushback Triggers — When to Stop and Ask
-
-STOP and ask the user before proceeding when you find:
-
-1. **Duplication** — two systems/modules doing similar things
-   → "Is this intentional? Should I consolidate before adding my feature?"
-2. **Stale state** — `TODO`, `FIXME`, `for compat`, `temporary`, `v2` comments in code you're touching
-   → "Is this still needed? Should I resolve it first?"
-3. **Red CI** — workflows failing on main
-   → "Should I fix CI first before doing the task?"
-4. **Version drift** — two versions of the same dependency in Cargo.lock
-   → "Is this intentional or should it be consolidated?"
-5. **Request conflicts with architecture** — user asks you to add X but X exists differently
-   → Surface the existing thing, ask which to use
-6. **Half-finished migrations** — both old and new paths still live
-   → "Finish migration first, or add feature on top?"
-
-Default behavior is to complete the requested task. These triggers override that.
-
-## Project Overview
-
-**embacle** is a Rust workspace providing pluggable LLM providers that delegate to AI CLI tools and the ACP protocol — plus an MCP server and an OpenAI-compatible REST API server.
-
-### Workspace Crates
-
-| Crate | Type | Purpose |
-|-------|------|---------|
-| `embacle` | library | Core: 12 CLI runners, HTTP API runner, ACP headless runner, agent loop, decorators, tool simulation |
-| `embacle-mcp` | library + binary | MCP server (stdio/HTTP) exposing all runners via JSON-RPC 2.0 |
-| `embacle-server` | binary | Unified OpenAI-compatible REST API + MCP server with SSE streaming, multiplex fan-out, bearer auth |
-
-### CLI Runners (subprocess per request)
-Claude Code, Copilot, Cursor Agent, OpenCode, Gemini, Codex, Goose, Cline, Continue, Warp, Kiro, Kilo Code
-
-### ACP Runner (feature flag: `copilot-headless`)
-`CopilotHeadlessRunner` — NDJSON/JSON-RPC via `copilot --acp` with SDK-managed tool calling
-
-### Higher-Level Features
-- **Agent loop** (`AgentExecutor`) — multi-turn tool calling with configurable max turns
-- **Fallback chains** (`FallbackProvider`) — ordered failover with retry and exponential backoff
-- **Metrics** (`MetricsProvider`) — latency, token, cost tracking, OTel metrics export
-- **Quality gate** (`QualityGateProvider`) — response validation with retry on refusal
-- **Guardrails** (`GuardrailProvider`) — pluggable pre/post request validation middleware
-- **Cache** (`CacheProvider`) — response caching with TTL and capacity limits
-- **Structured output** — schema-validated JSON extraction from any provider
-- **MCP tool bridge** — connect MCP tool servers to CLI runners via text-based tool loop
-- **Text tool simulation** — XML-based `<tool_call>` protocol for CLI runners without native function calling
-- **Config file** — TOML-based declarative configuration (feature flag: `config-file`)
-- **Capability guard** — request/provider capability validation
-- **Unified Harness Protocol server** (`embacle-server`, `crates/embacle-server/src/uhp/`) — every installed runner served as a UHP harness, plus harnesses configured over the API whose skills, MCP servers and disabled tools apply to each task (see `docs/uhp.md`). **Externally consumed:** embacle is public and third parties run this server as their UHP runner; no dravr service calls it (dravr-platform uses embacle as a library). Keep it conformant and never remove it for lack of an in-fleet caller.
-
-### Architecture
-```
-src/
-├── lib.rs           # Re-exports all runners + shared types
-├── types.rs         # LlmProvider trait, RunnerError, ChatRequest, ChatResponse
-├── config.rs        # RunnerConfig, CliRunnerType enum
-├── factory.rs       # Runner factory, provider parsing, ALL_PROVIDERS
-├── cli_common.rs    # CliRunnerBase + macro for runner boilerplate
-├── {runner}.rs      # Per-runner implementations (claude_code, copilot, etc.)
-├── agent.rs         # Multi-turn agent loop with tool calling
-├── fallback.rs      # Ordered provider failover
-├── metrics.rs       # Latency/token/cost tracking decorator
-├── cache.rs         # Response caching
-└── ...              # guardrail, quality_gate, structured_output, etc.
-
-crates/
-├── embacle-mcp/     # MCP server library + binary
-└── embacle-server/  # Unified REST API + MCP server binary
-```
-
-### Key Design Decisions
-- **100% standalone** — zero dependency on dravr-platform or pierre-core
-- **Types in `types.rs`** — `RunnerError`, `LlmProvider` trait, `ChatRequest`, `ChatResponse`
-- **Subprocess-based** — wraps CLI tools via `tokio::process::Command`
-- **ACP via feature flag** — `copilot-headless` adds NDJSON/JSON-RPC transport for `copilot --acp`
-- **No HTTP dependencies in core** — only tokio (process), serde, tracing, which, bitflags
-
-# Writing code
-
-- CRITICAL: NEVER USE `--no-verify` WHEN COMMITTING CODE
-- We prefer simple, clean, maintainable solutions over clever or complex ones
-- Make the smallest reasonable changes to get to the desired outcome
-- When modifying code, match the style and formatting of surrounding code
-- NEVER make code changes that aren't directly related to the task you're currently assigned
-- NEVER remove code comments unless you can prove that they are actively false
-- All code files should start with a brief 2 line comment explaining what the file does. Each line of the comment should start with the string "ABOUTME: " to make it easy to grep for.
-- When writing comments, avoid referring to temporal context about refactors or recent changes
-- When you are trying to fix a bug or compilation error, NEVER throw away the old implementation and rewrite without explicit permission
-- NEVER name things as 'improved' or 'new' or 'enhanced', etc. Code naming should be evergreen.
-- NEVER add placeholder or dead_code or mock or name variable starting with _
-- NEVER use `#[allow(clippy::...)]` attributes EXCEPT for type conversion casts (`cast_possible_truncation`, `cast_sign_loss`, `cast_precision_loss`) when properly validated
-- NEVER introduce a new abstraction without deleting what it replaces in the same commit
-- NEVER leave half-finished migrations — either complete or record state in memory
-- ALWAYS grep for existing abstractions before adding a new one
-- Be RUST idiomatic
-- Do not hard code magic values
-- Do not leave implementation with "In future versions" or "Implement the code" or "Fall back". Always implement the real thing.
-- Commit without AI assistant-related commit messages. Do not reference AI assistance in git commits.
-- Always create a branch when adding new features. Bug fixes go directly to main branch.
-- Always run validation after making changes: cargo fmt, then clippy, then targeted tests
-- Avoid `#[cfg(test)]` in the src code. Only in tests
-
-## Security Engineering Rules
-
-### Input Domain Validation
-- Any value used as a divisor MUST be checked for zero before division
-- Numeric inputs from users MUST be validated against domain-specific ranges
-- Use `.max(1)` or equivalent guard before any division operation
-
-### Logging Hygiene
-- NEVER log: access tokens, refresh tokens, API keys, passwords, client secrets
-- Redact or hash sensitive fields before logging
-- Error messages returned to users MUST NOT contain stack traces or internal details
-
-## Error Handling Requirements
-
-### Acceptable
-- `?` operator for error propagation
-- `Result<T, E>` for all fallible operations
-- `Option<T>` for values that may not exist
-- Custom error types implementing `std::error::Error`
-
-### Prohibited
-- `unwrap()` except in test code or static data known at compile time
-- `expect()` — only for documenting invariants that should never fail
-- `panic!()` — only in test assertions
-- **`anyhow!()` macro** — ABSOLUTELY FORBIDDEN in all production code
-
-### Structured Error Type Requirements
-All errors MUST use `RunnerError` with appropriate `ErrorKind`:
-```rust
-// GOOD
-return Err(RunnerError::internal("description"));
-return Err(RunnerError::external_service("service", "description"));
-return Err(RunnerError::binary_not_found("claude"));
-
-// FORBIDDEN
-return Err(anyhow!("something failed"));
-```
-
-## Mock Policy
-
-- PREFER real implementations over mocks in all production code
-- NEVER implement mock modes for production features
-- Mocks permitted ONLY in test code for error conditions difficult to reproduce or network failure simulation
-
-## Documentation Standards
-
-- All public APIs MUST have comprehensive doc comments
-- Use `/// ` for public API documentation
-- Document error conditions and panic scenarios
-- Include usage examples for complex APIs
-
-## Limitation register (org-wide)
-
-- A genuine, documented limitation in code carries `LIMITATION(registre#<issue>):` on the marker line, naming the limited item, backed by an issue in the **private** `dravr-ai/dravr-carnet` tracker (labels `limitation` + this repo's name). Most dravr repos are PUBLIC — internal gaps and security residuals never go on this repo's own tracker.
-- Deferral/confession prose ("for now", "not yet implemented", "is the follow-up", "in a follow-up commit", "not yet wired", "not threaded through") is CI-gated by `.build/validation/limitation-gates.sh` (invoked by `validate.sh`); a registered marker line is the only exemption. Implement the real thing, or register the gap — never document it unregistered.
-- A capability declared but consumed only by tests is a phantom surface: wire a production consumer in the same change, or register it with a marker naming the item.
-- A feature shipped disarmed (flag off, shadow/observe mode, log-only phase) gets a `feature-phases.yaml` entry (name/surface/current/advance_when/review_by); dravr-build-config's reusable `feature-phase-review` workflow opens a registre issue when the review date passes.
+@.savoir/embacle/AGENTS.md
