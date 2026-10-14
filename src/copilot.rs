@@ -4,7 +4,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::ffi::OsString;
 use std::io;
+use std::path::Path;
 use std::process::Stdio;
 use std::str;
 
@@ -20,6 +22,7 @@ use crate::types::{
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tempfile::TempPath;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_stream::wrappers::LinesStream;
@@ -27,7 +30,7 @@ use tokio_stream::StreamExt;
 use tracing::instrument;
 
 use crate::config::RunnerConfig;
-use crate::process::{read_stderr_capped, run_cli_command};
+use crate::process::{private_config_file, read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
@@ -109,6 +112,15 @@ fn mcp_config_json(servers: &[McpServerConfig]) -> String {
     json!({ "mcpServers": Value::Object(entries) }).to_string()
 }
 
+/// The 0600 file the Copilot CLI reads `servers` from, or `None` when there
+/// are none.
+fn mcp_config_file(servers: &[McpServerConfig]) -> Result<Option<TempPath>, RunnerError> {
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    private_config_file("embacle-copilot-mcp-", &mcp_config_json(servers)).map(Some)
+}
+
 impl CopilotRunner {
     /// Create a new Copilot CLI runner with the given configuration.
     ///
@@ -141,13 +153,17 @@ impl CopilotRunner {
     /// Build the base command with common arguments.
     ///
     /// `model` is threaded through as `--model <id>` only when `Some`; a
-    /// `None` means "let the CLI pick the account default".
+    /// `None` means "let the CLI pick the account default". `mcp_config` is
+    /// the 0600 file [`mcp_config_file`] wrote, handed over as
+    /// `--additional-mcp-config @<path>`: the configuration carries each
+    /// server's headers, the caller's bearer among them, and never goes on
+    /// the command line.
     fn build_command(
         &self,
         prompt: &str,
         model: Option<&str>,
         silent: bool,
-        mcp_servers: &[McpServerConfig],
+        mcp_config: Option<&Path>,
     ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
 
@@ -172,8 +188,10 @@ impl CopilotRunner {
         // to this model as a text catalog in the prompt it declines outright —
         // "that tool isn't part of my real toolset" — which is why the
         // text-simulation fallback never worked on this runner.
-        if !mcp_servers.is_empty() {
-            cmd.args(["--additional-mcp-config", &mcp_config_json(mcp_servers)]);
+        if let Some(path) = mcp_config {
+            let mut file_arg = OsString::from("@");
+            file_arg.push(path);
+            cmd.arg("--additional-mcp-config").arg(file_arg);
             // Folds each server's `initialize` instructions into Copilot's
             // SYSTEM prompt. This CLI has no --system-prompt flag, so a caller
             // with a persona to impose can otherwise only put it in the prompt
@@ -268,11 +286,13 @@ impl LlmProvider for CopilotRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let pinned = self.resolve_model(request);
+        // Removed when it drops, after the child has exited.
+        let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
             &prepared.prompt,
             pinned.as_deref(),
             true,
-            &request.mcp_servers,
+            mcp_config.as_deref(),
         );
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
@@ -290,7 +310,9 @@ impl LlmProvider for CopilotRunner {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
         let pinned = self.resolve_model(request);
-        let mut cmd = self.build_command(prompt, pinned.as_deref(), true, &request.mcp_servers);
+        // Held by the stream, so it outlives the child that reads it.
+        let mcp_config = mcp_config_file(&request.mcp_servers)?;
+        let mut cmd = self.build_command(prompt, pinned.as_deref(), true, mcp_config.as_deref());
 
         // Enable streaming
         cmd.args(["--stream", "on"]);
@@ -325,7 +347,9 @@ impl LlmProvider for CopilotRunner {
             })
         });
 
-        Ok(Box::pin(GuardedStream::new(stream, child, stderr_task)))
+        Ok(Box::pin(
+            GuardedStream::new(stream, child, stderr_task).keeping(mcp_config),
+        ))
     }
 }
 
@@ -389,7 +413,7 @@ mod tests {
 
     #[test]
     fn build_command_omits_model_flag_when_none() {
-        let cmd = runner().build_command("hi", None, true, &[]);
+        let cmd = runner().build_command("hi", None, true, None);
         let args: Vec<&str> = cmd
             .as_std()
             .get_args()
@@ -402,8 +426,9 @@ mod tests {
     #[test]
     fn build_command_allows_mcp_server_instructions_only_with_servers() {
         let args_of = |servers: &[McpServerConfig]| -> Vec<String> {
+            let config = mcp_config_file(servers).unwrap(); // Safe: test assertion
             runner()
-                .build_command("hi", None, true, servers)
+                .build_command("hi", None, true, config.as_deref())
                 .as_std()
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -426,7 +451,7 @@ mod tests {
 
     #[test]
     fn build_command_includes_model_flag_when_some() {
-        let cmd = runner().build_command("hi", Some("gpt-5.4"), true, &[]);
+        let cmd = runner().build_command("hi", Some("gpt-5.4"), true, None);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()

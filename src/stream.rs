@@ -7,6 +7,7 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use tempfile::TempPath;
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 use tokio_stream::Stream;
@@ -29,6 +30,8 @@ pub struct GuardedStream {
     inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, RunnerError>> + Send>>,
     child: Option<Child>,
     stderr_task: Option<JoinHandle<Vec<u8>>>,
+    /// A file the child reads its configuration from, removed with the stream.
+    config_file: Option<TempPath>,
 }
 
 impl GuardedStream {
@@ -47,7 +50,15 @@ impl GuardedStream {
             inner: Box::pin(inner),
             child: Some(child),
             stderr_task: Some(stderr_task),
+            config_file: None,
         }
+    }
+
+    /// Keep `config_file` — a file the child was pointed at on its command
+    /// line — until the stream, and with it the child, is gone.
+    pub(crate) fn keeping(mut self, config_file: Option<TempPath>) -> Self {
+        self.config_file = config_file;
+        self
     }
 }
 

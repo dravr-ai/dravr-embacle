@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::io;
+use std::path::Path;
 use std::process::Stdio;
 use std::str;
 
@@ -18,6 +19,7 @@ use crate::types::{
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tempfile::TempPath;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_stream::wrappers::LinesStream;
@@ -25,7 +27,9 @@ use tokio_stream::StreamExt;
 use tracing::{debug, instrument, warn};
 
 use crate::config::RunnerConfig;
-use crate::process::{read_stderr_capped, run_cli_command};
+use crate::process::{
+    feed_stdin, private_config_file, read_stderr_capped, run_cli_command_with_input,
+};
 use crate::prompt::{extract_system_message, prepare_user_prompt};
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
@@ -62,6 +66,19 @@ fn mcp_servers_to_claude_json(servers: &[McpServerConfig]) -> String {
         })
         .collect();
     json!({ "mcpServers": entries }).to_string()
+}
+
+/// The 0600 file Claude Code reads `servers` from (`--mcp-config <path>`), or
+/// `None` when there are none.
+///
+/// The configuration carries each server's headers — the caller's bearer
+/// among them — so it goes in a file only this user can read, never on the
+/// command line.
+fn mcp_config_file(servers: &[McpServerConfig]) -> Result<Option<TempPath>, RunnerError> {
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    private_config_file("embacle-claude-mcp-", &mcp_servers_to_claude_json(servers)).map(Some)
 }
 
 /// The `--allowed-tools` selector that admits every tool a server publishes.
@@ -315,20 +332,26 @@ impl ClaudeCodeRunner {
 
     /// Build the base command with common arguments
     ///
+    /// The prompt is not on it: the caller writes it to the child's stdin, so
+    /// it never sits on a command line every process on the host can read
+    /// (`/proc/<pid>/cmdline`). Likewise `mcp_config` is the path of the
+    /// 0600 file [`mcp_config_file`] wrote for `mcp_servers`, whose headers
+    /// carry the caller's bearer, never the JSON itself.
+    ///
     /// When `max_tokens` is `Some`, the `CLAUDE_CODE_MAX_OUTPUT_TOKENS` env var
     /// is injected after sandbox application so the CLI limits its output length.
     fn build_command(
         &self,
-        prompt: &str,
         system_prompt: Option<&str>,
         output_format: &str,
         max_tokens: Option<u32>,
         mcp_servers: &[McpServerConfig],
+        mcp_config: Option<&Path>,
     ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
+        cmd.stdin(Stdio::piped());
         cmd.args([
-            "-p",
-            prompt,
+            "--print",
             "--output-format",
             output_format,
             "--no-session-persistence",
@@ -357,16 +380,17 @@ impl ClaudeCodeRunner {
         // the caller withholds the prose tool catalog in exactly that case, so
         // the model is never offered two tool surfaces at once. With none, the
         // flag alone leaves the turn tool-less and the prose catalog stands.
-        if mcp_servers.is_empty() {
-            cmd.arg("--strict-mcp-config");
-        } else {
-            cmd.args([
-                "--mcp-config",
-                &mcp_servers_to_claude_json(mcp_servers),
-                "--strict-mcp-config",
-                "--allowed-tools",
-                &allowed_tools_for(mcp_servers),
-            ]);
+        match mcp_config {
+            Some(path) if !mcp_servers.is_empty() => {
+                cmd.arg("--mcp-config").arg(path).args([
+                    "--strict-mcp-config",
+                    "--allowed-tools",
+                    &allowed_tools_for(mcp_servers),
+                ]);
+            }
+            _ => {
+                cmd.arg("--strict-mcp-config");
+            }
         }
 
         for arg in &self.base.config.extra_args {
@@ -581,12 +605,14 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
+        // Removed when it drops, after the child has exited.
+        let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
-            prompt,
             system,
             "json",
             request.max_tokens,
             &request.mcp_servers,
+            mcp_config.as_deref(),
         );
 
         debug!(
@@ -597,7 +623,13 @@ impl LlmProvider for ClaudeCodeRunner {
             "Spawning claude CLI"
         );
 
-        let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
+        let output = run_cli_command_with_input(
+            &mut cmd,
+            Some(prompt.as_bytes()),
+            self.base.config.timeout,
+            MAX_OUTPUT_BYTES,
+        )
+        .await?;
 
         // The CLI reports every failure it understands as a result document
         // with `is_error: true` and exit 1, the reason in its last field.
@@ -626,12 +658,14 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
+        // Held by the stream, so it outlives the child that reads it.
+        let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
-            prompt,
             system,
             "stream-json",
             request.max_tokens,
             &request.mcp_servers,
+            mcp_config.as_deref(),
         );
 
         cmd.stdout(Stdio::piped());
@@ -640,6 +674,7 @@ impl LlmProvider for ClaudeCodeRunner {
         let mut child = cmd.spawn().map_err(|e| {
             RunnerError::internal(format!("Failed to spawn claude for streaming: {e}"))
         })?;
+        feed_stdin(child.stdin.take(), prompt.as_bytes().to_vec());
 
         let stdout = child.stdout.take().ok_or_else(|| {
             RunnerError::internal("Failed to capture claude stdout for streaming")
@@ -659,7 +694,9 @@ impl LlmProvider for ClaudeCodeRunner {
             Self::stream_line_to_chunk(&line)
         });
 
-        Ok(Box::pin(GuardedStream::new(stream, child, stderr_task)))
+        Ok(Box::pin(
+            GuardedStream::new(stream, child, stderr_task).keeping(mcp_config),
+        ))
     }
 }
 
@@ -851,7 +888,7 @@ mod tests {
                 .with_env(OAUTH_TOKEN_KEY, "sk-ant-oat-2")
                 .with_env(API_KEY_KEY, "sk-ant-api"),
         );
-        let cmd = runner.build_command("hi", None, "json", None, &[]);
+        let cmd = runner.build_command(None, "json", None, &[], None);
         // After the sandbox's env_clear a removal is an absence, not an entry.
         let envs: Vec<_> = cmd.as_std().get_envs().collect();
         let set: Vec<_> = envs

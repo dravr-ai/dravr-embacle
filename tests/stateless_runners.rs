@@ -198,7 +198,8 @@ async fn claude_code_complete_never_resumes_and_shares_no_cwd_state() {
 
     assert_eq!(complete_twice(&runner).await, ["pong", "pong"]);
 
-    for argv in assert_never_resumed(dir.path()) {
+    // Claude Code reads its prompt on stdin, never from argv.
+    for argv in assert_no_resume_args(dir.path()) {
         assert_claude_isolated(&argv);
     }
 }
@@ -215,7 +216,8 @@ async fn claude_code_stream_never_resumes_and_shares_no_cwd_state() {
 
     assert_eq!(stream_twice(&runner).await, ["pong", "pong"]);
 
-    for argv in assert_never_resumed(dir.path()) {
+    // Claude Code reads its prompt on stdin, never from argv.
+    for argv in assert_no_resume_args(dir.path()) {
         assert_claude_isolated(&argv);
     }
 }
@@ -236,7 +238,8 @@ async fn claude_code_complete_then_stream_never_resumes() {
         .unwrap();
     while stream.next().await.is_some() {}
 
-    for argv in assert_never_resumed(dir.path()) {
+    // Claude Code reads its prompt on stdin, never from argv.
+    for argv in assert_no_resume_args(dir.path()) {
         assert_claude_isolated(&argv);
     }
 }

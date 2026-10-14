@@ -45,14 +45,19 @@ struct Fixture {
 }
 
 /// Stands in for every harness CLI: records the arguments it was started with,
-/// one per line, copies the plugin directory it was pointed at before the task
-/// removes it, and answers as a successful Claude Code turn.
+/// one per line, and the prompt Claude Code reads on stdin (`--print`), copies
+/// the plugin directory and the MCP configuration file it was pointed at before
+/// the task removes them, and answers as a successful Claude Code turn.
 const FAKE_HARNESS: &str = r#"#!/bin/sh
 rec="__RECORDS__/$$"
+case " $* " in *" --print "*) cat > "$rec.stdin" ;; esac
 prev=""
 for arg in "$@"; do
   printf '%s\n' "$arg" >> "$rec.args"
   if [ "$prev" = "--plugin-dir" ]; then /bin/cp -R "$arg" "$rec.plugin"; fi
+  if [ "$prev" = "--mcp-config" ] || [ "$prev" = "--additional-mcp-config" ]; then
+    /bin/cp "${arg#@}" "$rec.mcp"
+  fi
   prev="$arg"
 done
 printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"fake"}'
@@ -136,8 +141,9 @@ fn unique_prompt() -> String {
     format!("prompt-{}", Uuid::new_v4().simple())
 }
 
-/// The argv of the one invocation that carried `prompt`, and where its copy of
-/// the plugin directory would be.
+/// The argv of the one invocation that carried `prompt` — on its command line,
+/// or on stdin for Claude Code — and where its copy of the plugin directory
+/// would be.
 fn invocation_for(prompt: &str) -> Option<(Vec<String>, PathBuf)> {
     fs::read_dir(&FIXTURE.records)
         .expect("records folder")
@@ -150,10 +156,27 @@ fn invocation_for(prompt: &str) -> Option<(Vec<String>, PathBuf)> {
                 .lines()
                 .map(str::to_owned)
                 .collect();
-            args.iter()
-                .any(|a| a.contains(prompt))
+            let on_stdin = fs::read_to_string(p.with_extension("stdin"))
+                .is_ok_and(|stdin| stdin.contains(prompt));
+            (on_stdin || args.iter().any(|a| a.contains(prompt)))
                 .then(|| (args, p.with_extension("plugin")))
         })
+}
+
+/// The MCP configuration the invocation recorded at `plugin`'s record was
+/// pointed at, as the file it read: never JSON on its command line, where a
+/// server's bearer would be readable by every process on the host.
+fn mcp_config_of(args: &[String], plugin: &Path, flag: &str) -> Value {
+    let pointed_at = values_after(args, flag);
+    assert_eq!(pointed_at.len(), 1, "one configuration file: {args:?}");
+    assert!(
+        !pointed_at[0].trim_start_matches('@').starts_with('{'),
+        "the configuration is a file, not inline JSON: {args:?}"
+    );
+    serde_json::from_str(
+        &fs::read_to_string(plugin.with_extension("mcp")).expect("the harness copied its config"),
+    )
+    .expect("mcp config JSON")
 }
 
 /// The values that follow `flag` up to the next flag.
@@ -267,8 +290,7 @@ async fn a_configured_harness_hands_its_skills_and_mcp_servers_to_claude_code() 
     assert_eq!(response["status"], "completed", "{response}");
 
     let (args, plugin) = invocation_for(&prompt).expect("the harness was started");
-    let mcp: Value =
-        serde_json::from_str(values_after(&args, "--mcp-config")[0]).expect("mcp config JSON");
+    let mcp = mcp_config_of(&args, &plugin, "--mcp-config");
     assert_eq!(mcp["mcpServers"]["docs"]["url"], "http://127.0.0.1:9/mcp");
     assert_eq!(mcp["mcpServers"]["docs"]["type"], "http");
     assert!(
@@ -322,8 +344,7 @@ async fn a_configured_harness_hands_all_three_settings_to_the_copilot_cli() {
         vec!["web_fetch"],
         "the Copilot CLI removes these from the tools the model is offered"
     );
-    let mcp: Value = serde_json::from_str(values_after(&args, "--additional-mcp-config")[0])
-        .expect("mcp config JSON");
+    let mcp = mcp_config_of(&args, &plugin, "--additional-mcp-config");
     assert_eq!(mcp["mcpServers"]["docs"]["url"], "http://127.0.0.1:9/sse");
     assert_eq!(mcp["mcpServers"]["docs"]["type"], "sse");
     assert_greeter_staged(&plugin);
