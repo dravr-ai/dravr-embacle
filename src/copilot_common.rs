@@ -19,6 +19,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio_stream::Stream;
 
+use crate::config::default_allowed_env_keys;
+use crate::copilot::CREDENTIAL_ENV_KEYS;
 use crate::types::{ChatMessage, ChatRequest, LlmProvider, MessageRole, RunnerError, TokenUsage};
 
 /// Policy for handling permission requests from the Copilot runtime.
@@ -26,8 +28,9 @@ use crate::types::{ChatMessage, ChatRequest, LlmProvider, MessageRole, RunnerErr
 /// Controls whether tool-execution permission prompts are auto-approved or denied.
 ///
 /// **Denies by default.** The runtime's own tools — shell, git, file editing —
-/// run with the host's environment and credentials, in the session working
-/// directory (a scratch directory unless the host configures one), so a host
+/// run as the host's user, with the runtime's GitHub credential and the part
+/// of the host's environment [`runtime_env_keys`] lets through, in the session
+/// working directory (a scratch directory unless the host configures one), so a host
 /// that builds its prompt from untrusted input (an end user's chat text, say)
 /// turns an approval into arbitrary execution next to its secrets. That is not a
 /// hypothetical: a Dravr coaching turn was observed making five `shell`/`bash`/
@@ -80,6 +83,60 @@ pub(crate) const ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG: &str =
 /// Default number of conversation history turns rendered into a prompt.
 /// Each "turn" is one user or assistant message.
 pub const DEFAULT_MAX_HISTORY_TURNS: usize = 20;
+
+/// The Copilot CLI's own variables that route a session to another provider.
+///
+/// They send a session to a model provider the host chooses instead of
+/// GitHub, and keep it off GitHub altogether (`COPILOT_OFFLINE`). A host that
+/// sets them means them for its Copilot runtime, so they reach it through the
+/// [`runtime_env_keys`] allowlist.
+pub const PROVIDER_ENV_KEYS: &[&str] = &[
+    "COPILOT_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_TYPE",
+    "COPILOT_PROVIDER_API_KEY",
+    "COPILOT_PROVIDER_MAX_PROMPT_TOKENS",
+    "COPILOT_OFFLINE",
+];
+
+/// The variables a Copilot runtime needs to reach the network as its host does.
+///
+/// The proxy, and the certificate authorities it trusts (the runtime is a Node
+/// program, which reads `NODE_EXTRA_CA_CERTS`).
+pub const NETWORK_ENV_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+];
+
+/// Every host variable a Copilot runtime child may inherit, and no other.
+///
+/// The child runs a model that can be steered by its prompt, and its tools
+/// can read their own environment, so it gets what it needs to run and
+/// nothing else of the host's: the [`default_allowed_env_keys`] every CLI
+/// runner keeps, the GitHub credential variables it reads
+/// ([`CREDENTIAL_ENV_KEYS`]), [`PROVIDER_ENV_KEYS`] and [`NETWORK_ENV_KEYS`].
+/// A database URL or an encryption key in the host's environment never
+/// reaches it. Both Copilot providers start their child from this one list.
+#[must_use]
+pub fn runtime_env_keys() -> Vec<String> {
+    let mut keys = default_allowed_env_keys();
+    for key in CREDENTIAL_ENV_KEYS
+        .iter()
+        .chain(PROVIDER_ENV_KEYS)
+        .chain(NETWORK_ENV_KEYS)
+    {
+        if !keys.iter().any(|kept| kept == key) {
+            keys.push((*key).to_owned());
+        }
+    }
+    keys
+}
 
 /// The GitHub token the Copilot runtime authenticates with, from the
 /// environment, in the runtime's own precedence order:

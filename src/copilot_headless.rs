@@ -26,12 +26,13 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, info, instrument, trace, warn, Span};
 
 use crate::copilot_common::{
-    render_turn, system_prompt, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
-    HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
+    render_turn, runtime_env_keys, system_prompt, HeadlessEventStream, HeadlessStreamEvent,
+    HeadlessToolResponse, HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
     ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG,
 };
 use crate::copilot_headless_config::CopilotHeadlessConfig;
 use crate::copilot_models::catalog_ids;
+use crate::sandbox::{apply_sandbox, SandboxPolicy};
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
     McpServerConfig, McpTransport, RunnerError, StreamChunk, TokenUsage,
@@ -573,6 +574,10 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
 /// caller's servers and the CLI's own builtins, whose instructions the
 /// allowlist already folds. The cwd does not scope servers the CLI reads from
 /// the host user's own Copilot config under `$HOME`; the flag folds those too.
+///
+/// The child starts from a cleared environment ([`acp_sandbox`]), as every
+/// `-p` runner's does: the model it runs can be steered by its prompt, and
+/// its tools read their own environment.
 fn acp_command(
     cli_path: &Path,
     github_token: Option<&str>,
@@ -588,12 +593,27 @@ fn acp_command(
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    cmd.current_dir(session_cwd);
-    if let Some(token) = github_token {
-        cmd.env("COPILOT_GITHUB_TOKEN", token);
-    }
+    apply_sandbox(&mut cmd, &acp_sandbox(session_cwd, github_token));
     cmd
 }
+
+/// The environment and directory the `copilot --acp` child runs in: the host
+/// variables [`runtime_env_keys`] allows and nothing else, in `session_cwd`,
+/// with `github_token` (when the host configured one) as
+/// `COPILOT_GITHUB_TOKEN`, ahead of whatever the host's own variables say.
+fn acp_sandbox(session_cwd: &Path, github_token: Option<&str>) -> SandboxPolicy {
+    let mut policy =
+        SandboxPolicy::new(session_cwd.to_path_buf()).with_env_keys(runtime_env_keys());
+    if let Some(token) = github_token {
+        policy
+            .env_overrides
+            .push((GITHUB_TOKEN_ENV.to_owned(), token.to_owned()));
+    }
+    policy
+}
+
+/// The variable the Copilot runtime reads its GitHub token from first.
+const GITHUB_TOKEN_ENV: &str = "COPILOT_GITHUB_TOKEN";
 
 /// Spawn the copilot --acp subprocess with piped stdio, pinning `model`.
 ///
@@ -3635,6 +3655,64 @@ mod tests {
             .position(|a| a == "--model")
             .expect("--model flag should be present"); // Safe: test assertion
         assert_eq!(args.get(idx + 1).map(String::as_str), Some("gpt-5.4"));
+    }
+
+    /// The `copilot --acp` child gets the allowlisted host variables, its
+    /// token and nothing else of the host's environment: a prompt-steered
+    /// model that reads its environment finds no host secret there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_acp_child_inherits_only_the_allowlisted_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const HOST_SECRET: &str = "EMBACLE_TEST_ACP_HOST_SECRET";
+        env::set_var(HOST_SECRET, "leak");
+        let dir = tempfile::tempdir().unwrap(); // Safe: test setup
+        let script = dir.path().join("copilot");
+        fs::write(&script, "#!/bin/sh\nenv > env.dump\n").unwrap(); // Safe: test setup
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap(); // Safe: test setup
+
+        // A sibling test's fork can hold the just-written script's write
+        // descriptor open, and exec then fails with ETXTBSY (os error 26).
+        let mut attempts = 0;
+        let status = loop {
+            attempts += 1;
+            let mut cmd = acp_command(&script, Some("tok-acp-1"), "", dir.path());
+            match cmd.status().await {
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+                outcome => break outcome.unwrap(), // Safe: test assertion
+            }
+        };
+        env::remove_var(HOST_SECRET);
+
+        assert!(status.success(), "the stand-in exits 0: {status:?}");
+        let dump = fs::read_to_string(dir.path().join("env.dump")).unwrap(); // Safe: the stand-in wrote it in its cwd
+        let names: Vec<&str> = dump
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(
+            dump.lines()
+                .any(|line| line == "COPILOT_GITHUB_TOKEN=tok-acp-1"),
+            "the configured token reaches the child: {names:?}"
+        );
+        assert!(names.contains(&"PATH"), "{names:?}");
+        assert!(
+            !dump.contains(HOST_SECRET),
+            "a host variable outside the allowlist leaked: {names:?}"
+        );
+        let allowed = runtime_env_keys();
+        let unexpected: Vec<&&str> = names
+            .iter()
+            .filter(|name| !allowed.iter().any(|key| key == *name))
+            .filter(|name| !matches!(**name, "PWD" | "SHLVL" | "_" | "OLDPWD"))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "only allowlisted variables reach the child, and the shell's own: {unexpected:?}"
+        );
     }
 
     /// An unpinned model drops `--model` but keeps the instructions opt-in.

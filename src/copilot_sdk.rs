@@ -23,6 +23,8 @@
 //! (`assistant.usage.model`), cache read/write counts per call, and tool
 //! executions with their name, arguments and result.
 
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,8 +56,8 @@ use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
 use crate::copilot_common::{
-    render_turn, system_prompt, HeadlessEventStream, HeadlessStreamEvent, HeadlessToolResponse,
-    HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
+    render_turn, runtime_env_keys, system_prompt, HeadlessEventStream, HeadlessStreamEvent,
+    HeadlessToolResponse, HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
 };
 use crate::copilot_models::catalog_ids;
 use crate::copilot_sdk_config::{CopilotSdkConfig, CopilotSdkProvider};
@@ -116,6 +118,59 @@ impl CopilotSdkRunner {
     }
 }
 
+/// Variables the SDK sets on the runtime child itself for the options
+/// [`client_options`] passes: `COPILOT_HOME` for the base directory and
+/// `COPILOT_DISABLE_KEYTAR` for [`ClientMode::Empty`].
+///
+/// The SDK applies `env_remove` after setting them, so naming one there would
+/// strip the SDK's own value; they are never removed.
+const SDK_SET_ENV_KEYS: &[&str] = &["COPILOT_HOME", "COPILOT_DISABLE_KEYTAR"];
+
+/// The options the runtime child is started with.
+///
+/// The SDK has no way to start the child from an empty environment, only to
+/// remove variables by name, so every name in `host_env` (the host's
+/// environment when the client starts) that [`runtime_env_keys`] does not
+/// allow is removed: the child inherits what a `copilot --acp` child gets and
+/// nothing else of the host's — no database URL, no encryption key.
+fn client_options(
+    config: &CopilotSdkConfig,
+    host_env: impl Iterator<Item = OsString>,
+) -> ClientOptions {
+    let mut options = ClientOptions::new()
+        .with_transport(Transport::Stdio)
+        .with_mode(ClientMode::Empty)
+        .with_base_directory(config.base_directory.clone())
+        .with_log_level(LogLevel::Warning);
+    if let Some(path) = &config.runtime_path {
+        options = options.with_program(CliProgram::Path(path.clone()));
+    }
+    // The token rides the child's environment as COPILOT_GITHUB_TOKEN —
+    // the runtime's own precedence (then GH_TOKEN, GITHUB_TOKEN) — exactly
+    // as the ACP adapter hands it over, so the runtime runs the same token
+    // exchange and a personal access token works. The SDK's `github_token`
+    // option is a different path: it presents the value as an SDK auth
+    // token, and the endpoint behind that answers a PAT with 400
+    // "Personal Access Tokens are not supported for this endpoint".
+    // `--no-auto-login` would switch that resolution off along with the
+    // interactive login, so the logged-in-user default stays on either way.
+    if let Some(token) = &config.github_token {
+        options = options.with_env([("COPILOT_GITHUB_TOKEN", token.as_str())]);
+    }
+
+    let allowed = runtime_env_keys();
+    let set_here: Vec<OsString> = options.env.iter().map(|(name, _)| name.clone()).collect();
+    let inherited: Vec<OsString> = host_env
+        .filter(|name| {
+            let kept = name.to_str().is_some_and(|name| {
+                allowed.iter().any(|key| key == name) || SDK_SET_ENV_KEYS.contains(&name)
+            });
+            !kept && !set_here.contains(name)
+        })
+        .collect();
+    options.with_env_remove(inherited)
+}
+
 impl Inner {
     /// The warm client, started on first use.
     async fn client(&self) -> Result<Arc<Client>, RunnerError> {
@@ -124,26 +179,7 @@ impl Inner {
             return Ok(Arc::clone(client));
         }
 
-        let mut options = ClientOptions::new()
-            .with_transport(Transport::Stdio)
-            .with_mode(ClientMode::Empty)
-            .with_base_directory(self.config.base_directory.clone())
-            .with_log_level(LogLevel::Warning);
-        if let Some(path) = &self.config.runtime_path {
-            options = options.with_program(CliProgram::Path(path.clone()));
-        }
-        // The token rides the child's environment as COPILOT_GITHUB_TOKEN —
-        // the runtime's own precedence (then GH_TOKEN, GITHUB_TOKEN) — exactly
-        // as the ACP adapter hands it over, so the runtime runs the same token
-        // exchange and a personal access token works. The SDK's `github_token`
-        // option is a different path: it presents the value as an SDK auth
-        // token, and the endpoint behind that answers a PAT with 400
-        // "Personal Access Tokens are not supported for this endpoint".
-        // `--no-auto-login` would switch that resolution off along with the
-        // interactive login, so the logged-in-user default stays on either way.
-        if let Some(token) = &self.config.github_token {
-            options = options.with_env([("COPILOT_GITHUB_TOKEN", token.as_str())]);
-        }
+        let options = client_options(&self.config, env::vars_os().map(|(name, _)| name));
 
         let started = Instant::now();
         let client = time::timeout(self.config.session_timeout, Client::start(options))
@@ -833,6 +869,45 @@ mod tests {
         });
         envelope["data"] = data;
         serde_json::from_value(envelope).unwrap_or_else(|e| unreachable!("test event: {e}"))
+    }
+
+    /// Every host variable outside the allowlist is removed from the runtime
+    /// child by name — the SDK cannot start it from an empty environment —
+    /// while the allowlist, the token set here and the variables the SDK sets
+    /// itself are kept.
+    #[test]
+    fn the_runtime_child_is_stripped_of_every_host_variable_outside_the_allowlist() {
+        let config = CopilotSdkConfig {
+            github_token: Some("tok-sdk-1".to_owned()),
+            ..CopilotSdkConfig::default()
+        };
+        let host_env = [
+            "PATH",
+            "HOME",
+            "DATABASE_URL",
+            "PIERRE_MASTER_ENCRYPTION_KEY",
+            "COPILOT_GITHUB_TOKEN",
+            "COPILOT_HOME",
+            "COPILOT_PROVIDER_BASE_URL",
+            "HTTPS_PROXY",
+        ]
+        .map(OsString::from);
+
+        let options = client_options(&config, host_env.into_iter());
+
+        let removed: Vec<&str> = options
+            .env_remove
+            .iter()
+            .filter_map(|name| name.to_str())
+            .collect();
+        assert_eq!(removed, ["DATABASE_URL", "PIERRE_MASTER_ENCRYPTION_KEY"]);
+        assert_eq!(
+            options.env,
+            [(
+                OsString::from("COPILOT_GITHUB_TOKEN"),
+                OsString::from("tok-sdk-1")
+            )]
+        );
     }
 
     #[test]
