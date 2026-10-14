@@ -20,9 +20,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tempfile::TempPath;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
-use tokio_stream::wrappers::LinesStream;
 use tokio_stream::StreamExt;
 use tracing::{debug, instrument, warn};
 
@@ -32,7 +31,7 @@ use crate::process::{
 };
 use crate::prompt::{extract_system_message, prepare_user_prompt};
 use crate::sandbox::{apply_sandbox, build_policy};
-use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
 /// Serialize embacle MCP server configs into Claude Code's `--mcp-config` JSON.
 ///
@@ -686,7 +685,7 @@ impl LlmProvider for ClaudeCodeRunner {
         ));
 
         let reader = BufReader::new(stdout);
-        let lines = LinesStream::new(reader.lines());
+        let lines = CappedLines::new(reader, MAX_OUTPUT_BYTES);
 
         let stream = lines.map(move |line_result: Result<String, io::Error>| {
             let line = line_result
@@ -695,7 +694,8 @@ impl LlmProvider for ClaudeCodeRunner {
         });
 
         Ok(Box::pin(
-            GuardedStream::new(stream, child, stderr_task).keeping(mcp_config),
+            GuardedStream::new(stream, child, stderr_task, self.base.config.timeout)
+                .keeping(mcp_config),
         ))
     }
 }

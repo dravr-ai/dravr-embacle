@@ -58,7 +58,7 @@ pub fn sse_response(stream: ChatStream, model: &str) -> Response {
                         (None, Some(chunk.delta), None)
                     };
 
-                    // LinesStream strips trailing \n from each line. Restore it
+                    // The runners read their CLI line by line, stripping each \n. Restore it
                     // so concatenated SSE deltas preserve original line breaks.
                     let content = content.map(|c| {
                         if !c.is_empty() && !c.ends_with('\n') {
@@ -464,7 +464,7 @@ fn emit_to_event(
     let role = state.take_role();
     let delta = match emit {
         Emit::Content(text) => {
-            // LinesStream strips trailing newlines; restore one so concatenated
+            // The runners strip each line's newline; restore one so concatenated
             // deltas preserve line breaks, matching `sse_response`.
             let content = if !text.is_empty() && !text.ends_with('\n') {
                 format!("{text}\n")

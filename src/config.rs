@@ -137,7 +137,9 @@ pub struct RunnerConfig {
     pub binary_path: PathBuf,
     /// Model override (provider-specific format)
     pub model: Option<String>,
-    /// Maximum time to wait for a CLI command to complete
+    /// Maximum time to wait for a CLI command to complete: a `complete()`
+    /// call, or the whole of a `complete_stream()` stream, after which the
+    /// child is killed and the call or stream ends with a timeout error
     pub timeout: Duration,
     /// Additional CLI arguments appended to every invocation
     pub extra_args: Vec<String>,

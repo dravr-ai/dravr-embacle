@@ -23,9 +23,8 @@ use crate::types::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tempfile::TempPath;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
-use tokio_stream::wrappers::LinesStream;
 use tokio_stream::StreamExt;
 use tracing::instrument;
 
@@ -33,7 +32,7 @@ use crate::config::RunnerConfig;
 use crate::process::{private_config_file, read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
-use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
 /// Sentinel model id used when the caller has not pinned a specific model.
 ///
@@ -334,7 +333,7 @@ impl LlmProvider for CopilotRunner {
         ));
 
         let reader = BufReader::new(stdout);
-        let lines = LinesStream::new(reader.lines());
+        let lines = CappedLines::new(reader, MAX_OUTPUT_BYTES);
 
         let stream = lines.map(move |line_result: Result<String, io::Error>| {
             let line = line_result
@@ -348,7 +347,8 @@ impl LlmProvider for CopilotRunner {
         });
 
         Ok(Box::pin(
-            GuardedStream::new(stream, child, stderr_task).keeping(mcp_config),
+            GuardedStream::new(stream, child, stderr_task, self.base.config.timeout)
+                .keeping(mcp_config),
         ))
     }
 }

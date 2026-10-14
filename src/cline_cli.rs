@@ -13,9 +13,8 @@ use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, StreamChunk,
 };
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
-use tokio_stream::wrappers::LinesStream;
 use tokio_stream::StreamExt;
 use tracing::instrument;
 
@@ -23,7 +22,7 @@ use crate::config::RunnerConfig;
 use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
-use crate::stream::{GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
 /// Default model for Cline CLI (provider-agnostic)
 const DEFAULT_MODEL: &str = "auto";
@@ -150,7 +149,7 @@ impl LlmProvider for ClineCliRunner {
         ));
 
         let reader = BufReader::new(stdout);
-        let lines = LinesStream::new(reader.lines());
+        let lines = CappedLines::new(reader, MAX_OUTPUT_BYTES);
 
         let stream = lines.map(move |line_result: Result<String, io::Error>| {
             let line = line_result
@@ -207,7 +206,12 @@ impl LlmProvider for ClineCliRunner {
             }
         });
 
-        Ok(Box::pin(GuardedStream::new(stream, child, stderr_task)))
+        Ok(Box::pin(GuardedStream::new(
+            stream,
+            child,
+            stderr_task,
+            self.base.config.timeout,
+        )))
     }
 }
 
