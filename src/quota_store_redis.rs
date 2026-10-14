@@ -33,7 +33,9 @@
 //! Every write also lands in a local [`InMemoryQuotaStore`], and a failed read
 //! answers from it. An outage therefore degrades to exactly the per-process
 //! behaviour that ships by default — never to "no state at all", which would
-//! forget a penalty this instance learned the hard way.
+//! forget a penalty this instance learned the hard way. For the same reason a
+//! successful read keeps the later of the shared and the local penalty: a
+//! penalty whose write failed is still this instance's to honour.
 
 use std::future::Future;
 use std::io;
@@ -112,6 +114,37 @@ fn to_ms(t: SystemTime) -> u64 {
 
 fn from_ms(ms: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(ms)
+}
+
+/// Keep every penalty this process learned that the shared view lacks.
+///
+/// A penalty write that failed — Redis timed out, or was briefly away — never
+/// reached the shared keys, so the next successful read would otherwise
+/// forget a refusal this instance paid a turn to learn, and route straight
+/// back into it. Each backend therefore keeps the later of the shared and
+/// the local penalty. A local penalty that a shared reading taken at or after
+/// its instant has passed is stale, by the same rule `record_reading` applies,
+/// and is dropped.
+///
+/// Instants are compared in milliseconds, the resolution the shared view is
+/// stored at, so the local copy of a penalty that also reached Redis is the
+/// same penalty rather than one a few nanoseconds later.
+fn adopt_local_penalties(shared: &mut [BackendState], local: &[BackendState]) {
+    for (theirs, mine) in shared.iter_mut().zip(local) {
+        let Some(until) = mine.penalty_until else {
+            continue;
+        };
+        let until_ms = to_ms(until);
+        let passed = theirs
+            .last_checked
+            .is_some_and(|read| to_ms(read) >= until_ms);
+        let later = theirs
+            .penalty_until
+            .is_none_or(|shared_until| until_ms > to_ms(shared_until));
+        if !passed && later {
+            theirs.penalty_until = Some(from_ms(until_ms));
+        }
+    }
 }
 
 /// Run one Redis operation, giving up after [`OPERATION_TIMEOUT`].
@@ -332,7 +365,10 @@ impl QuotaStore for RedisQuotaStore {
 
     async fn load(&self, len: usize) -> Vec<BackendState> {
         match bounded(self.load_shared(len)).await {
-            Ok(state) => state,
+            Ok(mut shared) => {
+                adopt_local_penalties(&mut shared, &self.local.load(len).await);
+                shared
+            }
             Err(e) => {
                 warn!(
                     error = %e,
@@ -392,6 +428,68 @@ mod tests {
         let back: WireReading = serde_json::from_str(&raw).unwrap(); // Safe: test assertion
         let restored: Vec<QuotaSnapshot> = back.snapshots.into_iter().map(Into::into).collect();
         assert_eq!(restored, vec![snap]);
+    }
+
+    #[test]
+    fn a_penalty_this_process_holds_outlives_a_read_that_lacks_it() {
+        let until = from_ms(1_800_000_000_000);
+        let mut shared = vec![BackendState::default(), BackendState::default()];
+        let local = vec![
+            BackendState {
+                penalty_until: Some(until),
+                ..BackendState::default()
+            },
+            BackendState::default(),
+        ];
+        adopt_local_penalties(&mut shared, &local);
+        assert_eq!(shared[0].penalty_until, Some(until));
+        assert_eq!(shared[1].penalty_until, None);
+    }
+
+    #[test]
+    fn the_later_of_the_shared_and_local_penalty_wins() {
+        let earlier = from_ms(1_800_000_000_000);
+        let later = from_ms(1_800_000_600_000);
+        let penalised = |until| BackendState {
+            penalty_until: Some(until),
+            ..BackendState::default()
+        };
+
+        let mut shared = vec![penalised(earlier)];
+        adopt_local_penalties(&mut shared, &[penalised(later)]);
+        assert_eq!(shared[0].penalty_until, Some(later), "local is later");
+
+        let mut shared = vec![penalised(later)];
+        adopt_local_penalties(&mut shared, &[penalised(earlier)]);
+        assert_eq!(shared[0].penalty_until, Some(later), "shared is later");
+    }
+
+    #[test]
+    fn a_shared_reading_past_the_local_penalty_clears_it() {
+        let until = from_ms(1_800_000_000_000);
+        let mut shared = vec![BackendState {
+            last_checked: Some(until),
+            ..BackendState::default()
+        }];
+        let local = [BackendState {
+            penalty_until: Some(until),
+            ..BackendState::default()
+        }];
+        adopt_local_penalties(&mut shared, &local);
+        assert_eq!(shared[0].penalty_until, None);
+
+        // Redis kept the reading to the millisecond; the local penalty has
+        // nanoseconds the wire dropped. It is still the same instant.
+        let mut shared = vec![BackendState {
+            last_checked: Some(until),
+            ..BackendState::default()
+        }];
+        let local = [BackendState {
+            penalty_until: Some(until + Duration::from_micros(500)),
+            ..BackendState::default()
+        }];
+        adopt_local_penalties(&mut shared, &local);
+        assert_eq!(shared[0].penalty_until, None, "sub-millisecond residue");
     }
 
     #[test]

@@ -46,6 +46,7 @@ use uuid::Uuid;
 /// A private Redis for one test, stopped when the test ends.
 struct TestRedis {
     url: String,
+    port: u16,
     server: Option<Child>,
 }
 
@@ -64,6 +65,18 @@ impl TestRedis {
             .and_then(|l| l.local_addr())
             .expect("a free local port")
             .port();
+        let mut redis = Self {
+            url: format!("redis://127.0.0.1:{port}"),
+            port,
+            server: None,
+        };
+        redis.spawn().await;
+        redis
+    }
+
+    /// Start a server on this Redis's port, empty, and wait until it listens.
+    async fn spawn(&mut self) {
+        let port = self.port;
         let server = Command::new("redis-server")
             .args([
                 "--port",
@@ -79,13 +92,10 @@ impl TestRedis {
             .stderr(Stdio::null())
             .spawn()
             .expect("quota-redis tests start a redis-server: install it and put it on PATH");
-        let redis = Self {
-            url: format!("redis://127.0.0.1:{port}"),
-            server: Some(server),
-        };
+        self.server = Some(server);
         for _ in 0..100 {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return redis;
+                return;
             }
             sleep(Duration::from_millis(50)).await;
         }
@@ -456,5 +466,45 @@ async fn an_outage_degrades_to_this_instances_own_view() {
     assert!(
         same_ms(state[1].penalty_until, Some(later)),
         "and so does what it learns during it"
+    );
+}
+
+#[tokio::test]
+async fn a_penalty_whose_write_failed_survives_the_next_successful_read() {
+    let mut redis = TestRedis::start().await;
+    let account = account();
+    let store = redis.store(&account).await;
+    let until = SystemTime::now() + Duration::from_hours(1);
+
+    // The refusal is learned while Redis is away, so the shared write fails.
+    redis.kill();
+    timeout(Duration::from_secs(3), store.set_penalty(0, Some(until)))
+        .await
+        .expect("an unreachable Redis must not hang the turn");
+
+    // Redis comes back, empty: nobody else ever saw the penalty.
+    redis.spawn().await;
+    let other = redis.store(&account).await;
+    other
+        .record_reading(0, vec![snap(10.0, until)], SystemTime::now())
+        .await;
+
+    // Wait until this instance reads Redis again — proven by seeing the
+    // reading only the other instance wrote — then check the penalty held.
+    let mut state = store.load(1).await;
+    for _ in 0..50 {
+        if state[0].last_checked.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+        state = store.load(1).await;
+    }
+    assert!(
+        state[0].last_checked.is_some(),
+        "the store must reconnect and read the shared reading"
+    );
+    assert!(
+        same_ms(state[0].penalty_until, Some(until)),
+        "a read that lacks this instance's own penalty must not drop it"
     );
 }
