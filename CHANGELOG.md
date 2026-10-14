@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.36.1] — 2026-10-14
+
+### Fixed
+
+- fix(router): a penalty whose Redis write failed survives the next read
+
+### Other
+
+- docs(agents): move the agent knowledge into the private dravr-savoir
+- chore(deps): bump dravr-tronc 4.2.0 -> 4.3.0
+
+
 ## [0.36.0] — 2026-10-12
 
 ### Added
