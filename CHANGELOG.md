@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.37.0] — 2026-10-15
+
+### Fixed
+
+- fix(copilot): the runtime keeps its package cache and home variables
+- fix(stream): a CLI stream honours RunnerConfig::timeout and caps lines
+- fix(cli): the MCP bearer and the claude prompt stay off argv and logs
+- fix(copilot): the ACP and SDK runtimes inherit only an allowlisted env
+
+### Other
+
+- chore(deps): bump dravr-tronc 4.3.0 -> 4.4.1
+
+
 ## [0.36.1] — 2026-10-14
 
 ### Fixed
