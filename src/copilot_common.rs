@@ -114,14 +114,34 @@ pub const NETWORK_ENV_KEYS: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
 ];
 
+/// The Copilot CLI's own variables that say where its package lives and how it
+/// loads, and where it keeps its state.
+///
+/// A host image extracts the CLI's package once into a shared directory
+/// (`COPILOT_PKG_CACHE_HOME`) and pins the version (`COPILOT_AUTO_UPDATE`);
+/// without them every cold `copilot --acp` spawn re-extracts ~150 MB under
+/// `HOME` and the loader may select another version. `COPILOT_HOME`, the XDG
+/// base directories and `TMPDIR` place the runtime's config, state and scratch
+/// files where the host put them. None of them carries a secret.
+pub const CLI_RUNTIME_ENV_KEYS: &[&str] = &[
+    "COPILOT_PKG_CACHE_HOME",
+    "COPILOT_AUTO_UPDATE",
+    "COPILOT_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "TMPDIR",
+];
+
 /// Every host variable a Copilot runtime child may inherit, and no other.
 ///
 /// The child runs a model that can be steered by its prompt, and its tools
 /// can read their own environment, so it gets what it needs to run and
 /// nothing else of the host's: the [`default_allowed_env_keys`] every CLI
 /// runner keeps, the GitHub credential variables it reads
-/// ([`CREDENTIAL_ENV_KEYS`]), [`PROVIDER_ENV_KEYS`] and [`NETWORK_ENV_KEYS`].
-/// A database URL or an encryption key in the host's environment never
+/// ([`CREDENTIAL_ENV_KEYS`]), [`PROVIDER_ENV_KEYS`], [`NETWORK_ENV_KEYS`] and
+/// [`CLI_RUNTIME_ENV_KEYS`]. A database URL or an encryption key in the host's environment never
 /// reaches it. Both Copilot providers start their child from this one list.
 #[must_use]
 pub fn runtime_env_keys() -> Vec<String> {
@@ -130,6 +150,7 @@ pub fn runtime_env_keys() -> Vec<String> {
         .iter()
         .chain(PROVIDER_ENV_KEYS)
         .chain(NETWORK_ENV_KEYS)
+        .chain(CLI_RUNTIME_ENV_KEYS)
     {
         if !keys.iter().any(|kept| kept == key) {
             keys.push((*key).to_owned());
@@ -362,6 +383,35 @@ mod tests {
             PermissionPolicy::parse("APPROVE"),
             PermissionPolicy::AutoApprove
         );
+    }
+
+    #[test]
+    fn runtime_env_keys_keep_the_cli_package_cache_and_drop_host_secrets() {
+        let keys = runtime_env_keys();
+        for key in [
+            "HOME",
+            "PATH",
+            "COPILOT_GITHUB_TOKEN",
+            "COPILOT_PKG_CACHE_HOME",
+            "COPILOT_AUTO_UPDATE",
+            "COPILOT_HOME",
+            "TMPDIR",
+        ] {
+            assert!(
+                keys.iter().any(|k| k == key),
+                "{key} must reach the runtime"
+            );
+        }
+        for key in ["DATABASE_URL", "PIERRE_MASTER_ENCRYPTION_KEY"] {
+            assert!(
+                !keys.iter().any(|k| k == key),
+                "{key} must not reach the runtime"
+            );
+        }
+        let mut deduped = keys.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), keys.len(), "no key is listed twice");
     }
 
     #[test]

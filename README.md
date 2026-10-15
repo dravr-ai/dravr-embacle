@@ -677,7 +677,7 @@ Configuration via environment variables:
 | `EMBACLE_SDK_PROMPT_TIMEOUT_SECS` | `300` | Bound on one turn, prompt sent to session idle; the session is aborted on expiry |
 | `EMBACLE_SDK_SESSION_TIMEOUT_SECS` | `60` | Bound on starting the runtime and opening a session |
 
-The `COPILOT_PROVIDER_*` names are the Copilot CLI's own, so one environment routes both Copilot runners: `copilot --acp` reads them itself (add `COPILOT_OFFLINE=true` to cut every other GitHub call), and both runners pass them to their child — which otherwise inherits only `HOME`, `PATH`, `TERM`, `USER`, `LANG`, the GitHub token variables and the proxy and CA variables (`copilot_common::runtime_env_keys`), never the rest of the host's environment. This is how CI runs the live Copilot tests — the real binaries, a model on the runner, no account:
+The `COPILOT_PROVIDER_*` names are the Copilot CLI's own, so one environment routes both Copilot runners: `copilot --acp` reads them itself (add `COPILOT_OFFLINE=true` to cut every other GitHub call), and both runners pass them to their child — which otherwise inherits only `HOME`, `PATH`, `TERM`, `USER`, `LANG`, the GitHub token variables, the proxy and CA variables, and the CLI's own package-cache, home, XDG and `TMPDIR` variables (`copilot_common::runtime_env_keys`), never the rest of the host's environment. This is how CI runs the live Copilot tests — the real binaries, a model on the runner, no account:
 
 ```bash
 ollama serve &   # OLLAMA_CONTEXT_LENGTH=32768: the default 4096 silently truncates Copilot's prompt
