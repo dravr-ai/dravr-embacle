@@ -43,7 +43,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
-    tracing_init::init(&cli.server.transport);
+    let _telemetry_guard = tracing_init::init(&cli.server.transport);
 
     let provider = parse_runner_type(&cli.provider).ok_or_else(|| {
         RunnerError::config(format!(
