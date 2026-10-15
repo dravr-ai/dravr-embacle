@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0] — 2026-10-15
+
+### Other
+
+- chore(deps): bump dravr-tronc to 5.0.0
+
+
 ## [0.37.0] — 2026-10-15
 
 ### Fixed
