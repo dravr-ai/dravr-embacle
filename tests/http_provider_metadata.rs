@@ -36,7 +36,7 @@ fn gemini_provider_metadata() {
     assert_eq!(provider.name(), "gemini");
     assert_eq!(provider.display_name(), "Google Gemini");
     assert_eq!(provider.default_model(), "gemini-flash-lite-latest");
-    assert!(!provider.available_models().is_empty());
+    assert_ne!(provider.available_models(), Vec::<String>::new());
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn groq_provider_metadata() {
     assert_eq!(provider.name(), "groq");
     assert_eq!(provider.display_name(), "Groq (Llama/Mixtral)");
     assert_eq!(provider.default_model(), "llama-3.3-70b-versatile");
-    assert!(!provider.available_models().is_empty());
+    assert_ne!(provider.available_models(), Vec::<String>::new());
 }
 
 #[test]

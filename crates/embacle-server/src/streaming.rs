@@ -727,7 +727,7 @@ mod tests {
 
         // Second result is the final signal with empty delta (fence stripped)
         let second = results[1].as_ref().unwrap(); // Safe: test assertion
-        assert!(second.delta.is_empty());
+        assert_eq!(second.delta, "");
         assert!(second.is_final);
         assert_eq!(second.finish_reason.as_deref(), Some("stop"));
     }

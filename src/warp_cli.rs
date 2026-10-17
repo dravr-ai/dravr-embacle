@@ -236,7 +236,7 @@ mod tests {
         let config = RunnerConfig::new(PathBuf::from("oz"));
         let runner = WarpCliRunner::new(config);
         let models = runner.available_models();
-        assert!(!models.is_empty());
+        assert_ne!(models, Vec::<String>::new());
         assert!(models.contains(&"auto".to_owned()));
     }
 }

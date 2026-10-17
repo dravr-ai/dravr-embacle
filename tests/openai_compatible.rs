@@ -267,7 +267,7 @@ async fn live_complete() {
 
     let response = provider.complete(&request).await;
     assert!(response.is_ok(), "Completion should succeed: {response:?}");
-    assert!(!response.unwrap().content.is_empty());
+    assert_ne!(response.unwrap().content, "");
 }
 
 #[tokio::test]

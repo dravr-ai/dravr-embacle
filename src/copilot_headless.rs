@@ -3748,7 +3748,7 @@ mod tests {
 
     #[test]
     fn mcp_servers_to_acp_json_empty_is_empty_array() {
-        assert!(mcp_servers_to_acp_json(&[]).is_empty());
+        assert_eq!(mcp_servers_to_acp_json(&[]), Vec::<Value>::new());
     }
 
     #[test]
@@ -4121,7 +4121,7 @@ mod tests {
             acc.content,
             "The watch logged an Error: sensor dropout at km 12."
         );
-        assert!(acc.notices.is_empty());
+        assert_eq!(acc.notices, Vec::<CliNotice>::new());
     }
 
     #[test]

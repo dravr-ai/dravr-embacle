@@ -163,7 +163,7 @@ async fn stream_ending_without_any_final_marker_gets_one_synthesised() {
     assert_eq!(results.len(), 2, "got: {results:?}");
     assert_eq!(results[0].delta, "only");
     assert!(results[1].is_final);
-    assert!(results[1].delta.is_empty());
+    assert_eq!(results[1].delta, "");
     assert_eq!(results[1].finish_reason.as_deref(), Some("stop"));
 }
 
@@ -342,7 +342,7 @@ fn flush_partial_line() {
 #[test]
 fn flush_empty_buffer() {
     let mut parser = SseParser::new();
-    assert!(parser.flush().is_empty());
+    assert_eq!(parser.flush(), Vec::<SseEvent>::new());
 }
 
 #[test]
@@ -368,7 +368,7 @@ fn multiple_partial_chunks() {
 
     // Three separate chunks that together form two events
     let e1 = parser.feed(b"data: {\"a\":");
-    assert!(e1.is_empty());
+    assert_eq!(e1, Vec::<SseEvent>::new());
 
     let e2 = parser.feed(b"1}\n\ndata: {\"b\":");
     assert_eq!(e2.len(), 1);
