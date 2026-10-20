@@ -15,9 +15,7 @@ use embacle::types::ErrorKind;
 // The unix tests exec a script they just wrote; see `support` for the
 // ETXTBSY race that makes them retry the spawn.
 #[cfg(unix)]
-mod support;
-#[cfg(unix)]
-use support::retry_text_file_busy;
+use crate::support::retry_text_file_busy;
 
 #[tokio::test]
 async fn accounts_are_named_in_order_and_the_first_keeps_the_runner_name() {

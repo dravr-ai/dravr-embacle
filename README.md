@@ -683,7 +683,7 @@ The `COPILOT_PROVIDER_*` names are the Copilot CLI's own, so one environment rou
 ollama serve &   # OLLAMA_CONTEXT_LENGTH=32768: the default 4096 silently truncates Copilot's prompt
 export COPILOT_OFFLINE=true COPILOT_PROVIDER_BASE_URL=http://localhost:11434/v1
 export COPILOT_HEADLESS_MODEL=qwen2.5:3b COPILOT_SDK_MODEL=qwen2.5:3b
-EMBACLE_E2E_COPILOT_HEADLESS=1 cargo test --features copilot-headless --test e2e -- headless:: --test-threads=1
+EMBACLE_E2E_COPILOT_HEADLESS=1 cargo test --features copilot-headless --test it -- e2e::headless:: --test-threads=1
 ```
 
 ## Vision / Image Support

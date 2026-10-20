@@ -14,9 +14,13 @@
 //! every other error, including every other spawn failure, is returned as is.
 
 use std::future::Future;
+use std::io;
+use std::path::Path;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use embacle::types::{ErrorKind, RunnerError};
+use tokio::process::Command;
 use tokio::time::sleep;
 
 /// How many times a call is made before its `ETXTBSY` is returned.
@@ -24,6 +28,9 @@ const ATTEMPTS: u32 = 10;
 
 /// Pause between attempts: long enough for a sibling's fork to reach exec.
 const PAUSE: Duration = Duration::from_millis(50);
+
+/// The errno an exec of a file still open for writing fails with on Linux.
+const ETXTBSY: i32 = 26;
 
 /// True for exactly the runner error a spawn that hit `ETXTBSY` produces:
 /// runners report a spawn failure as an internal `Failed to spawn …: {io error}`,
@@ -45,6 +52,28 @@ where
     loop {
         match call().await {
             Err(error) if attempt < ATTEMPTS && is_text_file_busy(&error) => {
+                attempt += 1;
+                sleep(PAUSE).await;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Run the stand-in at `path` once with no arguments, retrying its spawn while
+/// it fails with `ETXTBSY` as [`retry_text_file_busy`] does.
+///
+/// The first exec of a freshly written file can be held while the OS assesses
+/// it (macOS does), and with sibling tests writing and running stand-ins of
+/// their own that wait can run to seconds; later execs of the same file start
+/// at once. A test whose deadline covers the stand-in's start runs it here
+/// first, so the deadline measures the runner rather than that assessment.
+/// The stand-in must exit promptly when called without arguments.
+pub async fn warm_up(path: &Path) -> io::Result<ExitStatus> {
+    let mut attempt = 1;
+    loop {
+        match Command::new(path).status().await {
+            Err(error) if attempt < ATTEMPTS && error.raw_os_error() == Some(ETXTBSY) => {
                 attempt += 1;
                 sleep(PAUSE).await;
             }

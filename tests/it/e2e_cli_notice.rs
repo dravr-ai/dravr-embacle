@@ -12,13 +12,14 @@
 //! system messages and tool definitions exceed the model's usable context
 //! budget … Error: No response was returned."
 //!
-//! That text once reached athletes as the coach's reply. Its own binary because
-//! the budget is process environment the CLI inherits; the lane sets it:
+//! That text once reached athletes as the coach's reply. Its own cargo run
+//! because the budget is process environment the CLI inherits; the lane sets it
+//! for this module alone:
 //!
 //! ```bash
 //! EMBACLE_E2E_COPILOT_CLI_NOTICE=1 COPILOT_OFFLINE=true \
 //!   COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9/v1 COPILOT_PROVIDER_MAX_PROMPT_TOKENS=3000 \
-//!   COPILOT_HEADLESS_MODEL=any-model cargo test --features copilot-headless --test e2e_cli_notice
+//!   COPILOT_HEADLESS_MODEL=any-model cargo test --features copilot-headless --test it -- e2e_cli_notice::
 //! ```
 
 #![cfg(feature = "copilot-headless")]

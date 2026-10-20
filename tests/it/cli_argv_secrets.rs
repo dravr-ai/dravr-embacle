@@ -25,8 +25,7 @@ use tokio_stream::StreamExt;
 
 // Each test execs a script it just wrote; see `support` for the ETXTBSY race
 // that makes every call here retry its spawn.
-mod support;
-use support::retry_text_file_busy;
+use crate::support::retry_text_file_busy;
 
 const BEARER: &str = "Bearer tok-secret-123";
 const PROMPT: &str = "my resting HR is 41";

@@ -22,8 +22,7 @@ use embacle::{ClaudeCodeRunner, MetricsProvider};
 
 // Each test execs a script it just wrote; see `support` for the ETXTBSY race
 // that makes every call here retry its spawn.
-mod support;
-use support::retry_text_file_busy;
+use crate::support::retry_text_file_busy;
 
 /// A `claude` stand-in: prints the given stdout and exits with the given code.
 fn fake_claude(dir: &Path, stdout: &str, exit_code: i32) -> PathBuf {

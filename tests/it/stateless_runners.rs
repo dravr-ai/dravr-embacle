@@ -35,8 +35,7 @@ use tokio_stream::StreamExt;
 
 // Each test execs a script it just wrote; see `support` for the ETXTBSY race
 // that makes every call here retry its spawn.
-mod support;
-use support::retry_text_file_busy;
+use crate::support::retry_text_file_busy;
 
 /// The id every stand-in reports as the session it opened.
 const SESSION_ID: &str = "sess-alice-7f3a";

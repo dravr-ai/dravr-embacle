@@ -26,12 +26,13 @@ use tokio_stream::StreamExt;
 
 // Each test execs a script it just wrote; see `support` for the ETXTBSY race
 // that makes every call here retry its spawn.
-mod support;
-use support::retry_text_file_busy;
+use crate::support::{retry_text_file_busy, warm_up};
 
 /// Prints one stream-json event, then sleeps in place of answering, as a
-/// CLI hung on its upstream does.
+/// CLI hung on its upstream does. Called without arguments it exits at once,
+/// which is how [`warm_up`] runs it.
 const STALLING_CLAUDE: &str = r#"#!/bin/sh
+[ $# -eq 0 ] && exit 0
 echo $$ > "$(dirname "$0")/pid"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}'
 exec sleep 30
@@ -57,6 +58,12 @@ async fn a_stalled_stream_times_out_and_its_child_is_killed() {
     config.timeout = Duration::from_millis(300);
     let runner = ClaudeCodeRunner::new(config);
     let request = ChatRequest::new(vec![ChatMessage::user("ping")]);
+    // The 300 ms deadline covers the stand-in's start, so its first exec,
+    // which the OS may hold for an assessment, happens before the clock runs.
+    assert!(warm_up(dir.path().join("claude").as_path())
+        .await
+        .unwrap()
+        .success());
 
     let started = Instant::now();
     let mut stream = retry_text_file_busy(|| runner.complete_stream(&request))

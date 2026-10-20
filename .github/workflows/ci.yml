@@ -70,7 +70,7 @@ jobs:
       # the --all-features clippy lane and never execute. The price-key check
       # asks every runner for its name, so it needs every runner feature. No
       # secrets — the live cases in these files are env-gated and skip.
-      # `agui` and `quota-http` are here for tests/agui.rs and tests/e2e_router.rs,
+      # `agui` and `quota-http` are here for the agui and e2e_router suites,
       # which gate on them and never ran before 2026-09-23 (19 tests in all);
       # both features pull no extra dependency.
       - name: HTTP API provider tests
@@ -81,7 +81,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq redis-server
-          cargo test --features quota-redis --test quota_store_redis
+          cargo test --features quota-redis --test it -- quota_store_redis::
           cargo test --features quota-redis --lib -- quota_store router
 
   # The live Copilot tests drive the REAL binaries — `copilot --acp` and the
@@ -211,7 +211,7 @@ jobs:
           "$PREFIX/bin/copilot" --version
 
       - name: Build the live tests
-        run: cargo test --workspace --features copilot-headless,copilot-sdk --test e2e --test e2e_cli_notice --test copilot_sdk_live_test --no-run
+        run: cargo test --workspace --features copilot-headless,copilot-sdk --test it --no-run
 
       # One thread: the runner serves one model, and turns queued behind each
       # other would spend their timeouts waiting rather than running.
@@ -220,7 +220,7 @@ jobs:
       # a finding. A gated test that was not enabled prints SKIP and PASSES, so
       # a lane whose switch is misspelt would be green having run nothing.
       #
-      # The second binary drives the CLI into refusing a turn itself — a prompt
+      # The second run drives the CLI into refusing a turn itself — a prompt
       # budget far below its own static context, so no model is called — and
       # proves that refusal comes back as an error rather than as reply text.
       - name: Copilot Headless (ACP) E2E
@@ -230,15 +230,15 @@ jobs:
           log="$RUNNER_TEMP/e2e-headless.log"
           status=0
           {
-            cargo test --features copilot-headless,copilot-sdk --test e2e -- headless:: --test-threads=1 --nocapture &&
+            cargo test --features copilot-headless,copilot-sdk --test it -- e2e::headless:: --test-threads=1 --nocapture &&
             EMBACLE_E2E_COPILOT_CLI_NOTICE=1 COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9/v1 \
               COPILOT_PROVIDER_MAX_PROMPT_TOKENS=3000 \
-              cargo test --features copilot-headless,copilot-sdk --test e2e_cli_notice -- --nocapture
+              cargo test --features copilot-headless,copilot-sdk --test it -- e2e_cli_notice:: --nocapture
           } > "$log" 2>&1 || status=$?
           cat "$log"
           [ "$status" -eq 0 ] || { echo "ERROR: the ACP tests failed (exit $status)" >&2; exit 1; }
           if grep -q 'SKIP' "$log"; then echo "ERROR: a gated ACP test skipped" >&2; exit 1; fi
-          [ "$(grep -Ec '^test result: ok\. [1-9][0-9]* passed' "$log")" -ge 2 ] || { echo "ERROR: an ACP test binary ran nothing" >&2; exit 1; }
+          [ "$(grep -Ec '^test result: ok\. [1-9][0-9]* passed' "$log")" -ge 2 ] || { echo "ERROR: an ACP test run ran nothing" >&2; exit 1; }
 
       # The SDK runner needs the runtime pair (copilot-runtime + runtime.node),
       # which the `copilot --version` above extracted into the SEA's package
@@ -255,13 +255,13 @@ jobs:
           log="$RUNNER_TEMP/e2e-sdk.log"
           status=0
           {
-            cargo test --features copilot-headless,copilot-sdk --test e2e -- sdk:: --test-threads=1 --nocapture &&
-            cargo test --workspace --features copilot-headless,copilot-sdk --test copilot_sdk_live_test -- --test-threads=1 --nocapture
+            cargo test --features copilot-headless,copilot-sdk --test it -- e2e::sdk:: --test-threads=1 --nocapture &&
+            cargo test --workspace --features copilot-headless,copilot-sdk --test it -- copilot_sdk_live_test:: --test-threads=1 --nocapture
           } > "$log" 2>&1 || status=$?
           cat "$log"
           [ "$status" -eq 0 ] || { echo "ERROR: the SDK tests failed (exit $status)" >&2; exit 1; }
           if grep -q 'SKIP' "$log"; then echo "ERROR: a gated SDK test skipped" >&2; exit 1; fi
-          [ "$(grep -Ec '^test result: ok\. [1-9][0-9]* passed' "$log")" -ge 2 ] || { echo "ERROR: an SDK test binary ran nothing" >&2; exit 1; }
+          [ "$(grep -Ec '^test result: ok\. [1-9][0-9]* passed' "$log")" -ge 2 ] || { echo "ERROR: an SDK test run ran nothing" >&2; exit 1; }
 
       - name: Ollama log on failure
         if: failure()

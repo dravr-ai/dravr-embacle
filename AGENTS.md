@@ -34,5 +34,9 @@ still cannot, tell the user and work under this floor alone.
   do it: it rewrites the team's commits under Claude's name, drops their signatures and
   changes SHAs that may already be pushed. Tell the user the hook fired.
 - Never commit a secret, token or credential.
+- Integration tests are modules of `<crate>/tests/it/main.rs` (one sorted `mod <stem>;` line per
+  suite), so each crate links one test binary; run one suite with `cargo test --test it -- <module>::`.
+  A top-level `tests/*.rs` stays its own binary only when it writes the process environment
+  (`set_var`/`remove_var`).
 
 @.savoir/embacle/AGENTS.md
