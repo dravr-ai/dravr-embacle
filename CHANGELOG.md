@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.39.0] — 2026-10-20
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.1.0 -> 6.2.0
+- chore(deps): bump dravr-tronc 6.0.0 -> 6.1.0
+- chore(build): bump .build to 50dd908 and drop an unneeded clippy allow
+- chore(toolchain): bump Rust 1.98.1 to 1.99.1
+- chore(deps): bump dravr-tronc 5.2.0 -> 6.0.0
+- chore(deps): bump dravr-tronc 5.1.0 -> 5.2.0
+- chore(deps): bump dravr-tronc 5.0.0 -> 5.1.0
+
+
 ## [0.38.0] — 2026-10-15
 
 ### Other
