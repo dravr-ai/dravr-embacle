@@ -106,7 +106,7 @@ fn run_stream(
         let created = tasks::pending_response(&prepared, previous.clone());
         state.store.put(&session_id, created.clone());
 
-        yield emit(StreamEvent::with_response("response.created", seq, created));
+        yield Ok(emit(StreamEvent::with_response("response.created", seq, created)));
         seq += 1;
 
         let mut text = String::new();
@@ -120,7 +120,7 @@ fn run_stream(
                         Ok(chunk) => {
                             if !chunk.delta.is_empty() {
                                 text.push_str(&chunk.delta);
-                                yield emit(StreamEvent::delta(seq, &chunk.delta));
+                                yield Ok(emit(StreamEvent::delta(seq, &chunk.delta)));
                                 seq += 1;
                             }
                         }
@@ -153,19 +153,18 @@ fn run_stream(
 
         state.store.settle(response.clone());
         let kind = terminal_kind(response.status);
-        yield emit(StreamEvent::with_response(kind, seq, response));
+        yield Ok(emit(StreamEvent::with_response(kind, seq, response)));
     }
 }
 
 /// Serialise one event onto the wire.
 ///
-/// Returns the `Result` the SSE stream item type requires; the error half is
-/// [`Infallible`] because a failure to serialise is answered with an empty
-/// object rather than by tearing down a stream the client is already reading.
-#[allow(clippy::unnecessary_wraps)]
-fn emit(event: StreamEvent) -> Result<Event, Infallible> {
+/// A failure to serialise is answered with an empty object rather than by
+/// tearing down a stream the client is already reading, so this cannot fail;
+/// the stream wraps it in the [`Infallible`] `Result` its item type requires.
+fn emit(event: StreamEvent) -> Event {
     let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
-    Ok(Event::default().event(event.kind).data(json))
+    Event::default().event(event.kind).data(json)
 }
 
 #[cfg(test)]
