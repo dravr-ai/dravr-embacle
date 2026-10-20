@@ -103,7 +103,7 @@ mod tests {
     fn test_sandbox_policy_defaults() {
         let policy = SandboxPolicy::new(PathBuf::from("/tmp"));
         assert_eq!(policy.working_directory, PathBuf::from("/tmp"));
-        assert!(!policy.allowed_env_keys.is_empty());
+        assert_ne!(policy.allowed_env_keys, Vec::<String>::new());
     }
 
     #[test]

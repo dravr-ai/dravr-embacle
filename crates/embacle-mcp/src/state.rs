@@ -123,7 +123,10 @@ mod tests {
         let state = ServerState::new(CliRunnerType::Copilot);
         assert_eq!(state.active_provider().await, CliRunnerType::Copilot);
         assert!(state.active_model().await.is_none());
-        assert!(state.multiplex_providers().await.is_empty());
+        assert_eq!(
+            state.multiplex_providers().await,
+            Vec::<CliRunnerType>::new()
+        );
     }
 
     #[tokio::test]

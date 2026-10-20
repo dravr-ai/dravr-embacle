@@ -835,7 +835,7 @@ mod tests {
     fn embedded_provider_config_parses() {
         let cfg = WebProviderConfig::claude_web_default().expect("embedded config valid"); // Safe: embedded TOML, validated by this test
         assert_eq!(cfg.provider.name, "claude_web");
-        assert!(!cfg.response.text_json_pointers.is_empty());
+        assert_ne!(cfg.response.text_json_pointers, Vec::<String>::new());
         assert!(cfg.provider.new_chat_url.contains("claude.ai"));
     }
 

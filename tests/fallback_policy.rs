@@ -372,7 +372,7 @@ async fn permissive_returns_an_empty_completion_as_success() {
         .with_fallthrough(ResponsePolicy::permissive());
     let response = chain.complete(&a_turn()).await.expect("Ok, however empty");
 
-    assert!(response.content.is_empty());
+    assert_eq!(response.content, "");
     assert_eq!(secondary_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -414,7 +414,7 @@ async fn an_empty_completion_from_the_last_tier_is_returned() {
         .await
         .expect("the last tier's empty answer is still an answer");
 
-    assert!(response.content.is_empty());
+    assert_eq!(response.content, "");
     assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
 }
 

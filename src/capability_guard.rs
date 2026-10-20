@@ -182,7 +182,7 @@ mod tests {
         let caps =
             LlmCapabilities::STREAMING | LlmCapabilities::TEMPERATURE | LlmCapabilities::MAX_TOKENS;
         let warnings = validate_capabilities("test", caps, &request_with_all(), true).unwrap(); // Safe: test assertion
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
         let caps =
             LlmCapabilities::STREAMING | LlmCapabilities::TEMPERATURE | LlmCapabilities::MAX_TOKENS;
         let warnings = validate_capabilities("test", caps, &request_with_all(), false).unwrap(); // Safe: test assertion
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -305,6 +305,6 @@ mod tests {
         let img = ImagePart::new("data", "image/png").unwrap(); // Safe: test assertion
         let request = ChatRequest::new(vec![ChatMessage::user_with_images("describe", vec![img])]);
         let warnings = validate_capabilities("test", caps, &request, true).unwrap(); // Safe: test assertion
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<String>::new());
     }
 }

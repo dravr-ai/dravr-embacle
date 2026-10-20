@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(config.binary_path, PathBuf::from("/usr/bin/claude"));
         assert!(config.model.is_none());
         assert_eq!(config.timeout, Duration::from_mins(2));
-        assert!(config.extra_args.is_empty());
+        assert_eq!(config.extra_args, Vec::<String>::new());
         assert!(config.working_directory.is_none());
     }
 
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_parse_env_keys_empty_string() {
         let keys = parse_env_keys("");
-        assert!(keys.is_empty());
+        assert_eq!(keys, Vec::<String>::new());
     }
 
     #[test]

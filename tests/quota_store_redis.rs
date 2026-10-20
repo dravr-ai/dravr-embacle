@@ -340,7 +340,7 @@ async fn every_backend_is_answered_for_even_when_nothing_is_stored() {
     let redis = TestRedis::start().await;
     let store = redis.store(&account()).await;
     assert_eq!(store.load(3).await, vec![BackendState::default(); 3]);
-    assert!(store.load(0).await.is_empty());
+    assert_eq!(store.load(0).await, Vec::<BackendState>::new());
 }
 
 #[tokio::test]

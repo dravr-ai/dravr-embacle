@@ -277,9 +277,9 @@ mod tests {
     #[test]
     fn partial_line_stays_in_buffer_until_flushed() {
         let mut parser = SseParser::new();
-        assert!(parser.feed(b"data: partial").is_empty());
+        assert_eq!(parser.feed(b"data: partial"), Vec::<SseEvent>::new());
         assert_eq!(parser.flush(), vec![SseEvent::Data("partial".to_owned())]);
-        assert!(parser.flush().is_empty());
+        assert_eq!(parser.flush(), Vec::<SseEvent>::new());
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
             .position(|b| *b == 0xC3)
             .expect("the line holds an é") // Safe: test assertion
             + 1;
-        assert!(parser.feed(&line[..split]).is_empty());
+        assert_eq!(parser.feed(&line[..split]), Vec::<SseEvent>::new());
         assert_eq!(
             parser.feed(&line[split..]),
             vec![SseEvent::Data("{\"text\":\"café\"}".to_owned())]
@@ -324,6 +324,6 @@ mod tests {
     #[test]
     fn a_data_line_with_no_payload_yields_nothing() {
         let mut parser = SseParser::new();
-        assert!(parser.feed(b"data: \n\ndata:\n\n").is_empty());
+        assert_eq!(parser.feed(b"data: \n\ndata:\n\n"), Vec::<SseEvent>::new());
     }
 }

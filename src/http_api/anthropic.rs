@@ -2472,7 +2472,7 @@ mod tests {
         ]);
         let keys = numbered_api_keys(|name| blank.get(name).map(|v| (*v).to_owned()));
         assert_eq!(keys, ["key-1"]);
-        assert!(numbered_api_keys(|_| None).is_empty());
+        assert_eq!(numbered_api_keys(|_| None), Vec::<String>::new());
     }
 
     #[test]
