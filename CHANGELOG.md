@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.39.1] — 2026-10-23
+
+### Fixed
+
+- fix(copilot-sdk): take github-copilot-sdk 1.0.26 with `runtime`
+- fix(usage): forward cache and reasoning tokens; refresh Copilot catalog
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.2.0 -> 6.2.1
+- chore(build): bump .build to 520f637, the fleet Rust pin check
+
+
 ## [0.39.0] — 2026-10-20
 
 ### Other
