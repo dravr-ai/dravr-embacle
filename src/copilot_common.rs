@@ -80,6 +80,16 @@ impl PermissionPolicy {
 pub(crate) const ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG: &str =
     "--allow-all-mcp-server-instructions";
 
+/// The Copilot CLI flag that keeps its built-in MCP servers (the GitHub MCP
+/// server and friends) out of a session.
+///
+/// A caller's tools are the point: the builtins add latency and a surface the
+/// caller did not ask for, and their tool schemas ride every prompt — about
+/// 2.9k tokens on an ACP turn that never calls them. Both CLI-spawning
+/// providers pass it: the `-p` runner in `copilot.rs` and the `--acp` runner
+/// in `copilot_headless.rs`.
+pub(crate) const DISABLE_BUILTIN_MCPS_FLAG: &str = "--disable-builtin-mcps";
+
 /// Default number of conversation history turns rendered into a prompt.
 /// Each "turn" is one user or assistant message.
 pub const DEFAULT_MAX_HISTORY_TURNS: usize = 20;

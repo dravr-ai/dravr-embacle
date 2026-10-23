@@ -700,6 +700,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 model = %response.model,
                 prompt_tokens = usage.prompt_tokens,
                 completion_tokens = usage.completion_tokens,
+                reasoning_tokens = usage.reasoning_tokens,
                 total_tokens = usage.total_tokens,
                 "chat completion usage"
             );
@@ -780,7 +781,41 @@ impl Debug for OpenAiCompatibleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::{calculate_cost, calculate_cost_for, TokenCounts};
     use crate::types::ErrorKind;
+
+    /// The `OpenAI` API counts reasoning inside `completion_tokens`; read
+    /// through this provider's usage path, the call prices exactly as many
+    /// output tokens as the vendor billed.
+    #[test]
+    fn an_openai_reasoning_response_prices_its_output_once() {
+        let body = r#"{
+            "id": "chatcmpl-1", "model": "gpt-4o",
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 400, "total_tokens": 1400,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 300}}
+        }"#;
+        let response = chat_completions::parse_response(OPENAI_API_NAME, body, Usage::with_details)
+            .expect("parses"); // Safe: test assertion
+        let usage = response.usage.expect("usage"); // Safe: test assertion
+        assert_eq!(usage.completion_tokens, 100);
+        assert_eq!(usage.reasoning_tokens, Some(300));
+        assert_eq!(usage.total_tokens, 1400);
+
+        let counts = TokenCounts::new(
+            i64::from(usage.prompt_tokens),
+            i64::from(usage.completion_tokens),
+        )
+        .with_reasoning(i64::from(usage.reasoning_tokens.unwrap_or(0)));
+        let billed = calculate_cost_for(OPENAI_API_NAME, "gpt-4o", &counts);
+        let vendor = calculate_cost(OPENAI_API_NAME, "gpt-4o", 1000, 400);
+        assert!(
+            vendor > 0.0,
+            "gpt-4o must be priced for this test to mean anything"
+        );
+        assert!((billed - vendor).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn a_non_json_gateway_error_says_the_server_is_not_responding() {

@@ -292,13 +292,15 @@ async fn openai_api_sends_the_full_request_and_reads_tool_calls_and_usage() {
     assert_eq!(calls[1].id, "call_def");
     assert_eq!(calls[1].arguments, Value::Null);
     let usage = response.usage.expect("usage");
+    // The vendor's 30 completion tokens include the 7 reasoning tokens,
+    // which embacle keeps apart so they bill once.
     assert_eq!(
         (
             usage.prompt_tokens,
             usage.completion_tokens,
             usage.total_tokens
         ),
-        (120, 30, 150)
+        (120, 23, 150)
     );
     assert_eq!(usage.cached_read_tokens, Some(100));
     assert_eq!(usage.cached_write_tokens, None);

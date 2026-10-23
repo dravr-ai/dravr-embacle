@@ -28,7 +28,7 @@ use tracing::{debug, field, info, instrument, trace, warn, Span};
 use crate::copilot_common::{
     render_turn, runtime_env_keys, system_prompt, HeadlessEventStream, HeadlessStreamEvent,
     HeadlessToolResponse, HeadlessTurnProvider, ObservedToolCall, PermissionPolicy,
-    ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG,
+    ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG, DISABLE_BUILTIN_MCPS_FLAG,
 };
 use crate::copilot_headless_config::CopilotHeadlessConfig;
 use crate::copilot_models::catalog_ids;
@@ -570,10 +570,11 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
 /// Without the flag a caller's server — never on the CLI's allowlist — has its
 /// `initialize` instructions dropped instead of folded into the system prompt.
 /// The scratch [`session_cwd`] a host gets when it configures none keeps a
-/// project's `.mcp.json` servers out of the session, so the fold reaches the
-/// caller's servers and the CLI's own builtins, whose instructions the
-/// allowlist already folds. The cwd does not scope servers the CLI reads from
-/// the host user's own Copilot config under `$HOME`; the flag folds those too.
+/// project's `.mcp.json` servers out of the session, and
+/// [`DISABLE_BUILTIN_MCPS_FLAG`] keeps the CLI's own builtins out, as the `-p`
+/// runner does, so the fold reaches the caller's servers. The cwd does not
+/// scope servers the CLI reads from the host user's own Copilot config under
+/// `$HOME`; the flag folds those too.
 ///
 /// The child starts from a cleared environment ([`acp_sandbox`]), as every
 /// `-p` runner's does: the model it runs can be steered by its prompt, and
@@ -590,6 +591,7 @@ fn acp_command(
         cmd.arg("--model").arg(model);
     }
     cmd.arg(ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG);
+    cmd.arg(DISABLE_BUILTIN_MCPS_FLAG);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -3655,6 +3657,17 @@ mod tests {
             .position(|a| a == "--model")
             .expect("--model flag should be present"); // Safe: test assertion
         assert_eq!(args.get(idx + 1).map(String::as_str), Some("gpt-5.4"));
+    }
+
+    /// The ACP spawn keeps the CLI's built-in MCP servers out, as the `-p`
+    /// runner does: their tool schemas would otherwise ride every prompt.
+    #[test]
+    fn acp_command_disables_builtin_mcps() {
+        let args = acp_args("gpt-5.4");
+        assert!(
+            args.iter().any(|a| a == "--disable-builtin-mcps"),
+            "ACP spawn must pass --disable-builtin-mcps, got {args:?}"
+        );
     }
 
     /// The `copilot --acp` child gets the allowlisted host variables, its

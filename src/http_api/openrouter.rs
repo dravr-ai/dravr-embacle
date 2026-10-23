@@ -26,7 +26,9 @@
 //! `prompt_tokens_details.cached_tokens` and
 //! `completion_tokens_details.reasoning_tokens` are read into
 //! [`TokenUsage`], so a cached prefix bills at the cache rate and a
-//! reasoning model's thought tokens are charged rather than dropped.
+//! reasoning model's thought tokens are charged rather than dropped. The
+//! reasoning share is taken out of `completion_tokens`, which includes it,
+//! so those tokens bill once.
 
 use std::env;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
@@ -439,6 +441,7 @@ impl Debug for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::{cost_from_pricing, ModelPricing, TokenCounts};
     use crate::types::{ChatMessage, ErrorKind, ResponseFormat, ToolChoice, ToolDefinition};
     use serde_json::json;
 
@@ -464,9 +467,50 @@ mod tests {
         assert_eq!(calls[0].arguments, json!({"city": "Lyon"}));
         let usage = response.usage.expect("usage"); // Safe: test assertion
         assert_eq!(usage.prompt_tokens, 100);
+        // The vendor's 20 includes the 15 reasoning tokens.
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 120);
         assert_eq!(usage.cached_read_tokens, Some(60));
         assert_eq!(usage.cached_write_tokens, None);
         assert_eq!(usage.reasoning_tokens, Some(15));
+    }
+
+    /// Reasoning inside `completion_tokens` is priced once: the output side
+    /// bills the vendor's 20 completion tokens, not 20 plus the 15 reasoning.
+    #[test]
+    fn reasoning_inside_the_completion_count_bills_once() {
+        let recorded = r#"{
+            "id": "gen-2", "model": "openai/o4-mini",
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                "completion_tokens_details": {"reasoning_tokens": 15}}
+        }"#;
+        let response = OpenRouterProvider::read_completion(recorded).expect("parses"); // Safe: test assertion
+        let usage = response.usage.expect("usage"); // Safe: test assertion
+        let counts = TokenCounts::new(
+            i64::from(usage.prompt_tokens),
+            i64::from(usage.completion_tokens),
+        )
+        .with_reasoning(i64::from(usage.reasoning_tokens.unwrap_or(0)));
+        let pricing = ModelPricing::new(1.0, 10.0);
+        let billed = cost_from_pricing(&pricing, &counts);
+        let expected = cost_from_pricing(&pricing, &TokenCounts::new(100, 20));
+        assert!((billed - expected).abs() < f64::EPSILON);
+
+        // A vendor that over-reports reasoning cannot push completion negative,
+        // and reasoning is capped so billed output stays the vendor's 3.
+        let skewed = r#"{
+            "id": "gen-3", "model": "openai/o4-mini",
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4,
+                "completion_tokens_details": {"reasoning_tokens": 9}}
+        }"#;
+        let usage = OpenRouterProvider::read_completion(skewed)
+            .expect("parses") // Safe: test assertion
+            .usage
+            .expect("usage"); // Safe: test assertion
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.reasoning_tokens, Some(3));
     }
 
     /// `OpenRouter` advertises none of `TOP_P`, `STOP_SEQUENCES`,

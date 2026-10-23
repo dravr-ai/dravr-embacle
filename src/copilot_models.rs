@@ -20,6 +20,8 @@
 pub enum Family {
     /// Anthropic Claude Opus
     ClaudeOpus,
+    /// Anthropic Claude Fable
+    ClaudeFable,
     /// Anthropic Claude Sonnet
     ClaudeSonnet,
     /// Anthropic Claude Haiku
@@ -28,6 +30,12 @@ pub enum Family {
     Gpt,
     /// Google Gemini family
     Gemini,
+    /// xAI Grok family
+    Grok,
+    /// Moonshot Kimi family
+    Kimi,
+    /// Microsoft MAI family
+    Mai,
 }
 
 impl Family {
@@ -35,10 +43,14 @@ impl Family {
     const fn priority(self) -> u8 {
         match self {
             Self::ClaudeOpus => 10,
+            Self::ClaudeFable => 9,
             Self::ClaudeSonnet => 8,
             Self::ClaudeHaiku => 6,
             Self::Gpt => 5,
             Self::Gemini => 4,
+            Self::Grok => 3,
+            Self::Kimi => 2,
+            Self::Mai => 1,
         }
     }
 }
@@ -97,7 +109,7 @@ pub struct ModelCandidate {
     pub id: &'static str,
     /// Family grouping used for ranking and default-effort decisions.
     pub family: Family,
-    /// Major/minor version pair (e.g. `(4, 7)` for `claude-opus-4.7`).
+    /// Major/minor version pair (e.g. `(4, 8)` for `claude-opus-4.8`).
     pub version: (u8, u8),
     /// Speed/capacity tier within the family.
     pub tier: Tier,
@@ -108,9 +120,23 @@ pub struct ModelCandidate {
 /// Ordered by `(family priority, version desc, tier priority)` so callers can
 /// iterate from the most-preferred default downward.
 ///
-/// Keep this list in sync with `copilot --model` entitlement changes.
+/// Keep this list in sync with `copilot --model` entitlement changes: the
+/// entries are the `models.availableModels` a `copilot --acp` `session/new`
+/// reports (the `auto` pseudo-model aside).
 pub const CATALOG: &[ModelCandidate] = &[
     // Claude Opus — newest first
+    ModelCandidate {
+        id: "claude-opus-5.5",
+        family: Family::ClaudeOpus,
+        version: (5, 5),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "claude-opus-5",
+        family: Family::ClaudeOpus,
+        version: (5, 0),
+        tier: Tier::Full,
+    },
     ModelCandidate {
         id: "claude-opus-4.8",
         family: Family::ClaudeOpus,
@@ -118,33 +144,23 @@ pub const CATALOG: &[ModelCandidate] = &[
         tier: Tier::Full,
     },
     ModelCandidate {
-        id: "claude-opus-4.7",
+        id: "claude-opus-4.8-fast",
         family: Family::ClaudeOpus,
-        version: (4, 7),
+        version: (4, 8),
+        tier: Tier::Fast,
+    },
+    // Claude Fable — ranked below Opus: a caller naming only the provider gets
+    // Opus, and Fable runs when asked for by id or when no Opus is available
+    ModelCandidate {
+        id: "claude-fable-5.1",
+        family: Family::ClaudeFable,
+        version: (5, 1),
         tier: Tier::Full,
     },
     ModelCandidate {
-        id: "claude-opus-4.7-fast",
-        family: Family::ClaudeOpus,
-        version: (4, 7),
-        tier: Tier::Fast,
-    },
-    ModelCandidate {
-        id: "claude-opus-4.6",
-        family: Family::ClaudeOpus,
-        version: (4, 6),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "claude-opus-4.6-fast",
-        family: Family::ClaudeOpus,
-        version: (4, 6),
-        tier: Tier::Fast,
-    },
-    ModelCandidate {
-        id: "claude-opus-4.5",
-        family: Family::ClaudeOpus,
-        version: (4, 5),
+        id: "claude-fable-5",
+        family: Family::ClaudeFable,
+        version: (5, 0),
         tier: Tier::Full,
     },
     // Claude Sonnet
@@ -160,24 +176,6 @@ pub const CATALOG: &[ModelCandidate] = &[
         version: (5, 0),
         tier: Tier::Full,
     },
-    ModelCandidate {
-        id: "claude-sonnet-4.6",
-        family: Family::ClaudeSonnet,
-        version: (4, 6),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "claude-sonnet-4.5",
-        family: Family::ClaudeSonnet,
-        version: (4, 5),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "claude-sonnet-4",
-        family: Family::ClaudeSonnet,
-        version: (4, 0),
-        tier: Tier::Full,
-    },
     // Claude Haiku
     ModelCandidate {
         id: "claude-haiku-5.5",
@@ -191,11 +189,47 @@ pub const CATALOG: &[ModelCandidate] = &[
         version: (4, 5),
         tier: Tier::Full,
     },
-    // GPT — newest first
+    // GPT — newest first; variants of one version keep Copilot's listing order
     ModelCandidate {
-        id: "gpt-5.4",
+        id: "gpt-6.1-sol",
         family: Family::Gpt,
-        version: (5, 4),
+        version: (6, 1),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-6-sol",
+        family: Family::Gpt,
+        version: (6, 0),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-6-luna",
+        family: Family::Gpt,
+        version: (6, 0),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-6-astra",
+        family: Family::Gpt,
+        version: (6, 0),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-5.6-sol",
+        family: Family::Gpt,
+        version: (5, 6),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-5.6-terra",
+        family: Family::Gpt,
+        version: (5, 6),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gpt-5.6-luna",
+        family: Family::Gpt,
+        version: (5, 6),
         tier: Tier::Full,
     },
     ModelCandidate {
@@ -204,60 +238,45 @@ pub const CATALOG: &[ModelCandidate] = &[
         version: (5, 3),
         tier: Tier::Full,
     },
-    ModelCandidate {
-        id: "gpt-5.2-codex",
-        family: Family::Gpt,
-        version: (5, 2),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "gpt-5.2",
-        family: Family::Gpt,
-        version: (5, 2),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "gpt-5.1-codex-max",
-        family: Family::Gpt,
-        version: (5, 1),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "gpt-5.1-codex",
-        family: Family::Gpt,
-        version: (5, 1),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "gpt-5.1",
-        family: Family::Gpt,
-        version: (5, 1),
-        tier: Tier::Full,
-    },
-    ModelCandidate {
-        id: "gpt-5.1-codex-mini",
-        family: Family::Gpt,
-        version: (5, 1),
-        tier: Tier::Mini,
-    },
-    ModelCandidate {
-        id: "gpt-5-mini",
-        family: Family::Gpt,
-        version: (5, 0),
-        tier: Tier::Mini,
-    },
-    ModelCandidate {
-        id: "gpt-4.1",
-        family: Family::Gpt,
-        version: (4, 1),
-        tier: Tier::Full,
-    },
     // Gemini
     ModelCandidate {
-        id: "gemini-3-pro-preview",
+        id: "gemini-4-argon",
         family: Family::Gemini,
+        version: (4, 0),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "gemini-3.8-flash",
+        family: Family::Gemini,
+        version: (3, 8),
+        tier: Tier::Fast,
+    },
+    // Grok
+    ModelCandidate {
+        id: "grok-4.7",
+        family: Family::Grok,
+        version: (4, 7),
+        tier: Tier::Full,
+    },
+    ModelCandidate {
+        id: "grok-4.6",
+        family: Family::Grok,
+        version: (4, 6),
+        tier: Tier::Full,
+    },
+    // Kimi
+    ModelCandidate {
+        id: "kimi-k3",
+        family: Family::Kimi,
         version: (3, 0),
         tier: Tier::Full,
+    },
+    // Microsoft MAI
+    ModelCandidate {
+        id: "mai-code-1.1-flash",
+        family: Family::Mai,
+        version: (1, 1),
+        tier: Tier::Fast,
     },
 ];
 
@@ -277,7 +296,7 @@ pub fn rank(candidates: &mut [ModelCandidate]) {
 
 /// Identifier of the top-ranked candidate in [`CATALOG`].
 ///
-/// Returns `"claude-opus-4.8"` today — the catalog is compiled in, so the
+/// Returns `"claude-opus-5.5"` today — the catalog is compiled in, so the
 /// value is statically known and the indexing below cannot panic.
 #[must_use]
 pub fn preferred_default() -> &'static str {
@@ -312,11 +331,14 @@ pub fn find(id: &str) -> Option<&'static ModelCandidate> {
 
 /// Heuristic default reasoning effort for a model id.
 ///
-/// Returns `Medium` for Opus/Sonnet/GPT-5.x (models that benefit from deliberation)
-/// and for Claude Haiku 5.5, whose own default effort is `medium`; `None` for
-/// Haiku 4.5, Gemini and older GPT (the flag is ignored or unsupported there).
-/// Haiku is matched on its exact version: Haiku 4.5 rejects effort, and a
-/// later Haiku earns a default only once it is listed and checked.
+/// Returns `Medium` for Opus/Sonnet/GPT-5.x and later (models that benefit from
+/// deliberation) and for Claude Haiku 5.5, whose own default effort is
+/// `medium`; `None` for Haiku 4.5, Gemini, Grok, Kimi and MAI (the flag is
+/// ignored or unsupported there). Fable also gets `None`: Copilot's
+/// `--reasoning-effort` has not been checked against it, so the CLI keeps the
+/// model's own default. That is the rule Haiku follows too, matched on its
+/// exact version: Haiku 4.5 rejects effort, and a family or later version
+/// earns a forwarded default only once it is listed and checked.
 #[must_use]
 pub fn default_effort_for(model_id: &str) -> Option<ReasoningEffort> {
     let candidate = find(model_id)?;
@@ -365,20 +387,65 @@ mod tests {
 
     #[test]
     fn preferred_default_is_newest_opus() {
-        assert_eq!(preferred_default(), "claude-opus-4.8");
+        assert_eq!(preferred_default(), "claude-opus-5.5");
     }
 
     #[test]
     fn next_preferred_walks_catalog() {
-        assert_eq!(next_preferred("claude-opus-4.8"), Some("claude-opus-4.7"));
+        assert_eq!(next_preferred("claude-opus-5.5"), Some("claude-opus-5"));
+        assert_eq!(next_preferred("claude-opus-5"), Some("claude-opus-4.8"));
         assert_eq!(
-            next_preferred("claude-opus-4.7"),
-            Some("claude-opus-4.7-fast")
+            next_preferred("claude-opus-4.8"),
+            Some("claude-opus-4.8-fast")
         );
+    }
+
+    #[test]
+    fn fable_ranks_below_every_opus_and_above_sonnet() {
+        // An alias caller gets Opus; self-heal reaches Fable only once every
+        // Opus is unavailable, and leaves Fable for the newest Sonnet.
         assert_eq!(
-            next_preferred("claude-opus-4.6-fast"),
-            Some("claude-opus-4.5")
+            next_preferred("claude-opus-4.8-fast"),
+            Some("claude-fable-5.1")
         );
+        assert_eq!(next_preferred("claude-fable-5.1"), Some("claude-fable-5"));
+        assert_eq!(next_preferred("claude-fable-5"), Some("claude-sonnet-5.5"));
+    }
+
+    #[test]
+    fn catalog_holds_exactly_the_models_copilot_offers() {
+        // `models.availableModels` from a `copilot --acp` session/new on
+        // Copilot CLI 1.0.103, `auto` aside.
+        let mut offered = vec![
+            "claude-sonnet-5.5",
+            "claude-sonnet-5",
+            "claude-fable-5.1",
+            "claude-fable-5",
+            "claude-opus-5.5",
+            "claude-opus-5",
+            "claude-opus-4.8",
+            "claude-opus-4.8-fast",
+            "claude-haiku-5.5",
+            "claude-haiku-4.5",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.3-codex",
+            "mai-code-1.1-flash",
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+            "grok-4.7",
+            "grok-4.6",
+            "kimi-k3",
+        ];
+        let mut listed: Vec<&str> = CATALOG.iter().map(|c| c.id).collect();
+        offered.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(listed, offered);
     }
 
     #[test]
@@ -411,21 +478,36 @@ mod tests {
     #[test]
     fn default_effort_picks_medium_for_opus_sonnet_gpt5() {
         assert_eq!(
-            default_effort_for("claude-opus-4.7"),
+            default_effort_for("claude-opus-5.5"),
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(
-            default_effort_for("claude-sonnet-4.6"),
+            default_effort_for("claude-sonnet-5"),
             Some(ReasoningEffort::Medium)
         );
-        assert_eq!(default_effort_for("gpt-5.4"), Some(ReasoningEffort::Medium));
+        assert_eq!(
+            default_effort_for("gpt-6.1-sol"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            default_effort_for("gpt-5.3-codex"),
+            Some(ReasoningEffort::Medium)
+        );
     }
 
     #[test]
-    fn default_effort_is_none_for_haiku_and_gemini() {
-        assert_eq!(default_effort_for("claude-haiku-4.5"), None);
-        assert_eq!(default_effort_for("gemini-3-pro-preview"), None);
-        assert_eq!(default_effort_for("gpt-4.1"), None);
+    fn default_effort_is_none_for_haiku_4_5_fable_and_other_families() {
+        for model in [
+            "claude-haiku-4.5",
+            "claude-fable-5.1",
+            "claude-fable-5",
+            "gemini-4-argon",
+            "grok-4.7",
+            "kimi-k3",
+            "mai-code-1.1-flash",
+        ] {
+            assert_eq!(default_effort_for(model), None, "{model}");
+        }
     }
 
     #[test]
@@ -461,13 +543,13 @@ mod tests {
     #[test]
     fn the_5_5_models_rank_above_their_predecessors() {
         assert_eq!(
-            next_preferred("claude-opus-4.5"),
+            next_preferred("claude-fable-5"),
             Some("claude-sonnet-5.5"),
             "the newest Sonnet heads its family"
         );
         assert_eq!(next_preferred("claude-sonnet-5.5"), Some("claude-sonnet-5"));
         assert_eq!(
-            next_preferred("claude-sonnet-4"),
+            next_preferred("claude-sonnet-5"),
             Some("claude-haiku-5.5"),
             "the newest Haiku heads its family"
         );

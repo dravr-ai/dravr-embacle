@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
-use crate::types::{ChatMessage, ChatRequest, ChatResponse, ImagePart, LlmProvider, RunnerError};
+use crate::types::{
+    ChatMessage, ChatRequest, ChatResponse, ImagePart, LlmProvider, RunnerError, TokenUsage,
+};
 use crate::CopilotHeadlessRunner;
 
 // ---------------------------------------------------------------------------
@@ -87,8 +89,15 @@ struct FfiResponse {
     object: &'static str,
     model: String,
     choices: Vec<FfiChoice>,
+    /// The runner's own [`TokenUsage`], serialized as-is: `prompt_tokens`,
+    /// `completion_tokens` and `total_tokens`, plus `cached_read_tokens`,
+    /// `cached_write_tokens` and `reasoning_tokens` when the runner reports them.
+    ///
+    /// These are embacle's semantics, not `OpenAI`'s: the cached counts are
+    /// shares of `prompt_tokens`, but `reasoning_tokens` is additive — it is
+    /// NOT part of `completion_tokens`, so billed output is their sum.
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<FfiTokenUsage>,
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize)]
@@ -102,16 +111,6 @@ struct FfiChoice {
 struct FfiResponseMessage {
     role: &'static str,
     content: String,
-}
-
-#[derive(Serialize)]
-struct FfiTokenUsage {
-    #[serde(rename = "prompt_tokens")]
-    prompt: u32,
-    #[serde(rename = "completion_tokens")]
-    completion: u32,
-    #[serde(rename = "total_tokens")]
-    total: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +206,6 @@ fn convert_ffi_messages(messages: &[FfiMessage]) -> Result<Vec<ChatMessage>, Str
 
 /// Build an OpenAI-compatible response JSON from a `ChatResponse`
 fn build_response_json(response: &ChatResponse) -> String {
-    let usage = response.usage.as_ref().map(|u| FfiTokenUsage {
-        prompt: u.prompt_tokens,
-        completion: u.completion_tokens,
-        total: u.total_tokens,
-    });
-
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -233,7 +226,7 @@ fn build_response_json(response: &ChatResponse) -> String {
                 .clone()
                 .unwrap_or_else(|| "stop".to_owned()),
         }],
-        usage,
+        usage: response.usage.clone(),
     };
 
     // Serialization of these simple types cannot fail
@@ -468,7 +461,6 @@ pub extern "C" fn embacle_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TokenUsage;
 
     #[test]
     fn parse_data_uri_valid_png() {
@@ -588,6 +580,54 @@ mod tests {
         assert_eq!(parsed["choices"][0]["finish_reason"], "stop");
         assert_eq!(parsed["usage"]["prompt_tokens"], 10);
         assert_eq!(parsed["usage"]["total_tokens"], 15);
+        // A category the runner did not report stays absent, never a zero.
+        assert!(parsed["usage"].get("cached_read_tokens").is_none());
+        assert!(parsed["usage"].get("cached_write_tokens").is_none());
+        assert!(parsed["usage"].get("reasoning_tokens").is_none());
+    }
+
+    #[test]
+    fn build_response_json_forwards_cache_and_reasoning_counts() {
+        // The counts copilot --acp reports on a warm session: most of the
+        // prompt is served from cache, which `prompt_tokens` alone hides.
+        let usage = TokenUsage::new(27_862, 4, 27_866)
+            .with_cache(Some(15_320), Some(12_540))
+            .with_reasoning(Some(0));
+        let response = ChatResponse {
+            content: "OK".to_owned(),
+            model: "m".to_owned(),
+            usage: Some(usage),
+            finish_reason: None,
+            warnings: None,
+            tool_calls: None,
+        };
+        let json = build_response_json(&response);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap(); // Safe: test assertion
+        assert_eq!(parsed["usage"]["prompt_tokens"], 27_862);
+        assert_eq!(parsed["usage"]["completion_tokens"], 4);
+        assert_eq!(parsed["usage"]["total_tokens"], 27_866);
+        assert_eq!(parsed["usage"]["cached_read_tokens"], 15_320);
+        assert_eq!(parsed["usage"]["cached_write_tokens"], 12_540);
+        assert_eq!(parsed["usage"]["reasoning_tokens"], 0);
+    }
+
+    #[test]
+    fn build_response_json_keeps_reasoning_apart_from_completion() {
+        // embacle's own semantics: reasoning is additive, never folded into
+        // `completion_tokens` the way OpenAI's usage counts it.
+        let response = ChatResponse {
+            content: "OK".to_owned(),
+            model: "m".to_owned(),
+            usage: Some(TokenUsage::new(100, 7, 127).with_reasoning(Some(20))),
+            finish_reason: None,
+            warnings: None,
+            tool_calls: None,
+        };
+        let json = build_response_json(&response);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap(); // Safe: test assertion
+        assert_eq!(parsed["usage"]["completion_tokens"], 7);
+        assert_eq!(parsed["usage"]["reasoning_tokens"], 20);
+        assert_eq!(parsed["usage"]["total_tokens"], 127);
     }
 
     #[test]

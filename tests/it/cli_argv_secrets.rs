@@ -77,6 +77,18 @@ fn dump(dir: &Path, name: &str) -> String {
         .unwrap_or_else(|e| panic!("the stand-in did not write {name}: {e}"))
 }
 
+/// Whether an `ls -l` line shows a file readable and writable by its owner only.
+/// The permission field can end in a marker the platform adds for other metadata
+/// (`@` for macOS extended attributes, `+` for an ACL, `.` for an `SELinux` label),
+/// which says nothing about the mode itself.
+fn owner_only(ls_line: &str) -> bool {
+    ls_line
+        .split_whitespace()
+        .next()
+        .map(|field| field.trim_end_matches(['@', '+', '.']))
+        == Some("-rw-------")
+}
+
 /// The argv carries neither the bearer nor the prompt; the configuration
 /// file the child was pointed at was 0600, held the bearer, and is gone.
 fn assert_secrets_stayed_off_the_command_line(dir: &Path) {
@@ -84,7 +96,7 @@ fn assert_secrets_stayed_off_the_command_line(dir: &Path) {
     assert!(!argv.contains("tok-secret-123"), "bearer on argv: {argv}");
     assert!(!argv.contains(PROMPT), "prompt on argv: {argv}");
     assert!(
-        dump(dir, "mode.dump").starts_with("-rw------- "),
+        owner_only(&dump(dir, "mode.dump")),
         "the config file is readable by its owner only: {}",
         dump(dir, "mode.dump")
     );
@@ -172,7 +184,7 @@ async fn copilot_reads_its_mcp_config_from_a_private_file() {
     // The -p runner still passes its prompt as `-p <prompt>`; only the
     // configuration, which carries the bearer, moved.
     assert!(!argv.contains("tok-secret-123"), "bearer on argv: {argv}");
-    assert!(dump(dir.path(), "mode.dump").starts_with("-rw------- "));
+    assert!(owner_only(&dump(dir.path(), "mode.dump")));
     assert!(dump(dir.path(), "config.dump").contains(BEARER));
     let path = dump(dir.path(), "path.dump");
     assert!(!Path::new(path.trim_end()).exists(), "{path}");

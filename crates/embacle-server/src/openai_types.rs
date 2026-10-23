@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use embacle::types::TokenUsage;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -355,18 +356,89 @@ pub struct ResponseMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
-/// Token usage statistics
+/// Token usage statistics in `OpenAI`'s shape.
+///
+/// The cache and reasoning shares ride in `OpenAI`'s own breakdown objects, so
+/// a stock client keeps reading the three counts and a cost-aware one finds
+/// the shares where it already looks. A share the runner did not report is
+/// absent, never a zero: `None` means "not measured", `Some(0)` "measured zero".
+///
+/// Reasoning is counted the opposite way on each side of this type. An
+/// embacle [`TokenUsage`] keeps it out of `completion_tokens` (additive, the
+/// way its pricing bills it); `OpenAI`'s `completion_tokens` includes it and
+/// `completion_tokens_details.reasoning_tokens` is a breakdown of that count.
+/// The [`From`] conversion folds reasoning into `completion_tokens`, so a
+/// client pricing by `completion_tokens` bills the reasoning, and one taking
+/// `completion_tokens - reasoning_tokens` gets the visible output.
 #[derive(Debug, Serialize)]
 pub struct Usage {
-    /// Tokens in the prompt
+    /// Tokens in the prompt, cached reads and writes included
     #[serde(rename = "prompt_tokens")]
     pub prompt: u32,
-    /// Tokens in the completion
+    /// Tokens in the completion, reasoning tokens included
     #[serde(rename = "completion_tokens")]
     pub completion: u32,
-    /// Total tokens
+    /// Total tokens, never below `prompt_tokens + completion_tokens`
     #[serde(rename = "total_tokens")]
     pub total: u32,
+    /// The cached share of `prompt_tokens`, when the runner reported one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// The reasoning share of `completion_tokens`, when the runner reported one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// `prompt_tokens_details`: the cached share of the prompt
+#[derive(Debug, Serialize)]
+pub struct PromptTokensDetails {
+    /// Prompt tokens served from the provider's cache (`OpenAI`'s field)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
+    /// Prompt tokens written into the cache this turn. `OpenAI` bills no
+    /// write and so has no field; this is the name `OpenRouter`'s
+    /// `OpenAI`-compatible usage gives the count Anthropic bills at a premium.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+}
+
+/// `completion_tokens_details`: the reasoning share of `completion_tokens`
+#[derive(Debug, Serialize)]
+pub struct CompletionTokensDetails {
+    /// Reasoning tokens, a part of `completion_tokens` (`OpenAI`'s field)
+    pub reasoning_tokens: u32,
+}
+
+impl From<&TokenUsage> for Usage {
+    fn from(usage: &TokenUsage) -> Self {
+        let prompt_tokens_details =
+            if usage.cached_read_tokens.is_some() || usage.cached_write_tokens.is_some() {
+                Some(PromptTokensDetails {
+                    cached_tokens: usage.cached_read_tokens,
+                    cache_write_tokens: usage.cached_write_tokens,
+                })
+            } else {
+                None
+            };
+        // OpenAI's completion count includes reasoning; embacle's excludes it.
+        let completion = usage
+            .completion_tokens
+            .saturating_add(usage.reasoning_tokens.unwrap_or(0));
+        // Runners differ on whether their total carries reasoning, so the
+        // reported total is raised to OpenAI's prompt + completion when short.
+        let total = usage
+            .total_tokens
+            .max(usage.prompt_tokens.saturating_add(completion));
+        Self {
+            prompt: usage.prompt_tokens,
+            completion,
+            total,
+            prompt_tokens_details,
+            completion_tokens_details: usage
+                .reasoning_tokens
+                .map(|reasoning_tokens| CompletionTokensDetails { reasoning_tokens }),
+        }
+    }
 }
 
 // ============================================================================
@@ -531,6 +603,65 @@ impl ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_without_breakdown_carries_the_three_counts_only() {
+        let json =
+            serde_json::to_value(Usage::from(&TokenUsage::new(10, 5, 15))).expect("serialize"); // Safe: test assertion
+        assert_eq!(json["prompt_tokens"], 10);
+        assert_eq!(json["completion_tokens"], 5);
+        assert_eq!(json["total_tokens"], 15);
+        // A share the runner did not report stays absent, never a zero.
+        assert!(json.get("prompt_tokens_details").is_none());
+        assert!(json.get("completion_tokens_details").is_none());
+    }
+
+    #[test]
+    fn usage_forwards_cache_and_reasoning_counts_in_openai_shape() {
+        // The counts copilot --acp reports on a warm session: most of the
+        // prompt is served from cache, which `prompt_tokens` alone hides.
+        let usage = TokenUsage::new(27_862, 4, 27_866)
+            .with_cache(Some(15_320), Some(12_540))
+            .with_reasoning(Some(0));
+        let json = serde_json::to_value(Usage::from(&usage)).expect("serialize"); // Safe: test assertion
+        assert_eq!(json["prompt_tokens"], 27_862);
+        assert_eq!(json["completion_tokens"], 4);
+        assert_eq!(json["total_tokens"], 27_866);
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 15_320);
+        assert_eq!(json["prompt_tokens_details"]["cache_write_tokens"], 12_540);
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+    }
+
+    #[test]
+    fn usage_folds_reasoning_into_openai_completion_tokens() {
+        // embacle keeps reasoning apart from completion; OpenAI counts it in.
+        let usage = TokenUsage::new(100, 7, 127).with_reasoning(Some(20));
+        let json = serde_json::to_value(Usage::from(&usage)).expect("serialize"); // Safe: test assertion
+        assert_eq!(json["prompt_tokens"], 100);
+        assert_eq!(json["completion_tokens"], 27);
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 20);
+        assert_eq!(json["total_tokens"], 127);
+    }
+
+    #[test]
+    fn usage_total_is_raised_when_the_runner_total_omits_reasoning() {
+        // A runner whose total is prompt + completion, reasoning left out.
+        let usage = TokenUsage::new(100, 7, 107).with_reasoning(Some(20));
+        let json = serde_json::to_value(Usage::from(&usage)).expect("serialize"); // Safe: test assertion
+        assert_eq!(json["completion_tokens"], 27);
+        assert_eq!(json["total_tokens"], 127);
+    }
+
+    #[test]
+    fn usage_omits_each_unreported_share_on_its_own() {
+        let usage = TokenUsage::new(100, 7, 107).with_cache(Some(64), None);
+        let json = serde_json::to_value(Usage::from(&usage)).expect("serialize"); // Safe: test assertion
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 64);
+        assert!(json["prompt_tokens_details"]
+            .get("cache_write_tokens")
+            .is_none());
+        assert!(json.get("completion_tokens_details").is_none());
+    }
 
     #[test]
     fn deserialize_single_model() {

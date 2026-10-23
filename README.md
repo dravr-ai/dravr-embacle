@@ -204,6 +204,8 @@ curl http://localhost:3000/mcp \
 
 Add `Accept: text/event-stream` to receive SSE-wrapped responses instead of plain JSON.
 
+A non-streaming response's `usage` carries `prompt_tokens`, `completion_tokens` and `total_tokens`, plus `prompt_tokens_details.cached_tokens`, `prompt_tokens_details.cache_write_tokens` and `completion_tokens_details.reasoning_tokens` when the runner reports them. An absent field means the runner did not report it, never zero. As in OpenAI's API, `completion_tokens` includes the reasoning tokens and `reasoning_tokens` is their share of it.
+
 ### Model Routing
 
 The `model` field determines which provider handles the request. Use a `provider:model` prefix to target a specific runner, or pass a bare model name to use the server's default provider.
@@ -855,6 +857,8 @@ embacle_shutdown();
 ```
 
 Vision payloads work via multipart content with `image_url` data URIs.
+
+The response's `usage` carries `prompt_tokens`, `completion_tokens` and `total_tokens`, plus `cached_read_tokens`, `cached_write_tokens` and `reasoning_tokens` when the runner reports them. An absent field means the runner did not report it, never zero. These are embacle's own counts, not OpenAI's: `cached_read_tokens` and `cached_write_tokens` are shares of `prompt_tokens`, but `reasoning_tokens` is additive — it is not included in `completion_tokens`, so billed output is `completion_tokens + reasoning_tokens`.
 
 ## Architecture
 

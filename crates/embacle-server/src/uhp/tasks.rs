@@ -41,7 +41,7 @@ use axum::Json;
 use embacle::config::{CliRunnerType, RunnerConfig};
 use embacle::discovery::resolve_binary;
 use embacle::factory::create_runner_with_config;
-use embacle::types::{ChatMessage, ChatRequest, LlmProvider, RunnerError};
+use embacle::types::{ChatMessage, ChatRequest, LlmProvider, RunnerError, TokenUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::fmt::Simple;
@@ -166,10 +166,30 @@ pub struct ContentPart {
 pub struct Usage {
     /// Tokens in the prompt.
     pub input_tokens: u32,
-    /// Tokens generated.
+    /// Tokens generated, reasoning tokens included.
     pub output_tokens: u32,
     /// Their sum.
     pub total_tokens: u32,
+}
+
+impl From<&TokenUsage> for Usage {
+    fn from(usage: &TokenUsage) -> Self {
+        // A runner's completion count excludes reasoning; generated output
+        // includes it, as it does in `OpenAI`'s count.
+        let output_tokens = usage
+            .completion_tokens
+            .saturating_add(usage.reasoning_tokens.unwrap_or(0));
+        // Runners differ on whether their total carries reasoning, so the
+        // reported total is raised to input + output when short.
+        let total_tokens = usage
+            .total_tokens
+            .max(usage.prompt_tokens.saturating_add(output_tokens));
+        Self {
+            input_tokens: usage.prompt_tokens,
+            output_tokens,
+            total_tokens,
+        }
+    }
 }
 
 /// A task, in whatever state it reached.
@@ -709,11 +729,7 @@ pub async fn run(state: &UhpState, request: &CreateResponse) -> Result<Outcome, 
             };
             // Honest or absent: a fabricated zero cannot be told from a free
             // task, which the specification calls the worse outcome.
-            let usage = reply.usage.map(|u| Usage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            });
+            let usage = reply.usage.as_ref().map(Usage::from);
             completed_response(prepared, previous, reply.content, usage, ran)
         }
         Err(e) => {
@@ -847,5 +863,23 @@ mod tests {
         assert_eq!(got.status, "completed", "a terminal state must not change");
         assert_eq!(store.session_turns("sess_1").map(|t| t.len()), Some(1));
         assert!(store.get("resp_missing").is_none());
+    }
+
+    #[test]
+    fn output_counts_reasoning_and_the_total_covers_both_sides() {
+        // The runner's total left reasoning out: it is raised to input + output.
+        let usage = Usage::from(&TokenUsage::new(100, 7, 107).with_reasoning(Some(20)));
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 27);
+        assert_eq!(usage.total_tokens, 127);
+
+        // A total that already carried reasoning is kept as reported.
+        let usage = Usage::from(&TokenUsage::new(100, 7, 127).with_reasoning(Some(20)));
+        assert_eq!(usage.output_tokens, 27);
+        assert_eq!(usage.total_tokens, 127);
+
+        // No reasoning reported: the counts pass through.
+        let usage = Usage::from(&TokenUsage::new(10, 5, 15));
+        assert_eq!((usage.output_tokens, usage.total_tokens), (5, 15));
     }
 }

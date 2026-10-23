@@ -206,9 +206,7 @@ impl<'a> AgentExecutor<'a> {
 
             // Accumulate token usage
             if let Some(ref usage) = response.usage {
-                total_usage.prompt_tokens += usage.prompt_tokens;
-                total_usage.completion_tokens += usage.completion_tokens;
-                total_usage.total_tokens += usage.total_tokens;
+                accumulate_usage(&mut total_usage, usage);
             }
 
             tracing::info!(
@@ -281,6 +279,30 @@ impl<'a> AgentExecutor<'a> {
             let tool_results_text = format_tool_results_as_text(&function_responses);
             messages.push(ChatMessage::user(tool_results_text));
         }
+    }
+}
+
+/// Add one turn's usage into the running total.
+///
+/// The optional categories sum as options: a category stays `None` until
+/// some turn reports it, so a run that never measured cache or reasoning
+/// does not claim a measured zero.
+fn accumulate_usage(total: &mut TokenUsage, turn: &TokenUsage) {
+    total.prompt_tokens = total.prompt_tokens.saturating_add(turn.prompt_tokens);
+    total.completion_tokens = total
+        .completion_tokens
+        .saturating_add(turn.completion_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(turn.total_tokens);
+    total.cached_read_tokens = add_reported(total.cached_read_tokens, turn.cached_read_tokens);
+    total.cached_write_tokens = add_reported(total.cached_write_tokens, turn.cached_write_tokens);
+    total.reasoning_tokens = add_reported(total.reasoning_tokens, turn.reasoning_tokens);
+}
+
+/// Sum two optional counts, `None` only when neither was reported.
+fn add_reported(total: Option<u32>, turn: Option<u32>) -> Option<u32> {
+    match (total, turn) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -421,6 +443,63 @@ mod tests {
         assert_eq!(result.total_turns, 2);
         assert_eq!(result.total_usage.prompt_tokens, 40);
         assert_eq!(result.total_usage.completion_tokens, 27);
+        // Neither turn reported a breakdown, so none is claimed.
+        assert_eq!(result.total_usage.cached_read_tokens, None);
+        assert_eq!(result.total_usage.cached_write_tokens, None);
+        assert_eq!(result.total_usage.reasoning_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn multi_turn_sums_cache_and_reasoning_as_reported() {
+        let provider = TestProvider::new(vec![
+            // Turn 1: a cold prefix — a cache write, no read, no reasoning reported
+            Ok(make_response(
+                "<tool_call>\n{\"name\": \"search\", \"arguments\": {}}\n</tool_call>",
+                Some(TokenUsage::new(100, 10, 110).with_cache(None, Some(80))),
+            )),
+            // Turn 2: the warm prefix is read back, and reasoning is reported
+            Ok(make_response(
+                "Done.",
+                Some(
+                    TokenUsage::new(120, 5, 145)
+                        .with_cache(Some(80), Some(0))
+                        .with_reasoning(Some(20)),
+                ),
+            )),
+        ]);
+
+        let declarations = vec![FunctionDeclaration {
+            name: "search".to_owned(),
+            description: "Search the web".to_owned(),
+            parameters: None,
+        }];
+
+        let executor = AgentExecutor::new(&provider, declarations, noop_handler());
+        let result = executor
+            .run(vec![ChatMessage::user("Go")])
+            .await
+            .expect("should succeed"); // Safe: test assertion
+
+        assert_eq!(result.total_turns, 2);
+        assert_eq!(result.total_usage.prompt_tokens, 220);
+        assert_eq!(result.total_usage.completion_tokens, 15);
+        assert_eq!(result.total_usage.total_tokens, 255);
+        assert_eq!(result.total_usage.cached_read_tokens, Some(80));
+        assert_eq!(result.total_usage.cached_write_tokens, Some(80));
+        assert_eq!(result.total_usage.reasoning_tokens, Some(20));
+    }
+
+    #[test]
+    fn accumulated_counts_saturate_instead_of_overflowing() {
+        let mut total = TokenUsage::new(u32::MAX - 1, u32::MAX, u32::MAX).with_reasoning(Some(1));
+        accumulate_usage(
+            &mut total,
+            &TokenUsage::new(5, 5, 10).with_reasoning(Some(u32::MAX)),
+        );
+        assert_eq!(total.prompt_tokens, u32::MAX);
+        assert_eq!(total.completion_tokens, u32::MAX);
+        assert_eq!(total.total_tokens, u32::MAX);
+        assert_eq!(total.reasoning_tokens, Some(u32::MAX));
     }
 
     #[tokio::test]

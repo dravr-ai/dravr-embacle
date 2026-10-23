@@ -335,6 +335,19 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         "claude-opus-4-6",
         ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
     ),
+    // Copilot's `-fast` tier of Opus 4.8 at its fast-mode list price,
+    // $10/$50 (2x the $5/$25 base), ahead of the base rows it would
+    // otherwise prefix-match.
+    (
+        "copilot_headless",
+        "claude-opus-4.8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_headless",
+        "claude-opus-4-8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
+    ),
     // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
     // list price for either (Anthropic retired both), and fast mode bills at
     // a premium over the base model ($10/$50 on Opus 4.8 and 5, 2x base), so
@@ -459,6 +472,19 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         "claude-opus-4-6",
         ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
     ),
+    // Copilot's `-fast` tier of Opus 4.8 at its fast-mode list price,
+    // $10/$50 (2x the $5/$25 base), ahead of the base rows it would
+    // otherwise prefix-match.
+    (
+        "copilot_sdk",
+        "claude-opus-4.8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "copilot_sdk",
+        "claude-opus-4-8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
+    ),
     // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
     // list price for either (Anthropic retired both), and fast mode bills at
     // a premium over the base model ($10/$50 on Opus 4.8 and 5, 2x base), so
@@ -581,6 +607,19 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
         "claude-code",
         "claude-opus-4-6",
         ModelPricing::new(5.0, 25.0).with_cache_rates(0.10, 1.25),
+    ),
+    // Copilot's `-fast` tier of Opus 4.8 at its fast-mode list price,
+    // $10/$50 (2x the $5/$25 base), ahead of the base rows it would
+    // otherwise prefix-match.
+    (
+        "claude-code",
+        "claude-opus-4.8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
+    ),
+    (
+        "claude-code",
+        "claude-opus-4-8-fast",
+        ModelPricing::new(10.0, 50.0).with_cache_rates(0.10, 1.25),
     ),
     // Copilot's `-fast` tiers of Opus 4.7 and 4.6. The reference gives no
     // list price for either (Anthropic retired both), and fast mode bills at

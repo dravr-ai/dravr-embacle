@@ -20,7 +20,7 @@ use embacle::types::{
     ChatMessage, ChatRequest, ErrorKind, LlmCapabilities, LlmProvider, MessageRole, ResponseFormat,
     RunnerError,
 };
-use embacle::{AgentExecutor, FunctionDeclaration};
+use embacle::{AgentExecutor, AgentResult, FunctionDeclaration};
 use tracing::{debug, error, warn};
 
 use crate::openai_types::{
@@ -252,11 +252,17 @@ async fn handle_server_side_tools(
     };
 
     let model_name = format!("{}:{}", resolved.runner_type, runner.default_model());
-    let usage = Some(Usage {
-        prompt: result.total_usage.prompt_tokens,
-        completion: result.total_usage.completion_tokens,
-        total: result.total_usage.total_tokens,
-    });
+    let resp = agent_completion_response(result, model_name);
+
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+/// The chat completion a finished server-side agent run answers with.
+///
+/// Usage is the run's total across every turn, so the cache and reasoning
+/// shares the agent loop summed reach the caller in `OpenAI`'s shape.
+fn agent_completion_response(result: AgentResult, model_name: String) -> ChatCompletionResponse {
+    let usage = Some(Usage::from(&result.total_usage));
 
     let finish_reason = result.finish_reason.unwrap_or_else(|| "stop".to_owned());
     let warnings = if finish_reason == "max_turns" {
@@ -267,7 +273,7 @@ async fn handle_server_side_tools(
         None
     };
 
-    let resp = ChatCompletionResponse {
+    ChatCompletionResponse {
         id: generate_id(),
         object: "chat.completion",
         created: unix_timestamp(),
@@ -283,9 +289,7 @@ async fn handle_server_side_tools(
         }],
         usage,
         warnings,
-    };
-
-    (StatusCode::OK, Json(resp)).into_response()
+    }
 }
 
 /// Select which server-side tool declarations to expose to the agent.
@@ -410,11 +414,7 @@ async fn dispatch_completion(
         DispatchMode::NonStreaming => match runner.complete(&chat_request).await {
             Ok(response) => {
                 let model_name = format!("{runner_type}:{}", response.model);
-                let usage = response.usage.map(|u| Usage {
-                    prompt: u.prompt_tokens,
-                    completion: u.completion_tokens,
-                    total: u.total_tokens,
-                });
+                let usage = response.usage.as_ref().map(Usage::from);
 
                 let content = strip_json_fences(response.content, json_mode);
                 let (message, finish_reason) = build_response_message(
@@ -888,6 +888,12 @@ mod tests {
     };
     use MessageRole;
 
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use embacle::types::{ChatResponse, ChatStream, TokenUsage};
+    use embacle::McpToolExecutor;
+
     /// Helper to create a `ChatCompletionMessage` with plain text content
     fn text_msg(role: &str, content: Option<&str>) -> ChatCompletionMessage {
         ChatCompletionMessage {
@@ -1241,5 +1247,111 @@ mod tests {
     fn strip_json_fences_leaves_clean_json_unchanged() {
         let clean = "{\"key\":\"value\"}".to_owned();
         assert_eq!(strip_json_fences(clean.clone(), true), clean);
+    }
+
+    /// A provider answering from a script: first a tool call, then the answer.
+    /// Stands in for a runner, whose real usage needs a live CLI session.
+    struct ScriptedProvider {
+        replies: Mutex<Vec<ChatResponse>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ScriptedProvider {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn display_name(&self) -> &str {
+            "Scripted"
+        }
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::text_only()
+        }
+        fn default_model(&self) -> &'static str {
+            "scripted-model"
+        }
+        fn available_models(&self) -> &[String] {
+            &[]
+        }
+        async fn complete(&self, _request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
+            let mut replies = self.replies.lock().expect("test lock"); // Safe: test assertion
+            if replies.is_empty() {
+                Err(RunnerError::internal("script exhausted"))
+            } else {
+                Ok(replies.remove(0))
+            }
+        }
+        async fn complete_stream(&self, _request: &ChatRequest) -> Result<ChatStream, RunnerError> {
+            Err(RunnerError::internal("not scripted"))
+        }
+        async fn health_check(&self) -> Result<bool, RunnerError> {
+            Ok(true)
+        }
+    }
+
+    /// An MCP tool server that answers every call the same way.
+    struct EchoTools;
+
+    #[async_trait]
+    impl McpToolExecutor for EchoTools {
+        async fn execute(
+            &self,
+            tool_name: &str,
+            _arguments: &serde_json::Value,
+        ) -> Result<serde_json::Value, RunnerError> {
+            Ok(serde_json::json!({ "tool": tool_name, "status": "ok" }))
+        }
+    }
+
+    fn scripted_reply(content: &str, usage: TokenUsage) -> ChatResponse {
+        ChatResponse {
+            content: content.to_owned(),
+            model: "scripted-model".to_owned(),
+            usage: Some(usage),
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        }
+    }
+
+    /// The server-side tool path answers with the run's summed usage, cache
+    /// and reasoning shares included, converted to `OpenAI`'s shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_side_tool_run_reports_summed_cache_and_reasoning() {
+        let provider = ScriptedProvider {
+            replies: Mutex::new(vec![
+                scripted_reply(
+                    "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {}}\n</tool_call>",
+                    TokenUsage::new(100, 10, 110).with_cache(None, Some(80)),
+                ),
+                scripted_reply(
+                    "Found it.",
+                    TokenUsage::new(120, 5, 145)
+                        .with_cache(Some(80), Some(0))
+                        .with_reasoning(Some(20)),
+                ),
+            ]),
+        };
+        let declarations = vec![FunctionDeclaration {
+            name: "lookup".to_owned(),
+            description: "Look something up".to_owned(),
+            parameters: None,
+        }];
+        let handler = create_mcp_tool_handler(Arc::new(EchoTools));
+        let result = AgentExecutor::new(&provider, declarations, handler)
+            .run(vec![ChatMessage::user("Find it")])
+            .await
+            .expect("agent run"); // Safe: test assertion
+
+        let response = agent_completion_response(result, "scripted:scripted-model".to_owned());
+        let json = serde_json::to_value(&response).expect("serialize"); // Safe: test assertion
+        let usage = &json["usage"];
+        assert_eq!(usage["prompt_tokens"], 220);
+        // 15 visible completion tokens plus 20 reasoning, OpenAI-style.
+        assert_eq!(usage["completion_tokens"], 35);
+        assert_eq!(usage["total_tokens"], 255);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 80);
+        assert_eq!(usage["prompt_tokens_details"]["cache_write_tokens"], 80);
+        assert_eq!(usage["completion_tokens_details"]["reasoning_tokens"], 20);
+        assert_eq!(json["choices"][0]["message"]["content"], "Found it.");
     }
 }

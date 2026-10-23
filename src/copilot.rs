@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
-use crate::copilot_common::ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG;
+use crate::copilot_common::{ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG, DISABLE_BUILTIN_MCPS_FLAG};
 use crate::copilot_models::{
     catalog_ids, classify_model_error, default_effort_for, ReasoningEffort,
 };
@@ -181,7 +181,7 @@ impl CopilotRunner {
         // Copilot's own builtins (GitHub MCP and friends) stay off: a caller's
         // tools are the point, and the builtins add latency and a surface the
         // caller did not ask for.
-        cmd.arg("--disable-builtin-mcps");
+        cmd.arg(DISABLE_BUILTIN_MCPS_FLAG);
 
         // A caller's tools must arrive as REAL tools, which means MCP. Handed
         // to this model as a text catalog in the prompt it declines outright —
@@ -470,7 +470,7 @@ mod tests {
             .with_reasoning_effort(ReasoningEffort::High);
         let runner = CopilotRunner::new(config);
         assert_eq!(
-            runner.effective_effort(Some("claude-opus-4.7")),
+            runner.effective_effort(Some("claude-opus-5.5")),
             Some(ReasoningEffort::High)
         );
     }
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn effective_effort_falls_back_to_family_default() {
         assert_eq!(
-            runner().effective_effort(Some("claude-opus-4.7")),
+            runner().effective_effort(Some("claude-opus-5.5")),
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(runner().effective_effort(Some("claude-haiku-4.5")), None);

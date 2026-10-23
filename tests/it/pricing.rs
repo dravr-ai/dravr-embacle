@@ -529,6 +529,9 @@ const OPUS_5_5: (f64, f64, f64, f64) = (4.0, 20.0, 0.05, 1.25);
 /// Opus 5, 4.8, 4.7 and 4.6: $5 / $25.
 const OPUS_5_25: (f64, f64, f64, f64) = (5.0, 25.0, 0.10, 1.25);
 
+/// Opus 4.8 fast mode: $10 / $50, 2x the $5 / $25 base.
+const OPUS_4_8_FAST: (f64, f64, f64, f64) = (10.0, 50.0, 0.10, 1.25);
+
 /// The Opus 4 family row Opus 4.5, 4.1 and 4.0 resolve to.
 const OPUS_4_FAMILY: (f64, f64, f64, f64) = (15.0, 75.0, 0.10, 1.25);
 
@@ -561,6 +564,16 @@ fn opus_5_and_4_6_through_4_8_bill_five_and_twenty_five() {
             "claude-opus-4-6",
         ] {
             assert_rates(provider, model, OPUS_5_25, false);
+        }
+    }
+}
+
+#[test]
+fn opus_4_8_fast_bills_its_fast_mode_rate_not_the_base_row() {
+    // `claude-opus-4.8` ($5/$25) is a prefix of both ids and must lose.
+    for provider in PASS_THROUGH_RUNNERS {
+        for model in ["claude-opus-4.8-fast", "claude-opus-4-8-fast"] {
+            assert_rates(provider, model, OPUS_4_8_FAST, false);
         }
     }
 }

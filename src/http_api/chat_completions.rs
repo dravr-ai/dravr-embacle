@@ -302,7 +302,7 @@ pub(super) struct Usage {
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
     /// Breakdown of `completion_tokens`, carrying the reasoning-token share
-    /// that reasoning models bill as output but exclude from the count.
+    /// that the count already includes.
     #[serde(default)]
     completion_tokens_details: Option<CompletionTokensDetails>,
 }
@@ -325,16 +325,25 @@ impl Usage {
     /// The counts with their cached and reasoning shares. No cache-WRITE
     /// count exists in this API shape: writes are implicit and unbilled, so
     /// `None` is accurate, not unknown.
+    ///
+    /// This API counts reasoning inside `completion_tokens`, while
+    /// [`TokenUsage`] keeps it apart and pricing adds it back, so the
+    /// reasoning share is taken out of the completion count here. Left in,
+    /// every thought token would bill twice. A vendor reporting more reasoning
+    /// than completion is capped at its completion count, so the billed output
+    /// never exceeds what the vendor billed.
     pub(super) fn with_details(self) -> TokenUsage {
-        TokenUsage::new(self.prompt, self.completion, self.total)
+        let reasoning = self
+            .completion_tokens_details
+            .and_then(|d| d.reasoning_tokens)
+            .map(|r| r.min(self.completion));
+        let completion = self.completion.saturating_sub(reasoning.unwrap_or(0));
+        TokenUsage::new(self.prompt, completion, self.total)
             .with_cache(
                 self.prompt_tokens_details.and_then(|d| d.cached_tokens),
                 None,
             )
-            .with_reasoning(
-                self.completion_tokens_details
-                    .and_then(|d| d.reasoning_tokens),
-            )
+            .with_reasoning(reasoning)
     }
 
     /// The three counts alone, for a vendor whose breakdown is not billed.
