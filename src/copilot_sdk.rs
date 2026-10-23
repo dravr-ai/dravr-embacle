@@ -854,6 +854,7 @@ mod tests {
     use super::*;
     use crate::types::McpHeader;
     use serde_json::json;
+    use std::iter;
 
     /// `PermissionDecision` is not exported by the SDK, so the decision is
     /// read off its `Debug` form.
@@ -869,6 +870,30 @@ mod tests {
         });
         envelope["data"] = data;
         serde_json::from_value(envelope).unwrap_or_else(|e| unreachable!("test event: {e}"))
+    }
+
+    /// The SDK can launch the runtime child at all. Since 1.0.16 it compiles
+    /// `Client::start` to an `InvalidConfig` error unless its `runtime`
+    /// feature is on, which builds and type-checks exactly like the real
+    /// thing; a runtime path that does not exist must therefore fail as a
+    /// launch failure, never as that configuration error.
+    #[tokio::test]
+    async fn client_start_launches_the_runtime_rather_than_refusing_the_build() {
+        let base = tempfile::tempdir().unwrap_or_else(|e| unreachable!("tempdir: {e}"));
+        let config = CopilotSdkConfig {
+            runtime_path: Some(base.path().join("no-such-copilot-runtime")),
+            base_directory: base.path().to_path_buf(),
+            ..CopilotSdkConfig::default()
+        };
+        let options = client_options(&config, iter::empty());
+
+        let Err(error) = Client::start(options).await else {
+            unreachable!("a missing runtime binary cannot start");
+        };
+        assert!(
+            !matches!(error.kind(), SdkErrorKind::InvalidConfig),
+            "Client::start refused before launching: {error}"
+        );
     }
 
     /// Every host variable outside the allowlist is removed from the runtime
