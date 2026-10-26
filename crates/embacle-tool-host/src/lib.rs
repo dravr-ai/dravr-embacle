@@ -57,7 +57,6 @@ use dravr_tronc::mcp::tool::{ToolContext, ToolRegistry};
 use dravr_tronc::mcp::transport::http::mcp_router;
 use embacle::types::{McpHeader, McpServerConfig, McpTransport, RunnerError};
 use embacle::{McpToolDefinition, McpToolExecutor};
-use rand::RngCore;
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -392,7 +391,7 @@ impl ToolHost {
 /// 256 bits from the OS, hex-encoded.
 fn mint_bearer() -> String {
     let mut raw = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut raw);
+    rand::fill(&mut raw);
     raw.iter().fold(String::with_capacity(64), |mut acc, b| {
         use std::fmt::Write;
         let _ = write!(acc, "{b:02x}");
