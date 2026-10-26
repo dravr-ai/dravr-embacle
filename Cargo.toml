@@ -124,7 +124,7 @@ web-ui = ["dep:dravr-browser", "dep:toml", "tokio/sync"]
 # Enable TOML-based configuration file loading
 config-file = ["dep:toml", "dep:dirs"]
 # Enable OpenTelemetry metrics export
-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
+otel = ["dep:opentelemetry"]
 # Enable C FFI static library for Swift/C integration (implies copilot-headless)
 ffi = ["copilot-headless"]
 
@@ -168,11 +168,11 @@ dirs = { version = "6", optional = true }
 # Optional: shared headless-browser primitives for the web-ui runner
 dravr-browser = { version = "0.1", optional = true }
 
-# Optional: OpenTelemetry metrics export. Metrics only, not `trace` or
-# `logs`; `internal-logs` stays, so a failing exporter still says so through
-# tracing.
+# Optional: OpenTelemetry metrics through the API only. The library records
+# into the global meter; the binary that exports (embacle-server) owns the SDK.
+# Metrics only, not `trace` or `logs`; `internal-logs` stays, so a failing
+# exporter still says so through tracing.
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "internal-logs"], optional = true }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "internal-logs"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
