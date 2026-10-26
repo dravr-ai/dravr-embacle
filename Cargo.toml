@@ -8,6 +8,7 @@ members = [".", "crates/embacle-mcp", "crates/embacle-server", "crates/embacle-t
 name = "embacle"
 version = "0.40.0"
 edition = "2021"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "LLM runner library — 12 AI CLI tools, ACP, and HTTP APIs (Anthropic, Gemini, Cohere, Groq, OpenRouter, OpenAI-compatible) as pluggable LLM providers with fallback chains, agent loop, guardrails, and cost tracking"
 repository = "https://github.com/dravr-ai/dravr-embacle"

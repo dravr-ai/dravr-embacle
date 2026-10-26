@@ -8,6 +8,7 @@
 name = "embacle-tool-host"
 version = "0.40.0"
 edition = "2021"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "Host your own tools to an ACP agent over a loopback MCP endpoint"
 repository = "https://github.com/dravr-ai/dravr-embacle"

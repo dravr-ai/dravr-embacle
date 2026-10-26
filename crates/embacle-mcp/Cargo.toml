@@ -8,6 +8,7 @@
 name = "embacle-mcp"
 version = "0.40.0"
 edition = "2021"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "MCP server for embacle LLM runners — expose AI CLI tools via Model Context Protocol"
 repository = "https://github.com/dravr-ai/dravr-embacle"

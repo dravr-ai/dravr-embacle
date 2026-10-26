@@ -8,6 +8,7 @@
 name = "embacle-server"
 version = "0.40.0"
 edition = "2021"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "Unified OpenAI-compatible REST API + MCP server for embacle LLM runners"
 repository = "https://github.com/dravr-ai/dravr-embacle"
