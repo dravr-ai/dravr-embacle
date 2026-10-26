@@ -871,7 +871,7 @@ dependencies = [
  "dirs 6.0.0",
  "dravr-browser",
  "github-copilot-sdk",
- "opentelemetry",
+ "opentelemetry 0.32.0",
  "redis",
  "reqwest 0.12.28",
  "serde",
@@ -914,7 +914,7 @@ dependencies = [
  "embacle-mcp",
  "futures",
  "http-body-util",
- "opentelemetry",
+ "opentelemetry 0.32.0",
  "opentelemetry_sdk",
  "rmcp",
  "serde",
@@ -1859,15 +1859,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "opentelemetry_sdk"
-version = "0.32.1"
+name = "opentelemetry"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
+checksum = "8c1f1a6ac9c875a4941e4c7c085b61e8f4daa326de03b4701768c3491a6ad9ee"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "372a912db2974d1990207006fd0e3aa0ef3fd4ad3be43c65cfaadf2206866061"
 dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "opentelemetry",
+ "opentelemetry 0.33.1",
  "percent-encoding",
  "portable-atomic",
  "rand 0.9.5",
