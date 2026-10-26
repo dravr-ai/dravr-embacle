@@ -324,3 +324,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish -p embacle -p embacle-mcp -p embacle-server -p embacle-tool-host --dry-run
+
+  # The one check a branch rule or a reader needs: green only when every job
+  # above succeeded. `!cancelled()` runs it after a failure too, and comparing
+  # each result to "success" rather than testing for "failure" counts a skipped
+  # or cancelled job as red, which `needs` alone would let through.
+  ci-ok:
+    name: CI OK
+    if: ${{ !cancelled() }}
+    needs: [check, clippy, fmt, test-linux, copilot-e2e, test-macos, test-windows, validate, publish-dry-run]
+    runs-on: ubuntu-latest
+    steps:
+      - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
