@@ -40,6 +40,7 @@ use tracing::info;
 use crate::pricing::{calculate_cost_for, TokenCounts};
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, TokenUsage,
+    ToolStream,
 };
 
 /// Characters-per-token estimate used when the provider does not report usage
@@ -326,6 +327,13 @@ impl LlmProvider for MetricsProvider {
     /// Delegate streaming directly; only measures stream setup time (documented limitation)
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        self.inner.complete_stream_with_tools(request).await
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {

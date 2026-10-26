@@ -24,6 +24,7 @@ use tracing::{info, warn};
 
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ToolStream,
 };
 
 /// Default refusal patterns matched case-insensitively via substring
@@ -222,6 +223,13 @@ impl LlmProvider for QualityGateProvider {
     /// Delegate streaming directly (no quality check on streams — documented limitation)
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        self.inner.complete_stream_with_tools(request).await
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {

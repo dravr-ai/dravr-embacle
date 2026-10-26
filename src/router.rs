@@ -45,6 +45,7 @@ use crate::quota::{LimitChecker, QuotaSnapshot};
 use crate::quota_store::{BackendState, InMemoryQuotaStore, QuotaStore};
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider, RunnerError,
+    ToolStream,
 };
 
 /// How long a reading is reused before the router refreshes it.
@@ -445,6 +446,32 @@ impl LlmProvider for RouterProvider {
                 };
                 self.active.store(other, Ordering::Relaxed);
                 self.backends[other].provider.complete_stream(request).await
+            }
+            other => other,
+        }
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        let now = SystemTime::now();
+        let idx = self.choose(now).await;
+        match self.backends[idx]
+            .provider
+            .complete_stream_with_tools(request)
+            .await
+        {
+            Err(e) if e.kind == ErrorKind::RateLimit => {
+                self.penalise(idx, now).await;
+                let Some(other) = self.next_other(idx, now).await else {
+                    return Err(e);
+                };
+                self.active.store(other, Ordering::Relaxed);
+                self.backends[other]
+                    .provider
+                    .complete_stream_with_tools(request)
+                    .await
             }
             other => other,
         }

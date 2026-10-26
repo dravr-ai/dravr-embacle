@@ -901,6 +901,32 @@ pub struct StreamChunk {
 /// Stream type for chat completion responses
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, RunnerError>> + Send>>;
 
+/// An event of [`LlmProvider::complete_stream_with_tools`].
+///
+/// A stream yields zero or more [`TextDelta`](Self::TextDelta)s, then exactly
+/// one [`Done`](Self::Done), then ends. A failure is one `Err` item, after
+/// which the stream ends without a `Done`.
+///
+/// `#[non_exhaustive]`: a provider that streams more than text (a tool call
+/// starting, a thinking delta) adds a variant without breaking consumers, so
+/// match with a wildcard arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ToolStreamEvent {
+    /// Reply text as it arrives. Concatenated, the deltas are the final
+    /// response's `content` — unless that response is a refusal, whose
+    /// partial output is discarded: a consumer that showed the deltas must
+    /// take them back when `Done` carries `finish_reason: "refusal"`.
+    TextDelta(String),
+    /// The complete response, as [`LlmProvider::complete`] returns it for the
+    /// same request: content, tool calls with parsed arguments, finish reason
+    /// and token usage.
+    Done(ChatResponse),
+}
+
+/// Stream type for [`LlmProvider::complete_stream_with_tools`]
+pub type ToolStream = Pin<Box<dyn Stream<Item = Result<ToolStreamEvent, RunnerError>> + Send>>;
+
 // ============================================================================
 // Provider Trait
 // ============================================================================
@@ -936,6 +962,35 @@ pub trait LlmProvider: Send + Sync {
     /// Falls back to non-streaming if not supported.
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError>;
 
+    /// Perform a chat completion that may call tools, streaming its text.
+    ///
+    /// Yields the reply text as [`ToolStreamEvent::TextDelta`]s while it is
+    /// generated, then one [`ToolStreamEvent::Done`] carrying the response
+    /// [`complete`](Self::complete) would have returned for `request` — tool
+    /// calls (`request.tools` are offered as for `complete`), finish reason
+    /// and token usage included.
+    ///
+    /// The default implementation calls `complete` and yields its response as
+    /// the single `Done`, with no deltas, so every provider answers this
+    /// method; a provider that can stream tool use natively overrides it.
+    /// A decorator overrides it to forward to the provider it wraps.
+    ///
+    /// # Errors
+    ///
+    /// An `Err` here means no stream was opened (the request was refused, the
+    /// connection failed); a fallback chain moves to its next tier on it as it
+    /// does for `complete`. A failure once the stream is open is an `Err`
+    /// item, and the text already delivered cannot be taken back.
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        let response = self.complete(request).await?;
+        Ok(Box::pin(tokio_stream::once(Ok(ToolStreamEvent::Done(
+            response,
+        )))))
+    }
+
     /// Check if the provider is healthy and ready to serve requests
     async fn health_check(&self) -> Result<bool, RunnerError>;
 }
@@ -945,7 +1000,7 @@ pub trait LlmProvider: Send + Sync {
 /// Lets an `Arc<T>` be boxed as a `dyn LlmProvider` tier — a fallback chain
 /// can hold the same runner a caller keeps a handle to (for its ACP session,
 /// its router state) without a wrapper type whose only job is to forward
-/// eight methods.
+/// nine methods.
 #[async_trait]
 impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
     fn name(&self) -> &'static str {
@@ -974,6 +1029,13 @@ impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
 
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         (**self).complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        (**self).complete_stream_with_tools(request).await
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {

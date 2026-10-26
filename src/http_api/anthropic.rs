@@ -139,13 +139,25 @@
 //!
 //! `complete_stream` forwards `text_delta` events as chunks and closes with
 //! the mapped `stop_reason` of `message_delta`. Thinking and
-//! `input_json_delta` events carry nothing a [`StreamChunk`] can hold: tool
-//! calls go through the non-streaming `complete()` path, as with every
-//! other streaming provider in this crate. A mid-stream `error` event ends
-//! the stream with an error. A stream cannot take back the deltas it already
-//! delivered, so a mid-stream refusal closes with `finish_reason: "refusal"`:
-//! a streaming consumer must check the final chunk's reason and discard what
-//! it showed when it reads `refusal`.
+//! `input_json_delta` events carry nothing a [`StreamChunk`] can hold.
+//!
+//! `complete_stream_with_tools` streams a turn that may call tools: it
+//! forwards `text_delta` events as [`ToolStreamEvent::TextDelta`] and, at
+//! `message_stop`, yields one [`ToolStreamEvent::Done`] with the response
+//! `complete()` returns for the same request. The `tool_use` blocks are
+//! assembled from `content_block_start` (id, name) and their
+//! `input_json_delta` fragments, and the usage from `message_start` (prompt
+//! and cache counts) overlaid with `message_delta` (output), then mapped by
+//! the same code as a non-streaming body — refusal discard and gross usage
+//! included. A stream that closes before `message_stop`, or whose tool input
+//! is not valid JSON, ends with an error instead of a `Done`, as a truncated
+//! non-streaming body would.
+//!
+//! On either stream a mid-stream `error` event ends the stream with an
+//! error. A stream cannot take back the deltas it already delivered, so a
+//! mid-stream refusal closes with `finish_reason: "refusal"`: a streaming
+//! consumer must check the final reason and discard what it showed when it
+//! reads `refusal`.
 //!
 //! ## Errors
 //!
@@ -181,22 +193,28 @@
 //! # }
 //! ```
 
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::mem;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
-use reqwest::{RequestBuilder, StatusCode};
+use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio_stream::Stream;
 use tracing::{debug, instrument, warn};
 
 use super::client::{self, with_retries, AttemptError, HttpRetryConfig, DEFAULT_TIMEOUT_SECS};
-use super::sse::create_sse_stream;
+use super::sse::{create_sse_stream, SseEvent, SseParser};
 use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
     MessageRole, RunnerError, StreamChunk, TokenUsage, ToolCallRequest, ToolChoice, ToolDefinition,
+    ToolStream, ToolStreamEvent,
 };
 
 /// The name this provider reports, and the price-table key its usage bills under
@@ -770,23 +788,47 @@ struct WireUsage {
     cache_creation: Option<u32>,
 }
 
-/// A streaming event, dispatched on its JSON `type`
+/// A streaming event, dispatched on its JSON `type`. Every field is
+/// defaulted, so an event of a known type with an unexpected shape is read
+/// past rather than failing the stream.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamEvent {
+    MessageStart {
+        #[serde(default)]
+        message: MessageStartBody,
+    },
+    ContentBlockStart {
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        content_block: Option<ResponseBlock>,
+    },
     ContentBlockDelta {
+        #[serde(default)]
+        index: usize,
         delta: StreamDelta,
     },
     MessageDelta {
         delta: MessageDeltaBody,
+        #[serde(default)]
+        usage: Option<WireUsage>,
     },
+    MessageStop,
     Error {
         error: ErrorBody,
     },
-    /// `message_start`, `content_block_start`, `content_block_stop`,
-    /// `message_stop`, `ping` and any future event
+    /// `content_block_stop`, `ping` and any future event
     #[serde(other)]
     Other,
+}
+
+/// The message a `message_start` event opens: its usage carries the prompt
+/// side (fresh input and both cache counts)
+#[derive(Debug, Default, Deserialize)]
+struct MessageStartBody {
+    #[serde(default)]
+    usage: Option<WireUsage>,
 }
 
 /// The delta of a `content_block_delta` event
@@ -796,7 +838,12 @@ enum StreamDelta {
     TextDelta {
         text: String,
     },
-    /// `thinking_delta`, `signature_delta`, `input_json_delta`, …
+    /// A fragment of a `tool_use` block's input, as raw JSON text
+    InputJsonDelta {
+        #[serde(default)]
+        partial_json: String,
+    },
+    /// `thinking_delta`, `signature_delta`, …
     #[serde(other)]
     Other,
 }
@@ -806,6 +853,8 @@ enum StreamDelta {
 struct MessageDeltaBody {
     #[serde(default)]
     stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<StopDetails>,
 }
 
 /// `{"type": "error", "error": {...}}`
@@ -1370,12 +1419,13 @@ fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, Runn
     match serde_json::from_str::<StreamEvent>(json) {
         Ok(StreamEvent::ContentBlockDelta {
             delta: StreamDelta::TextDelta { text },
+            ..
         }) => Some(Ok(StreamChunk {
             delta: text,
             is_final: false,
             finish_reason: None,
         })),
-        Ok(StreamEvent::MessageDelta { delta }) => {
+        Ok(StreamEvent::MessageDelta { delta, .. }) => {
             let reason = delta.stop_reason?;
             if reason == "refusal" {
                 warn!(
@@ -1395,11 +1445,307 @@ fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, Runn
             None,
             model,
         ))),
-        Ok(StreamEvent::ContentBlockDelta { .. } | StreamEvent::Other) => None,
+        Ok(
+            StreamEvent::MessageStart { .. }
+            | StreamEvent::ContentBlockStart { .. }
+            | StreamEvent::ContentBlockDelta { .. }
+            | StreamEvent::MessageStop
+            | StreamEvent::Other,
+        ) => None,
         Err(e) => Some(Err(RunnerError::external_service(
             PROVIDER_NAME,
             format!("SSE parse error: {e}"),
         ))),
+    }
+}
+
+/// One content block of a streamed message, as its events assemble it
+#[derive(Debug)]
+enum StreamedBlock {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        /// The input `content_block_start` carried: `{}` for a call whose
+        /// arguments then stream as `input_json_delta`, and the whole input
+        /// for a call that has none
+        input: Value,
+        /// The concatenated `input_json_delta` fragments
+        partial_json: String,
+    },
+    /// A thinking, server-tool or future block: read past, as
+    /// [`into_chat_response`] reads it past
+    Other,
+}
+
+/// Assembles a `/v1/messages` event stream into the [`ToolStreamEvent`]s of
+/// [`LlmProvider::complete_stream_with_tools`].
+///
+/// Text deltas are forwarded as they arrive. At `message_stop` the blocks,
+/// stop reason and usage are rebuilt into the [`MessagesResponse`] the
+/// non-streaming endpoint would have returned and mapped by the same
+/// [`into_chat_response`], so the final response is `complete()`'s by
+/// construction: refusal discard, stop-reason mapping and gross usage
+/// included.
+#[derive(Debug)]
+struct ToolStreamAccumulator {
+    /// The model the stream was opened for, reported as `complete()` does
+    model: String,
+    /// Content blocks keyed on their `index`, so they keep the wire order
+    blocks: BTreeMap<usize, StreamedBlock>,
+    stop_reason: Option<String>,
+    stop_details: Option<StopDetails>,
+    /// `message_start`'s usage, overlaid with each `message_delta`'s counts
+    usage: Option<WireUsage>,
+}
+
+impl ToolStreamAccumulator {
+    fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            blocks: BTreeMap::new(),
+            stop_reason: None,
+            stop_details: None,
+            usage: None,
+        }
+    }
+
+    /// Read one SSE `data:` payload. Returns the event it produces, if any:
+    /// a text delta, the final `Done` at `message_stop`, or an error.
+    fn feed(&mut self, json: &str) -> Option<Result<ToolStreamEvent, RunnerError>> {
+        let event = match serde_json::from_str::<StreamEvent>(json) {
+            Ok(event) => event,
+            Err(e) => {
+                return Some(Err(RunnerError::external_service(
+                    PROVIDER_NAME,
+                    format!("SSE parse error: {e}"),
+                )))
+            }
+        };
+        match event {
+            StreamEvent::MessageStart { message } => {
+                if let Some(usage) = message.usage {
+                    self.usage = Some(overlay_usage(self.usage, usage));
+                }
+                None
+            }
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                let (block, text) = match content_block {
+                    Some(ResponseBlock::Text { text }) => {
+                        (StreamedBlock::Text(text.clone()), Some(text))
+                    }
+                    Some(ResponseBlock::ToolUse { id, name, input }) => (
+                        StreamedBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                            partial_json: String::new(),
+                        },
+                        None,
+                    ),
+                    Some(ResponseBlock::Other) | None => (StreamedBlock::Other, None),
+                };
+                self.blocks.insert(index, block);
+                text.filter(|t| !t.is_empty())
+                    .map(|t| Ok(ToolStreamEvent::TextDelta(t)))
+            }
+            StreamEvent::ContentBlockDelta {
+                index,
+                delta: StreamDelta::TextDelta { text },
+            } => {
+                match self
+                    .blocks
+                    .entry(index)
+                    .or_insert_with(|| StreamedBlock::Text(String::new()))
+                {
+                    StreamedBlock::Text(content) => content.push_str(&text),
+                    StreamedBlock::ToolUse { .. } | StreamedBlock::Other => return None,
+                }
+                (!text.is_empty()).then_some(Ok(ToolStreamEvent::TextDelta(text)))
+            }
+            StreamEvent::ContentBlockDelta {
+                index,
+                delta: StreamDelta::InputJsonDelta { partial_json: part },
+            } => {
+                // A server tool's input streams the same way; like its block,
+                // it is read past.
+                if let Some(StreamedBlock::ToolUse { partial_json, .. }) =
+                    self.blocks.get_mut(&index)
+                {
+                    partial_json.push_str(&part);
+                }
+                None
+            }
+            StreamEvent::MessageDelta { delta, usage } => {
+                if let Some(reason) = delta.stop_reason {
+                    self.stop_reason = Some(reason);
+                }
+                if delta.stop_details.is_some() {
+                    self.stop_details = delta.stop_details;
+                }
+                if let Some(usage) = usage {
+                    self.usage = Some(overlay_usage(self.usage, usage));
+                }
+                None
+            }
+            StreamEvent::MessageStop => Some(self.finish().map(ToolStreamEvent::Done)),
+            StreamEvent::Error { error } => Some(Err(map_error(
+                status_for_error_type(&error.kind),
+                Some(&error),
+                None,
+                &self.model,
+            ))),
+            StreamEvent::ContentBlockDelta {
+                delta: StreamDelta::Other,
+                ..
+            }
+            | StreamEvent::Other => None,
+        }
+    }
+
+    /// The message as `complete()` would have returned it
+    fn finish(&mut self) -> Result<ChatResponse, RunnerError> {
+        let mut content = Vec::with_capacity(self.blocks.len());
+        for block in mem::take(&mut self.blocks).into_values() {
+            match block {
+                StreamedBlock::Text(text) => content.push(ResponseBlock::Text { text }),
+                StreamedBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    partial_json,
+                } => {
+                    let input = if partial_json.is_empty() {
+                        input
+                    } else {
+                        serde_json::from_str(&partial_json).map_err(|e| {
+                            RunnerError::external_service(
+                                PROVIDER_NAME,
+                                format!("Failed to parse the streamed input of tool {name}: {e}"),
+                            )
+                        })?
+                    };
+                    content.push(ResponseBlock::ToolUse { id, name, input });
+                }
+                StreamedBlock::Other => {}
+            }
+        }
+        let response = MessagesResponse {
+            content,
+            stop_reason: self.stop_reason.take(),
+            stop_details: self.stop_details.take(),
+            usage: self.usage.take(),
+        };
+        Ok(into_chat_response(response, &self.model))
+    }
+}
+
+/// `base` with every count `update` reports replacing its own. Anthropic's
+/// `message_delta` counts are cumulative, so the last report of each wins.
+fn overlay_usage(base: Option<WireUsage>, update: WireUsage) -> WireUsage {
+    let base = base.unwrap_or_default();
+    WireUsage {
+        input: update.input.or(base.input),
+        output: update.output.or(base.output),
+        cache_read: update.cache_read.or(base.cache_read),
+        cache_creation: update.cache_creation.or(base.cache_creation),
+    }
+}
+
+/// The [`ToolStream`] over a `/v1/messages` SSE byte stream opened for
+/// `model`: pull-based, so the bytes are read only as the consumer asks.
+fn create_tool_stream<S, B, E>(byte_stream: S, model: impl Into<String>) -> ToolStream
+where
+    S: Stream<Item = Result<B, E>> + Send + 'static,
+    B: AsRef<[u8]>,
+    E: Display,
+{
+    Box::pin(ToolSseStream {
+        bytes: Box::pin(byte_stream),
+        parser: SseParser::new(),
+        accumulator: ToolStreamAccumulator::new(model),
+        pending: VecDeque::new(),
+        terminated: false,
+    })
+}
+
+/// The stream [`create_tool_stream`] returns
+struct ToolSseStream<S> {
+    bytes: Pin<Box<S>>,
+    parser: SseParser,
+    accumulator: ToolStreamAccumulator,
+    pending: VecDeque<Result<ToolStreamEvent, RunnerError>>,
+    /// Set once the `Done` or an error is queued: nothing follows either
+    terminated: bool,
+}
+
+impl<S> ToolSseStream<S> {
+    /// Queue what a batch of SSE events produces, up to the terminal item
+    fn queue(&mut self, events: Vec<SseEvent>) {
+        for event in events {
+            if self.terminated {
+                return;
+            }
+            // `[DONE]` is the OpenAI convention; Anthropic ends on `message_stop`.
+            let SseEvent::Data(json) = event else {
+                continue;
+            };
+            if let Some(item) = self.accumulator.feed(&json) {
+                self.terminated = matches!(item, Err(_) | Ok(ToolStreamEvent::Done(_)));
+                self.pending.push_back(item);
+            }
+        }
+    }
+}
+
+impl<S, B, E> Stream for ToolSseStream<S>
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: Display,
+{
+    type Item = Result<ToolStreamEvent, RunnerError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(item) = this.pending.pop_front() {
+                return Poll::Ready(Some(item));
+            }
+            if this.terminated {
+                return Poll::Ready(None);
+            }
+            match this.bytes.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(bytes))) => {
+                    let events = this.parser.feed(bytes.as_ref());
+                    this.queue(events);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    this.terminated = true;
+                    return Poll::Ready(Some(Err(RunnerError::external_service(
+                        PROVIDER_NAME,
+                        format!("Stream read error: {e}"),
+                    ))));
+                }
+                Poll::Ready(None) => {
+                    let events = this.parser.flush();
+                    this.queue(events);
+                    if !this.terminated {
+                        // `complete()` fails on a truncated body; a stream that
+                        // closes before `message_stop` has no response to give.
+                        this.terminated = true;
+                        this.pending.push_back(Err(RunnerError::external_service(
+                            PROVIDER_NAME,
+                            "the stream closed before message_stop",
+                        )));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1514,8 +1860,9 @@ impl AnthropicProvider {
         Ok(into_chat_response(parsed, &body.model))
     }
 
-    /// One attempt at opening the stream
-    async fn attempt_stream(&self, body: &MessagesRequest) -> Result<ChatStream, AttemptError> {
+    /// One attempt at opening a stream: the response, once its status is a
+    /// success
+    async fn open_stream(&self, body: &MessagesRequest) -> Result<Response, AttemptError> {
         let response = self
             .post_messages(body)
             .map_err(AttemptError::permanent)?
@@ -1533,11 +1880,29 @@ impl AnthropicProvider {
             ));
         }
 
+        Ok(response)
+    }
+
+    /// One attempt at opening the text stream
+    async fn attempt_stream(&self, body: &MessagesRequest) -> Result<ChatStream, AttemptError> {
+        let response = self.open_stream(body).await?;
         let model = body.model.clone();
         Ok(create_sse_stream(
             response.bytes_stream(),
             move |json| parse_stream_data(json, &model),
             PROVIDER_NAME,
+        ))
+    }
+
+    /// One attempt at opening the tool-use stream
+    async fn attempt_tool_stream(
+        &self,
+        body: &MessagesRequest,
+    ) -> Result<ToolStream, AttemptError> {
+        let response = self.open_stream(body).await?;
+        Ok(create_tool_stream(
+            response.bytes_stream(),
+            body.model.as_str(),
         ))
     }
 }
@@ -1601,6 +1966,32 @@ impl LlmProvider for AnthropicProvider {
             |attempt| async move {
                 debug!(attempt, "Opening a stream on the Anthropic Messages API");
                 self.attempt_stream(body).await
+            },
+        )
+        .await
+    }
+
+    /// Streams the reply text and closes with the response `complete()`
+    /// returns, tool calls and usage included. Opening the stream is retried
+    /// as `complete()` is; a failure after it opened is the stream's `Err`
+    /// item.
+    #[instrument(skip(self, request), fields(model = %request.model.as_deref().unwrap_or(&self.config.model)))]
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        let body = build_body(&self.config, request, true);
+        let body = &body;
+        with_retries(
+            &self.config.retry,
+            PROVIDER_NAME,
+            "Anthropic streaming request",
+            |attempt| async move {
+                debug!(
+                    attempt,
+                    "Opening a tool-use stream on the Anthropic Messages API"
+                );
+                self.attempt_tool_stream(body).await
             },
         )
         .await
@@ -2452,6 +2843,293 @@ mod tests {
             missing.message, "Model \"claude-x\" is not available",
             "a mid-stream not-found names the model the stream was opened for"
         );
+    }
+
+    const STREAM_MODEL: &str = "claude-opus-5-5";
+
+    /// Every event the accumulator produces for `frames`, in order
+    fn accumulate(frames: &[&str]) -> Vec<Result<ToolStreamEvent, RunnerError>> {
+        let mut accumulator = ToolStreamAccumulator::new(STREAM_MODEL);
+        frames.iter().filter_map(|f| accumulator.feed(f)).collect()
+    }
+
+    /// The text deltas and the final response of a stream that succeeded
+    fn deltas_and_done(
+        events: Vec<Result<ToolStreamEvent, RunnerError>>,
+    ) -> (Vec<String>, ChatResponse) {
+        let mut deltas = Vec::new();
+        let mut done = None;
+        for event in events {
+            match event.expect("no error in the transcript") {
+                // Safe: test assertion
+                ToolStreamEvent::TextDelta(text) => deltas.push(text),
+                ToolStreamEvent::Done(response) => {
+                    assert!(done.is_none(), "exactly one Done");
+                    done = Some(response);
+                }
+            }
+        }
+        (deltas, done.expect("a Done at message_stop")) // Safe: test assertion
+    }
+
+    /// What `complete()` returns for the equivalent non-streaming body
+    fn non_streaming(body: Value) -> ChatResponse {
+        let parsed: MessagesResponse = serde_json::from_value(body).expect("a messages response"); // Safe: test assertion
+        into_chat_response(parsed, STREAM_MODEL)
+    }
+
+    fn same(streamed: &ChatResponse, complete: &ChatResponse) {
+        assert_eq!(
+            serde_json::to_value(streamed).expect("serializes"), // Safe: test assertion
+            serde_json::to_value(complete).expect("serializes"), // Safe: test assertion
+            "the streamed Done is complete()'s response"
+        );
+    }
+
+    const START: &str = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-opus-5-5","stop_reason":null,"usage":{"input_tokens":25,"cache_read_input_tokens":4000,"cache_creation_input_tokens":300,"output_tokens":1}}}"#;
+
+    #[test]
+    fn a_text_only_tool_stream_yields_its_deltas_then_completes_response() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"the athlete asks"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"ping"}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Easy spin"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" today."}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":40}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (deltas, done) = deltas_and_done(events);
+        assert_eq!(deltas, ["Easy spin", " today."]);
+        assert!(done.tool_calls.is_none());
+        same(
+            &done,
+            &non_streaming(json!({
+                "content": [
+                    {"type": "thinking", "thinking": "the athlete asks", "signature": "sig"},
+                    {"type": "text", "text": "Easy spin today."}
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 25, "cache_read_input_tokens": 4000,
+                          "cache_creation_input_tokens": 300, "output_tokens": 40}
+            })),
+        );
+    }
+
+    #[test]
+    fn text_then_tool_use_streams_the_text_and_closes_with_the_parsed_call() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me pull your rides."}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_activities","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"limit\": 2"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"0, \"sport\": \"ride\"}"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":61}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (deltas, done) = deltas_and_done(events);
+        assert_eq!(deltas, ["Let me pull your rides."]);
+        assert_eq!(done.finish_reason.as_deref(), Some("tool_calls"));
+        let calls = done.tool_calls.as_ref().expect("a tool call"); // Safe: test assertion
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].arguments, json!({"limit": 20, "sport": "ride"}));
+        same(
+            &done,
+            &non_streaming(json!({
+                "content": [
+                    {"type": "text", "text": "Let me pull your rides."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "get_activities",
+                     "input": {"limit": 20, "sport": "ride"}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 25, "cache_read_input_tokens": 4000,
+                          "cache_creation_input_tokens": 300, "output_tokens": 61}
+            })),
+        );
+    }
+
+    #[test]
+    fn parallel_tool_uses_without_text_keep_their_order_and_a_no_argument_call_gets_an_object() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"get_profile","input":{}}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"get_activity","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"id\":"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" \"é-42\"}"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (deltas, done) = deltas_and_done(events);
+        assert_eq!(deltas, Vec::<String>::new());
+        assert_eq!(done.content, "");
+        let calls = done.tool_calls.as_ref().expect("two calls"); // Safe: test assertion
+        let names: Vec<&str> = calls.iter().map(|c| c.function_name.as_str()).collect();
+        assert_eq!(names, ["get_profile", "get_activity"]);
+        assert_eq!(calls[0].arguments, json!({}));
+        assert_eq!(calls[1].arguments, json!({"id": "é-42"}));
+        same(
+            &done,
+            &non_streaming(json!({
+                "content": [
+                    {"type": "tool_use", "id": "toolu_a", "name": "get_profile", "input": {}},
+                    {"type": "tool_use", "id": "toolu_b", "name": "get_activity", "input": {"id": "é-42"}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 25, "cache_read_input_tokens": 4000,
+                          "cache_creation_input_tokens": 300, "output_tokens": 30}
+            })),
+        );
+    }
+
+    #[test]
+    fn streamed_usage_is_gross_with_both_cache_counts() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+            r#"{"type":"message_delta","delta":{},"usage":{"output_tokens":9}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let usage = deltas_and_done(events).1.usage.expect("usage"); // Safe: test assertion
+        assert_eq!(usage.prompt_tokens, 25 + 4000 + 300);
+        assert_eq!(
+            usage.completion_tokens, 9,
+            "the last cumulative output count wins"
+        );
+        assert_eq!(usage.total_tokens, 4325 + 9);
+        assert_eq!(usage.cached_read_tokens, Some(4000));
+        assert_eq!(usage.cached_write_tokens, Some(300));
+
+        let without_start = accumulate(&[
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":3,"output_tokens":2}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let usage = deltas_and_done(without_start).1.usage.expect("usage"); // Safe: test assertion
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (3, 2));
+        assert_eq!(usage.cached_read_tokens, None, "unreported is not zero");
+
+        let no_usage = accumulate(&[r#"{"type":"message_stop"}"#]);
+        assert!(deltas_and_done(no_usage).1.usage.is_none());
+    }
+
+    #[test]
+    fn a_tool_stream_refusal_discards_the_streamed_output_in_its_done() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Sure, the first step"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"category":"general_harms"}},"usage":{"output_tokens":6}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (deltas, done) = deltas_and_done(events);
+        assert_eq!(
+            deltas,
+            ["Sure, the first step"],
+            "a delta cannot be taken back"
+        );
+        assert_eq!(done.finish_reason.as_deref(), Some("refusal"));
+        assert_eq!(
+            done.content, "",
+            "the Done tells the consumer to discard it"
+        );
+        assert!(is_empty_completion(&done));
+    }
+
+    #[test]
+    fn tool_stream_errors_end_it_without_a_done() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Par"}}"#,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ]);
+        assert!(matches!(events[0], Ok(ToolStreamEvent::TextDelta(_))));
+        let err = events[1].as_ref().expect_err("the error event"); // Safe: test assertion
+        assert_eq!(err.kind, ErrorKind::ExternalService);
+
+        let bad_input = accumulate(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_activities","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"limit\":"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let err = bad_input[0].as_ref().expect_err("truncated tool input"); // Safe: test assertion
+        assert_eq!(err.kind, ErrorKind::ExternalService);
+        assert!(err.message.contains("get_activities"), "{}", err.message);
+
+        assert!(accumulate(&["not json"])[0].is_err());
+    }
+
+    /// Every item [`create_tool_stream`] yields over `chunks` of raw bytes
+    async fn tool_stream_items(
+        chunks: Vec<&'static [u8]>,
+    ) -> Vec<Result<ToolStreamEvent, RunnerError>> {
+        use tokio_stream::StreamExt;
+        let bytes = tokio_stream::iter(chunks.into_iter().map(Ok::<_, io::Error>));
+        create_tool_stream(bytes, STREAM_MODEL).collect().await
+    }
+
+    #[tokio::test]
+    async fn the_tool_stream_runs_over_raw_sse_bytes_split_anywhere() {
+        let raw: &'static str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n\
+             event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+             event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Récup\"}}\n\n\
+             event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_sleep\",\"input\":{}}}\n\n\
+             event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"days\\\": 7}\"}}\n\n\
+             event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":12}}\n\n\
+             event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let bytes = raw.as_bytes();
+        // Split inside the two bytes of 'é' and mid-line elsewhere
+        let accent = bytes.iter().position(|b| *b == 0xC3).expect("an é") + 1; // Safe: test assertion
+        let items =
+            tool_stream_items(vec![&bytes[..37], &bytes[37..accent], &bytes[accent..]]).await;
+        assert_eq!(items.len(), 2, "one delta, then the Done, then the end");
+        let (deltas, done) = deltas_and_done(items);
+        assert_eq!(deltas, ["Récup"]);
+        assert_eq!(done.content, "Récup");
+        let call = &done.tool_calls.expect("a call")[0]; // Safe: test assertion
+        assert_eq!(
+            (call.function_name.as_str(), &call.arguments),
+            ("get_sleep", &json!({"days": 7}))
+        );
+        assert_eq!(done.usage.map(|u| u.total_tokens), Some(16));
+    }
+
+    #[tokio::test]
+    async fn the_tool_stream_ends_after_an_error_and_on_a_close_before_message_stop() {
+        let errored = tool_stream_items(vec![
+            b"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n\
+              data: {\"type\":\"message_stop\"}\n\n",
+        ])
+        .await;
+        assert_eq!(
+            errored.len(),
+            1,
+            "nothing follows an error, not even a Done"
+        );
+        assert!(errored[0].is_err());
+
+        let truncated = tool_stream_items(vec![
+            b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Half\"}}\n\n",
+        ])
+        .await;
+        assert_eq!(truncated.len(), 2);
+        assert!(matches!(&truncated[0], Ok(ToolStreamEvent::TextDelta(t)) if t == "Half"));
+        let err = truncated[1].as_ref().expect_err("a truncated stream fails"); // Safe: test assertion
+        assert!(err.message.contains("message_stop"), "{}", err.message);
     }
 
     #[test]

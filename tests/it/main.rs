@@ -33,3 +33,4 @@ mod quota_store_redis;
 mod scenario_tests;
 mod stateless_runners;
 mod stream_deadline;
+mod tool_stream;

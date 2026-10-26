@@ -1,5 +1,5 @@
 // ABOUTME: The Anthropic provider as pool accounts, against a local listener: names, headers, a spent credit, a fallback
-// ABOUTME: Pins that a 402 on account 1 reaches the chain as a quota refusal naming that account, and account 2 answers
+// ABOUTME: Pins that a 402 on account 1 reaches the chain as a quota refusal naming that account, and account 2 answers or streams
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -15,17 +15,22 @@
 )]
 #![cfg(feature = "http-api")]
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tokio_stream::StreamExt;
 
 use embacle::fallback::{FallbackProvider, ResponsePolicy};
 use embacle::http_api::client::HttpRetryConfig;
 use embacle::http_api::{AnthropicConfig, AnthropicProvider};
 use embacle::metrics::MetricsProvider;
 use embacle::pool::provider_pool;
-use embacle::types::{ChatMessage, ChatRequest, ErrorKind, LlmProvider};
+use embacle::types::{
+    ChatMessage, ChatRequest, ErrorKind, LlmProvider, ToolDefinition, ToolStreamEvent,
+};
 
 /// One request as the listener received it
 struct Recorded {
@@ -308,4 +313,79 @@ async fn a_strict_chain_moves_past_a_refusal_that_followed_partial_output() {
         .expect("the next tier answers");
     assert_eq!(response.content, "Bonjour");
     assert_eq!(server.await.expect("server").len(), 2);
+}
+
+/// A `text/event-stream` answer carrying `frames` as `data:` lines
+fn sse(frames: &[&str]) -> String {
+    let body = frames.join("\n\ndata: ");
+    let body = format!("data: {body}\n\n");
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn a_tool_stream_leaves_a_spent_account_and_streams_the_reply_then_the_call() {
+    let streamed = sse(&[
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":600,"cache_creation_input_tokens":40,"output_tokens":1}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Je regarde"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" tes sorties."}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_activities","input":{}}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"limit\":"}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" 10}"}}"#,
+        r#"{"type":"content_block_stop","index":1}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":33}}"#,
+        r#"{"type":"message_stop"}"#,
+    ]);
+    let (base, server) = serve(vec![http(402, SPENT), streamed]).await;
+    let tiers =
+        provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
+    // The shape a consumer holds: the chain shared behind an `Arc`, boxed again
+    let chain: Box<dyn LlmProvider> =
+        Box::new(Arc::new(FallbackProvider::new(tiers).expect("chain")));
+    let request = ChatRequest::new(vec![ChatMessage::user("mes sorties?")]).with_tools(vec![
+        ToolDefinition {
+            name: "get_activities".to_owned(),
+            description: "Recent activities".to_owned(),
+            parameters: None,
+        },
+    ]);
+    let stream = chain
+        .complete_stream_with_tools(&request)
+        .await
+        .expect("account 2 opens the stream");
+    let items: Vec<_> = stream.collect().await;
+
+    let mut deltas = Vec::new();
+    let mut done = None;
+    for item in items {
+        match item.expect("no error item") {
+            ToolStreamEvent::TextDelta(text) => deltas.push(text),
+            ToolStreamEvent::Done(response) => done = Some(response),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(deltas, ["Je regarde", " tes sorties."]);
+    let done = done.expect("a Done");
+    assert_eq!(done.content, "Je regarde tes sorties.");
+    assert_eq!(done.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(done.model, "claude-haiku-5-5");
+    let call = &done.tool_calls.expect("a call")[0];
+    assert_eq!(call.id, "toolu_1");
+    assert_eq!(call.arguments, serde_json::json!({"limit": 10}));
+    let usage = done.usage.expect("usage");
+    assert_eq!(usage.prompt_tokens, 645);
+    assert_eq!(usage.completion_tokens, 33);
+    assert_eq!(usage.cached_read_tokens, Some(600));
+    assert_eq!(usage.cached_write_tokens, Some(40));
+
+    let recorded = server.await.expect("server");
+    let keys: Vec<Option<&str>> = recorded.iter().map(|r| r.header("x-api-key")).collect();
+    assert_eq!(keys, [Some("key-1"), Some("key-2")]);
+    let body: Value = serde_json::from_str(&recorded[1].body).expect("JSON body");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["tools"][0]["name"], "get_activities");
 }

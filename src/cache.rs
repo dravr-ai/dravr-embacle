@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, ToolStream,
 };
 
 /// Configuration for the response cache
@@ -237,6 +237,13 @@ impl LlmProvider for CacheProvider {
     /// Streaming responses are not cached; always delegates to the inner provider
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        self.inner.complete_stream_with_tools(request).await
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {

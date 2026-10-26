@@ -77,6 +77,7 @@ use tracing::warn;
 
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider, RunnerError,
+    ToolStream,
 };
 
 /// Configuration for per-provider retry with exponential backoff
@@ -768,6 +769,20 @@ impl LlmProvider for FallbackProvider {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         self.drive(request, |_: &ChatStream| false, &|provider, request| {
             Box::pin(provider.complete_stream(request))
+        })
+        .await
+    }
+
+    /// Driven like `complete_stream`: an opened stream is a success, so a
+    /// tier that fails before streaming hands the turn to the next tier, and
+    /// a failure mid-stream is the stream's own `Err` item. The empty-completion
+    /// rule does not apply, since the response is known only at its end.
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        self.drive(request, |_: &ToolStream| false, &|provider, request| {
+            Box::pin(provider.complete_stream_with_tools(request))
         })
         .await
     }

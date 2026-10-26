@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use tracing::warn;
 
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, ToolStream,
 };
 
 /// A guardrail violation with details about which guardrail and why
@@ -157,6 +157,14 @@ impl LlmProvider for GuardrailProvider {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         self.check_all_requests(request)?;
         self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        self.check_all_requests(request)?;
+        self.inner.complete_stream_with_tools(request).await
     }
 
     async fn health_check(&self) -> Result<bool, RunnerError> {

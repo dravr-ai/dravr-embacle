@@ -46,7 +46,7 @@ use crate::copilot::CREDENTIAL_ENV_KEYS as COPILOT_KEYS;
 use crate::factory::create_runner_with_config;
 use crate::gemini_cli::CREDENTIAL_ENV_KEYS as GEMINI_KEYS;
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError,
+    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, RunnerError, ToolStream,
 };
 
 /// The variable a runner type reads its credential from, when it reads one.
@@ -143,6 +143,21 @@ impl LlmProvider for PooledTier {
         let (runner, account) = (self.inner.name(), self.name);
         Ok(Box::pin(stream.map(move |chunk| {
             chunk.map_err(|e| renamed(e, runner, account))
+        })))
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ToolStream, RunnerError> {
+        let stream = self
+            .inner
+            .complete_stream_with_tools(request)
+            .await
+            .map_err(|e| self.rename(e))?;
+        let (runner, account) = (self.inner.name(), self.name);
+        Ok(Box::pin(stream.map(move |event| {
+            event.map_err(|e| renamed(e, runner, account))
         })))
     }
 
