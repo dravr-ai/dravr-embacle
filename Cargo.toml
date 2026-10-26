@@ -141,8 +141,9 @@ tracing = "0.1"
 uuid = { version = "1.22", features = ["v4", "serde"] }
 which = "8"
 
-# Optional: ACP schema types for Copilot Headless (copilot --acp)
-agent-client-protocol-schema = { version = "1.7", optional = true }
+# Optional: ACP schema types for Copilot Headless (copilot --acp). Serde
+# types only: embacle derives no JSON Schema from them, so not `schemars`.
+agent-client-protocol-schema = { version = "1.7", default-features = false, optional = true }
 
 # Optional: GitHub's SDK for its Rust Copilot runtime (copilot-sdk feature).
 # default-features = false drops `bundled-cli`, which would embed the CLI.
@@ -159,16 +160,19 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # dravr-platform's, so a consumer that already speaks Redis builds one copy.
 redis = { version = "0.28", default-features = false, features = ["tokio-comp", "connection-manager", "script"], optional = true }
 
-# Optional: TOML config file support
-toml = { version = "1.1", optional = true }
+# Optional: TOML config file support. embacle only parses (toml::from_str),
+# so not `display`, the writer.
+toml = { version = "1.1", default-features = false, features = ["parse", "serde"], optional = true }
 dirs = { version = "6", optional = true }
 
 # Optional: shared headless-browser primitives for the web-ui runner
 dravr-browser = { version = "0.1", optional = true }
 
-# Optional: OpenTelemetry metrics export
-opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", optional = true }
+# Optional: OpenTelemetry metrics export. Metrics only, not `trace` or
+# `logs`; `internal-logs` stays, so a failing exporter still says so through
+# tracing.
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "internal-logs"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "internal-logs"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
