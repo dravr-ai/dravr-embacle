@@ -172,7 +172,7 @@ dravr-browser = { version = "0.1", optional = true }
 # into the global meter; the binary that exports (embacle-server) owns the SDK.
 # Metrics only, not `trace` or `logs`; `internal-logs` stays, so a failing
 # exporter still says so through tracing.
-opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "internal-logs"], optional = true }
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "internal-logs"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
