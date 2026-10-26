@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.40.0] — 2026-10-26
+
+### Added
+
+- feat(anthropic): stream tool-calling turns (complete_stream_with_tools)
+
+### Fixed
+
+- fix(tool-host): port the bearer mint to rand 0.10
+
+### Other
+
+- build(cargo): drop opentelemetry_sdk from the library's otel feature
+- build(cargo): name the features of every optional dependency
+- chore(deps): bump rand from 0.8.8 to 0.10.3
+
+
 ## [0.39.1] — 2026-10-23
 
 ### Fixed
