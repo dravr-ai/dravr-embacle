@@ -248,7 +248,7 @@ jobs:
         env:
           EMBACLE_E2E_COPILOT_SDK: "1"
         run: |
-          RUNTIME="$(ls -d "$HOME"/.cache/copilot/pkg/linux-x64/*/prebuilds/linux-x64/copilot-runtime | sort -V | tail -1)"
+          RUNTIME="$(printf '%s\n' "$HOME"/.cache/copilot/pkg/linux-x64/*/prebuilds/linux-x64/copilot-runtime | sort -V | tail -1)"
           test -x "$RUNTIME"
           echo "runtime: $RUNTIME"
           export COPILOT_RUNTIME_PATH="$RUNTIME"
