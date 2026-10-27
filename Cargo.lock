@@ -861,7 +861,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "embacle"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-mcp"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-server"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "embacle-tool-host"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-trait",
  "axum",

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.42.0] — 2026-10-27
+
+### Added
+
+- feat(anthropic): cache a system message's stable head as its own block
+- feat(anthropic): 1-hour TTL for the tools and system cache breakpoints
+
+### Other
+
+- docs(anthropic): document ANTHROPIC_PREFIX_CACHE_TTL
+
+
 ## [0.41.0] — 2026-10-27
 
 ### Added
