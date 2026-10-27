@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.0] — 2026-10-27
+
+### Added
+
+- feat(anthropic): count a request's input tokens with count_tokens
+
+
 ## [0.40.1] — 2026-10-27
 
 ### Fixed
