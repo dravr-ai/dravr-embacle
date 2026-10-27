@@ -30,6 +30,7 @@ mod pricing;
 mod pricing_provider_keys;
 mod process_kill_on_drop;
 mod quota_store_redis;
+mod request_model;
 mod scenario_tests;
 mod stateless_runners;
 mod stream_deadline;

@@ -58,16 +58,11 @@ impl CodexCliRunner {
     }
 
     /// Build the base command with common arguments
-    fn build_command(&self, prompt: &str) -> Command {
+    fn build_command(&self, prompt: &str, requested_model: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
         cmd.args(["exec", prompt, "--json", "--full-auto"]);
 
-        let model = self
-            .base
-            .config
-            .model
-            .as_deref()
-            .unwrap_or_else(|| self.base.default_model());
+        let model = self.base.model_for(requested_model);
         cmd.args(["-m", model]);
 
         for arg in &self.base.config.extra_args {
@@ -168,7 +163,7 @@ impl LlmProvider for CodexCliRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
-        let mut cmd = self.build_command(prompt);
+        let mut cmd = self.build_command(prompt, request.model.as_deref());
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "codex")?;
@@ -180,7 +175,7 @@ impl LlmProvider for CodexCliRunner {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
-        let mut cmd = self.build_command(prompt);
+        let mut cmd = self.build_command(prompt, request.model.as_deref());
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

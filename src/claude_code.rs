@@ -346,6 +346,7 @@ impl ClaudeCodeRunner {
         max_tokens: Option<u32>,
         mcp_servers: &[McpServerConfig],
         mcp_config: Option<&Path>,
+        model: &str,
     ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
         cmd.stdin(Stdio::piped());
@@ -367,7 +368,7 @@ impl ClaudeCodeRunner {
             cmd.args(["--system-prompt", sys]);
         }
 
-        cmd.args(["--model", self.sent_model()]);
+        cmd.args(["--model", model]);
 
         // `--strict-mcp-config` is a boolean flag: it confines the session to
         // the servers named on this command line, so a developer's own
@@ -486,15 +487,6 @@ impl ClaudeCodeRunner {
         Some(RunnerError::external_service("claude-code", message))
     }
 
-    /// The model passed as `--model`: the configured one, else the default.
-    fn sent_model(&self) -> &str {
-        self.base
-            .config
-            .model
-            .as_deref()
-            .unwrap_or_else(|| self.base.default_model())
-    }
-
     /// Turn a parsed result document into the response, or its classified failure.
     ///
     /// The response names the model the CLI reports it ran (`modelUsage`),
@@ -604,6 +596,7 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
+        let sent_model = self.base.model_for(request.model.as_deref());
         // Removed when it drops, after the child has exited.
         let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
@@ -612,11 +605,12 @@ impl LlmProvider for ClaudeCodeRunner {
             request.max_tokens,
             &request.mcp_servers,
             mcp_config.as_deref(),
+            sent_model,
         );
 
         debug!(
             binary = %self.base.config.binary_path.display(),
-            model = self.sent_model(),
+            model = sent_model,
             has_system_prompt = system.is_some(),
             prompt_len = prompt.len(),
             "Spawning claude CLI"
@@ -648,7 +642,7 @@ impl LlmProvider for ClaudeCodeRunner {
         if output.exit_code != 0 && !parsed.is_error {
             self.base.check_exit_code(&output, "claude-code")?;
         }
-        Self::response_from(parsed, self.sent_model())
+        Self::response_from(parsed, sent_model)
     }
 
     #[instrument(skip_all, fields(runner = "claude_code"))]
@@ -657,6 +651,7 @@ impl LlmProvider for ClaudeCodeRunner {
         let prepared = prepare_user_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
 
+        let sent_model = self.base.model_for(request.model.as_deref());
         // Held by the stream, so it outlives the child that reads it.
         let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
@@ -665,6 +660,7 @@ impl LlmProvider for ClaudeCodeRunner {
             request.max_tokens,
             &request.mcp_servers,
             mcp_config.as_deref(),
+            sent_model,
         );
 
         cmd.stdout(Stdio::piped());
@@ -888,7 +884,7 @@ mod tests {
                 .with_env(OAUTH_TOKEN_KEY, "sk-ant-oat-2")
                 .with_env(API_KEY_KEY, "sk-ant-api"),
         );
-        let cmd = runner.build_command(None, "json", None, &[], None);
+        let cmd = runner.build_command(None, "json", None, &[], None, "opus");
         // After the sandbox's env_clear a removal is an absence, not an entry.
         let envs: Vec<_> = cmd.as_std().get_envs().collect();
         let set: Vec<_> = envs

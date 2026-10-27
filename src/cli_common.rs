@@ -68,6 +68,27 @@ impl CliRunnerBase {
         &self.default_model
     }
 
+    /// The model to run a request on: the request's, else the configured
+    /// one, else the runner default.
+    ///
+    /// The request comes first because one runner instance serves every
+    /// caller in the process, so a model fixed at construction cannot answer
+    /// a caller that names another. Reading only the config ran every
+    /// Claude Code turn on `opus` whatever the request named.
+    pub fn model_for<'a>(&'a self, requested: Option<&'a str>) -> &'a str {
+        requested
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&self.default_model)
+    }
+
+    /// The model to pin for runners that leave the choice to the CLI when
+    /// nobody names one: the request's, else the configured one, else `None`.
+    pub fn explicit_model<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
+        requested
+            .filter(|m| !m.is_empty())
+            .or(self.config.model.as_deref())
+    }
+
     /// Get the list of available models
     pub fn available_models(&self) -> &[String] {
         &self.available_models
@@ -218,7 +239,40 @@ macro_rules! delegate_provider_base {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_diagnostic_stream;
+    use std::path::PathBuf;
+
+    use super::{pick_diagnostic_stream, CliRunnerBase};
+    use crate::config::RunnerConfig;
+
+    fn base(configured: Option<&str>) -> CliRunnerBase {
+        let mut config = RunnerConfig::new(PathBuf::from("cli"));
+        if let Some(model) = configured {
+            config = config.with_model(model);
+        }
+        CliRunnerBase::new(config, "opus", &["opus", "haiku"])
+    }
+
+    #[test]
+    fn the_request_model_wins_over_config_and_default() {
+        assert_eq!(base(None).model_for(Some("haiku")), "haiku");
+        assert_eq!(base(Some("sonnet")).model_for(Some("haiku")), "haiku");
+        assert_eq!(
+            base(Some("sonnet")).explicit_model(Some("haiku")),
+            Some("haiku")
+        );
+    }
+
+    #[test]
+    fn no_request_model_falls_back_to_config_then_default() {
+        assert_eq!(base(Some("sonnet")).model_for(None), "sonnet");
+        assert_eq!(base(None).model_for(None), "opus");
+        assert_eq!(base(None).model_for(Some("")), "opus");
+        assert_eq!(
+            base(Some("sonnet")).explicit_model(Some("")),
+            Some("sonnet")
+        );
+        assert_eq!(base(None).explicit_model(None), None);
+    }
 
     #[test]
     fn prefers_stderr_when_both_present() {

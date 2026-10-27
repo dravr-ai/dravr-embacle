@@ -54,7 +54,7 @@ impl KiroCliRunner {
     }
 
     /// Build the command with all arguments
-    fn build_command(&self, prompt: &str) -> Command {
+    fn build_command(&self, prompt: &str, requested_model: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
         cmd.args([
             "chat",
@@ -64,7 +64,7 @@ impl KiroCliRunner {
             "--trust-all-tools",
         ]);
 
-        if let Some(model) = self.base.config.model.as_deref() {
+        if let Some(model) = self.base.explicit_model(requested_model) {
             cmd.args(["--model", model]);
         }
 
@@ -169,7 +169,7 @@ impl LlmProvider for KiroCliRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
-        let mut cmd = self.build_command(prompt);
+        let mut cmd = self.build_command(prompt, request.model.as_deref());
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "kiro")?;

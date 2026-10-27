@@ -67,19 +67,19 @@ impl CursorAgentRunner {
     }
 
     /// Build the base command with common arguments
-    fn build_command(&self, prompt: &str, output_format: &str) -> Command {
+    fn build_command(
+        &self,
+        prompt: &str,
+        output_format: &str,
+        requested_model: Option<&str>,
+    ) -> Command {
         let mut cmd = Command::new(&self.base.config.binary_path);
         cmd.args(["-p", prompt, "--output-format", output_format]);
 
         // Cursor Agent always gets --approve-mcps
         cmd.arg("--approve-mcps");
 
-        let model = self
-            .base
-            .config
-            .model
-            .as_deref()
-            .unwrap_or_else(|| self.base.default_model());
+        let model = self.base.model_for(requested_model);
         cmd.args(["--model", model]);
 
         for arg in &self.base.config.extra_args {
@@ -147,7 +147,7 @@ impl LlmProvider for CursorAgentRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
-        let mut cmd = self.build_command(prompt, "json");
+        let mut cmd = self.build_command(prompt, "json", request.model.as_deref());
 
         let output = run_cli_command(&mut cmd, self.base.config.timeout, MAX_OUTPUT_BYTES).await?;
         self.base.check_exit_code(&output, "cursor-agent")?;
@@ -159,7 +159,7 @@ impl LlmProvider for CursorAgentRunner {
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let prepared = prepare_prompt(&request.messages)?;
         let prompt = &prepared.prompt;
-        let mut cmd = self.build_command(prompt, "stream-json");
+        let mut cmd = self.build_command(prompt, "stream-json", request.model.as_deref());
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
