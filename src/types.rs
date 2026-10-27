@@ -453,6 +453,16 @@ pub struct ChatMessage {
     /// Function name for tool result messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Byte length of a leading part of `content` that stays the same from
+    /// one request to the next (only meaningful for `System` role)
+    ///
+    /// A provider that caches the prompt per block (Anthropic) sends that
+    /// part as its own cached block, so a change in the rest of the message
+    /// does not rewrite it. Every other provider reads `content` whole, in
+    /// order, exactly as if this were unset. A length that is zero, not
+    /// shorter than `content`, or not on a character boundary is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_prefix_len: Option<usize>,
 }
 
 impl ChatMessage {
@@ -466,6 +476,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            stable_prefix_len: None,
         }
     }
 
@@ -473,6 +484,27 @@ impl ChatMessage {
     #[must_use]
     pub fn system(content: impl Into<String>) -> Self {
         Self::new(MessageRole::System, content)
+    }
+
+    /// Mark the first `len` bytes of `content` as the part that stays the
+    /// same between requests (see [`ChatMessage::stable_prefix_len`])
+    #[must_use]
+    pub const fn with_stable_prefix_len(mut self, len: usize) -> Self {
+        self.stable_prefix_len = Some(len);
+        self
+    }
+
+    /// The leading part of `content` that stays the same between requests,
+    /// and the rest, when [`ChatMessage::stable_prefix_len`] names a usable
+    /// split: both parts non-blank, cut on a character boundary
+    #[must_use]
+    pub fn stable_split(&self) -> Option<(&str, &str)> {
+        let len = self.stable_prefix_len?;
+        if len == 0 || len >= self.content.len() || !self.content.is_char_boundary(len) {
+            return None;
+        }
+        let (head, tail) = self.content.split_at(len);
+        (!head.trim().is_empty() && !tail.trim().is_empty()).then_some((head, tail))
     }
 
     /// Create a user message
@@ -491,6 +523,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            stable_prefix_len: None,
         }
     }
 
@@ -514,6 +547,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
+            stable_prefix_len: None,
         }
     }
 }
@@ -1062,7 +1096,29 @@ impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::extract_system_message;
     use serde_json::json;
+
+    #[test]
+    fn a_stable_prefix_is_off_the_wire_unless_set_and_round_trips() {
+        let plain = serde_json::to_value(ChatMessage::system("rules")).expect("serialises"); // Safe: test assertion
+        assert!(plain.get("stable_prefix_len").is_none());
+        let legacy: ChatMessage =
+            serde_json::from_value(json!({"role": "system", "content": "rules"})).expect("parses"); // Safe: test assertion
+        assert_eq!(legacy.stable_prefix_len, None);
+        let marked = ChatMessage::system("head tail").with_stable_prefix_len(4);
+        let back: ChatMessage =
+            serde_json::from_value(serde_json::to_value(&marked).expect("serialises")) // Safe: test assertion
+                .expect("parses"); // Safe: test assertion
+        assert_eq!(back.stable_split(), Some(("head", " tail")));
+    }
+
+    #[test]
+    fn every_reader_of_the_whole_message_sees_it_unchanged() {
+        let marked = ChatMessage::system("head tail").with_stable_prefix_len(4);
+        let messages = [marked, ChatMessage::user("hi")];
+        assert_eq!(extract_system_message(&messages), Some("head tail"));
+    }
 
     #[test]
     fn is_transient_classification() {

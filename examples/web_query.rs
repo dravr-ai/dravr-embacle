@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            stable_prefix_len: None,
         }],
         model: None,
         temperature: None,

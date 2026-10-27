@@ -418,8 +418,9 @@ fn example_for_schema(schema: &Value, depth: usize) -> Value {
 pub fn inject_tool_catalog(messages: &mut Vec<ChatMessage>, catalog: &str) {
     if let Some(system_msg) = messages.first_mut() {
         if system_msg.role == MessageRole::System {
-            let augmented = format!("{}{catalog}", system_msg.content);
-            *system_msg = ChatMessage::system(augmented);
+            // Appended in place: a stable prefix the message names still
+            // covers the same leading bytes.
+            system_msg.content.push_str(catalog);
             return;
         }
     }
@@ -1178,6 +1179,21 @@ And some more text."#;
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("You are a helpful assistant."));
         assert!(messages[0].content.contains("## Tools"));
+    }
+
+    #[test]
+    fn inject_keeps_the_stable_prefix_of_the_system_message() {
+        let mut messages = vec![
+            ChatMessage::system("head tail").with_stable_prefix_len(4),
+            ChatMessage::user("Hello"),
+        ];
+        inject_tool_catalog(&mut messages, "\n\n## Tools");
+        assert_eq!(messages[0].content, "head tail\n\n## Tools");
+        assert_eq!(messages[0].stable_prefix_len, Some(4));
+        assert_eq!(
+            messages[0].stable_split(),
+            Some(("head", " tail\n\n## Tools"))
+        );
     }
 
     #[test]

@@ -157,8 +157,7 @@ pub async fn request_structured_output(
 fn inject_schema_instruction(messages: &mut Vec<ChatMessage>, instruction: &str) {
     if let Some(first) = messages.first_mut() {
         if first.role == MessageRole::System {
-            let augmented = format!("{}{instruction}", first.content);
-            *first = ChatMessage::system(augmented);
+            first.content.push_str(instruction);
             return;
         }
     }

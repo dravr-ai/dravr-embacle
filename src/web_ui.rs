@@ -828,6 +828,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            stable_prefix_len: None,
         }
     }
 
@@ -869,6 +870,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    stable_prefix_len: None,
                 },
                 user_msg("hi"),
             ],

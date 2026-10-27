@@ -104,7 +104,8 @@
 //!
 //! ## Prompt caching
 //!
-//! Three of the four cache breakpoints are used, in render order: the last
+//! Three of the four cache breakpoints are used (four with a stable system
+//! prefix, below), in render order: the last
 //! tool definition (the tools prefix), the last system block (tools +
 //! system), and the request's top-level `cache_control`, which places an
 //! automatic breakpoint on the last cacheable block and moves it forward as
@@ -114,6 +115,15 @@
 //! system blocks and messages are serialized in the caller's order from
 //! structs, never from a map with random order. A prefix under the model's
 //! minimum (512 tokens on the 5.5 family) is simply not cached.
+//!
+//! A system message that names a stable prefix
+//! ([`ChatMessage::stable_prefix_len`]) is sent as two blocks, cut at that
+//! byte, and the head takes the fourth breakpoint: a change in the rest of
+//! the prompt then rewrites only the rest. The cut changes no byte and no
+//! order — the blocks concatenate back to the message — and only the first
+//! such message is cut, which keeps the request at four breakpoints. With a
+//! stable head the last system block is marked at 5 minutes whatever the
+//! prefix TTL, since it is the part that changes between turns.
 //!
 //! The tools and system breakpoints live 5 minutes by default, or 1 hour
 //! with [`AnthropicCacheTtl::OneHour`]: a 1-hour write bills 2× input against
@@ -1117,6 +1127,36 @@ fn text_block(text: &str) -> Option<WireBlock> {
     })
 }
 
+/// An unmarked system text block
+const fn system_block(text: String) -> SystemBlock {
+    SystemBlock {
+        kind: "text",
+        text,
+        cache_control: None,
+    }
+}
+
+/// Append a system message as one block, or as its stable head and the rest
+/// when it names a usable stable prefix and no earlier message took the
+/// head's breakpoint; `stable_head` records the head's index.
+fn push_system(
+    system: &mut Vec<SystemBlock>,
+    stable_head: &mut Option<usize>,
+    message: &ChatMessage,
+) {
+    match message.stable_split() {
+        Some((head, tail)) if stable_head.is_none() => {
+            *stable_head = Some(system.len());
+            system.push(system_block(head.to_owned()));
+            system.push(system_block(tail.to_owned()));
+        }
+        _ if !message.content.trim().is_empty() => {
+            system.push(system_block(message.content.clone()));
+        }
+        _ => {}
+    }
+}
+
 /// The messages of a conversation as Anthropic's `system` and `messages`.
 fn convert_messages(
     messages: &[ChatMessage],
@@ -1128,17 +1168,14 @@ fn convert_messages(
     // answered by a tool_result in the turn that follows it.
     let mut open_calls: Vec<String> = Vec::new();
 
+    // The one stable head that gets a breakpoint of its own: tools, this
+    // head, the last system block and the automatic tail are the four the
+    // API allows.
+    let mut stable_head: Option<usize> = None;
+
     for message in messages {
         match message.role {
-            MessageRole::System => {
-                if !message.content.trim().is_empty() {
-                    system.push(SystemBlock {
-                        kind: "text",
-                        text: message.content.clone(),
-                        cache_control: None,
-                    });
-                }
-            }
+            MessageRole::System => push_system(&mut system, &mut stable_head, message),
             MessageRole::User => {
                 let mut blocks: Vec<WireBlock> = message
                     .images
@@ -1197,8 +1234,21 @@ fn convert_messages(
         }
     }
 
-    if let Some(last) = system.last_mut() {
-        last.cache_control = Some(prefix_marker);
+    match stable_head {
+        // The stable head lives as long as the tools; the blocks after it
+        // change from turn to turn, so the last one is written at the
+        // 5-minute rate rather than at 2x for an hour nobody reads.
+        Some(head) => {
+            system[head].cache_control = Some(prefix_marker);
+            if let Some(last) = system.last_mut() {
+                last.cache_control = Some(EPHEMERAL);
+            }
+        }
+        None => {
+            if let Some(last) = system.last_mut() {
+                last.cache_control = Some(prefix_marker);
+            }
+        }
     }
     pair_tool_blocks(&mut turns);
     for turn in &mut turns {
@@ -2537,6 +2587,96 @@ mod tests {
         )))
         .expect("serialises"); // Safe: test assertion
         assert_eq!(count["system"][1]["cache_control"], one_hour);
+    }
+
+    #[test]
+    fn a_stable_prefix_is_its_own_block_cached_with_the_tools_and_the_rest_at_five_minutes() {
+        let prompt = "contract and persona\n\nfollowups and plan";
+        let head_len = "contract and persona".len();
+        let request = ChatRequest::new(vec![
+            ChatMessage::system(prompt).with_stable_prefix_len(head_len),
+            ChatMessage::user("hi"),
+        ])
+        .with_tools(vec![weather_tool("a"), weather_tool("b")]);
+        let config = AnthropicConfig::new("k").with_prefix_cache_ttl(AnthropicCacheTtl::OneHour);
+        let body = body_json(&config, &request);
+        let one_hour = json!({"type": "ephemeral", "ttl": "1h"});
+        let five_minutes = json!({"type": "ephemeral"});
+
+        let system = body["system"].as_array().expect("system blocks"); // Safe: test assertion
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], "contract and persona");
+        assert_eq!(system[1]["text"], "\n\nfollowups and plan");
+        // Nothing reordered, nothing lost: the blocks concatenate back to the
+        // message every other provider reads.
+        let joined: String = system
+            .iter()
+            .map(|b| b["text"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(joined, prompt);
+
+        assert_eq!(body["tools"][1]["cache_control"], one_hour);
+        assert_eq!(system[0]["cache_control"], one_hour);
+        assert_eq!(system[1]["cache_control"], five_minutes);
+        assert_eq!(body["cache_control"], five_minutes);
+        let breakpoints = serde_json::to_string(&body)
+            .expect("serialises") // Safe: test assertion
+            .matches("\"cache_control\"")
+            .count();
+        assert_eq!(
+            breakpoints, 4,
+            "tools, stable head, last system block and the tail: the API's limit"
+        );
+
+        let count = serde_json::to_value(CountTokensRequest::from(build_body(
+            &config, &request, false,
+        )))
+        .expect("serialises"); // Safe: test assertion
+        assert_eq!(count["system"][0]["cache_control"], one_hour);
+        assert_eq!(count["system"][1]["cache_control"], five_minutes);
+    }
+
+    #[test]
+    fn only_the_first_stable_prefix_gets_a_breakpoint() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("head one tail one").with_stable_prefix_len(8),
+            ChatMessage::system("head two tail two").with_stable_prefix_len(8),
+            ChatMessage::user("hi"),
+        ])
+        .with_tools(vec![weather_tool("a")]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        let texts: Vec<&str> = body["system"]
+            .as_array()
+            .expect("system blocks") // Safe: test assertion
+            .iter()
+            .map(|b| b["text"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(texts, ["head one", " tail one", "head two tail two"]);
+        let breakpoints = serde_json::to_string(&body)
+            .expect("serialises") // Safe: test assertion
+            .matches("\"cache_control\"")
+            .count();
+        assert_eq!(breakpoints, 4);
+    }
+
+    #[test]
+    fn an_unusable_stable_prefix_leaves_one_block() {
+        for len in [0, 3, 100, "café".len() - 1] {
+            let request = ChatRequest::new(vec![
+                ChatMessage::system("café").with_stable_prefix_len(len),
+                ChatMessage::user("hi"),
+            ]);
+            let body = body_json(&AnthropicConfig::new("k"), &request);
+            let system = body["system"].as_array().expect("system blocks"); // Safe: test assertion
+            if len == 3 {
+                // "caf" | "é": a valid cut, both halves non-blank.
+                assert_eq!(system.len(), 2, "len {len}");
+            } else {
+                assert_eq!(system.len(), 1, "len {len}");
+                assert_eq!(system[0]["text"], "café");
+                assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
+            }
+        }
     }
 
     #[test]
