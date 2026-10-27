@@ -73,8 +73,7 @@ impl CliRunnerBase {
     ///
     /// The request comes first because one runner instance serves every
     /// caller in the process, so a model fixed at construction cannot answer
-    /// a caller that names another. Reading only the config ran every
-    /// Claude Code turn on `opus` whatever the request named.
+    /// a caller that names another. An empty request model counts as unnamed.
     pub fn model_for<'a>(&'a self, requested: Option<&'a str>) -> &'a str {
         requested
             .filter(|m| !m.is_empty())
@@ -83,6 +82,7 @@ impl CliRunnerBase {
 
     /// The model to pin for runners that leave the choice to the CLI when
     /// nobody names one: the request's, else the configured one, else `None`.
+    /// An empty request model counts as unnamed.
     pub fn explicit_model<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
         requested
             .filter(|m| !m.is_empty())
@@ -254,24 +254,50 @@ mod tests {
 
     #[test]
     fn the_request_model_wins_over_config_and_default() {
-        assert_eq!(base(None).model_for(Some("haiku")), "haiku");
-        assert_eq!(base(Some("sonnet")).model_for(Some("haiku")), "haiku");
+        assert_eq!(
+            base(None).model_for(Some("haiku")),
+            "haiku",
+            "bug: model_for ignored the requested model over the runner default"
+        );
+        assert_eq!(
+            base(Some("sonnet")).model_for(Some("haiku")),
+            "haiku",
+            "bug: model_for let the configured model override the requested one"
+        );
         assert_eq!(
             base(Some("sonnet")).explicit_model(Some("haiku")),
-            Some("haiku")
+            Some("haiku"),
+            "bug: explicit_model let the configured model override the requested one"
         );
     }
 
     #[test]
     fn no_request_model_falls_back_to_config_then_default() {
-        assert_eq!(base(Some("sonnet")).model_for(None), "sonnet");
-        assert_eq!(base(None).model_for(None), "opus");
-        assert_eq!(base(None).model_for(Some("")), "opus");
+        assert_eq!(
+            base(Some("sonnet")).model_for(None),
+            "sonnet",
+            "bug: model_for skipped the configured model"
+        );
+        assert_eq!(
+            base(None).model_for(None),
+            "opus",
+            "bug: model_for skipped the runner default"
+        );
+        assert_eq!(
+            base(None).model_for(Some("")),
+            "opus",
+            "bug: model_for passed an empty requested model through"
+        );
         assert_eq!(
             base(Some("sonnet")).explicit_model(Some("")),
-            Some("sonnet")
+            Some("sonnet"),
+            "bug: explicit_model passed an empty requested model through"
         );
-        assert_eq!(base(None).explicit_model(None), None);
+        assert_eq!(
+            base(None).explicit_model(None),
+            None,
+            "bug: explicit_model pinned a model nobody named"
+        );
     }
 
     #[test]

@@ -229,10 +229,9 @@ impl CopilotRunner {
     /// Priority: request-level override → config-level override → `None`
     /// (meaning: let the Copilot CLI pick the account's entitled default).
     fn resolve_model(&self, request: &ChatRequest) -> Option<String> {
-        request
-            .model
-            .clone()
-            .or_else(|| self.base.config.model.clone())
+        self.base
+            .explicit_model(request.model.as_deref())
+            .map(str::to_owned)
     }
 
     /// Map a non-zero CLI exit into a typed error, detecting model-availability failures.

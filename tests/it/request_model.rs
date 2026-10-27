@@ -5,13 +5,12 @@
 // Copyright (c) 2026 dravr.ai
 
 //! One runner instance serves every caller in a process, so the model has to
-//! travel with the request. Until 0.40.0 the CLI runners built their model
-//! flag from `RunnerConfig::model` alone: a request naming `haiku` logged
-//! `haiku` and ran Claude Code on `opus`, and embacle-server, which sets the
-//! model only on the request, could not choose one at all.
+//! travel with the request: a request's model wins over `RunnerConfig::model`,
+//! which wins over the runner default. Callers such as embacle-server set the
+//! model only on the request, so this precedence is how they choose one.
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -89,10 +88,14 @@ async fn claude_code_runs_the_requested_model_and_names_it() {
 
     assert_eq!(
         flag_value(dir.path(), "--model").as_deref(),
-        Some(REQUESTED)
+        Some(REQUESTED),
+        "bug: claude-code ignored the requested model"
     );
     // No `modelUsage` in the document: the response names what was sent.
-    assert_eq!(response.model, REQUESTED);
+    assert_eq!(
+        response.model, REQUESTED,
+        "bug: claude-code named a model other than the one it sent"
+    );
 }
 
 #[tokio::test]
@@ -108,7 +111,8 @@ async fn claude_code_stream_runs_the_requested_model() {
 
     assert_eq!(
         flag_value(dir.path(), "--model").as_deref(),
-        Some(REQUESTED)
+        Some(REQUESTED),
+        "bug: claude-code streaming ignored the requested model"
     );
 }
 
@@ -121,7 +125,8 @@ async fn claude_code_without_a_requested_model_runs_the_configured_one() {
 
     assert_eq!(
         flag_value(dir.path(), "--model").as_deref(),
-        Some(CONFIGURED)
+        Some(CONFIGURED),
+        "bug: claude-code dropped the configured model"
     );
 }
 
@@ -132,39 +137,61 @@ async fn claude_code_without_any_model_runs_its_default() {
 
     run(&runner, None).await;
 
-    assert_eq!(flag_value(dir.path(), "--model").as_deref(), Some("opus"));
+    assert_eq!(
+        flag_value(dir.path(), "--model").as_deref(),
+        Some("opus"),
+        "bug: claude-code did not fall back to its default model"
+    );
 }
 
 /// Builds one runner from its config.
 type BuildRunner = fn(RunnerConfig) -> Box<dyn LlmProvider>;
 
-/// Every other CLI runner that pins a model, with the flag it pins it by.
+/// Every other CLI runner that pins a model, with the flag it pins it by and
+/// what it pins when neither the request nor the config names one: its own
+/// default, or nothing for the runners that leave the choice to the CLI.
 #[tokio::test]
 async fn every_cli_runner_passes_the_requested_model() {
-    let cases: Vec<(&str, &str, BuildRunner)> = vec![
-        ("codex", "-m", |c| Box::new(CodexCliRunner::new(c))),
-        ("cursor-agent", "--model", |c| {
+    let cases: Vec<(&str, &str, Option<&str>, BuildRunner)> = vec![
+        ("codex", "-m", Some("o4-mini"), |c| {
+            Box::new(CodexCliRunner::new(c))
+        }),
+        ("cursor-agent", "--model", Some("sonnet-4"), |c| {
             Box::new(CursorAgentRunner::new(c))
         }),
-        ("gemini", "-m", |c| Box::new(GeminiCliRunner::new(c))),
-        ("kilo", "--model", |c| Box::new(KiloCliRunner::new(c))),
-        ("opencode", "--model", |c| Box::new(OpenCodeRunner::new(c))),
-        ("warp", "--model", |c| Box::new(WarpCliRunner::new(c))),
-        ("cline", "-m", |c| Box::new(ClineCliRunner::new(c))),
-        ("continue", "--model", |c| {
+        ("gemini", "-m", Some("gemini-2.5-flash"), |c| {
+            Box::new(GeminiCliRunner::new(c))
+        }),
+        (
+            "kilo",
+            "--model",
+            Some("anthropic/claude-sonnet-4-6"),
+            |c| Box::new(KiloCliRunner::new(c)),
+        ),
+        (
+            "opencode",
+            "--model",
+            Some("github-copilot/claude-sonnet-4.6"),
+            |c| Box::new(OpenCodeRunner::new(c)),
+        ),
+        ("warp", "--model", Some("auto"), |c| {
+            Box::new(WarpCliRunner::new(c))
+        }),
+        ("cline", "-m", None, |c| Box::new(ClineCliRunner::new(c))),
+        ("continue", "--model", None, |c| {
             Box::new(ContinueCliRunner::new(c))
         }),
-        ("kiro", "--model", |c| Box::new(KiroCliRunner::new(c))),
+        ("kiro", "--model", None, |c| Box::new(KiroCliRunner::new(c))),
     ];
 
-    for (name, flag, build) in cases {
+    for (name, flag, unnamed, build) in cases {
         let dir = tempfile::tempdir().unwrap();
         let runner = build(configured(dir.path(), "{}"));
         run(runner.as_ref(), Some(REQUESTED)).await;
         assert_eq!(
             flag_value(dir.path(), flag).as_deref(),
             Some(REQUESTED),
-            "{name} ignored the requested model"
+            "bug: {name} ignored the requested model"
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -173,7 +200,16 @@ async fn every_cli_runner_passes_the_requested_model() {
         assert_eq!(
             flag_value(dir.path(), flag).as_deref(),
             Some(CONFIGURED),
-            "{name} dropped the configured model"
+            "bug: {name} dropped the configured model"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let runner = build(RunnerConfig::new(fake_cli(dir.path(), "{}")));
+        run(runner.as_ref(), None).await;
+        assert_eq!(
+            flag_value(dir.path(), flag).as_deref(),
+            unnamed,
+            "bug: {name} pinned the wrong model when none was named"
         );
     }
 }
