@@ -295,6 +295,8 @@ fn accumulate_usage(total: &mut TokenUsage, turn: &TokenUsage) {
     total.total_tokens = total.total_tokens.saturating_add(turn.total_tokens);
     total.cached_read_tokens = add_reported(total.cached_read_tokens, turn.cached_read_tokens);
     total.cached_write_tokens = add_reported(total.cached_write_tokens, turn.cached_write_tokens);
+    total.cached_write_1h_tokens =
+        add_reported(total.cached_write_1h_tokens, turn.cached_write_1h_tokens);
     total.reasoning_tokens = add_reported(total.reasoning_tokens, turn.reasoning_tokens);
 }
 

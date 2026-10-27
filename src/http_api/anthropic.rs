@@ -21,6 +21,8 @@
 //!   `output_config.effort`; unset leaves the model's default
 //! - `ANTHROPIC_THINKING`: `adaptive` | `disabled`; unset sends no `thinking`
 //!   field (see [Thinking](#thinking))
+//! - `ANTHROPIC_PREFIX_CACHE_TTL`: `5m` (default) | `1h`, the lifetime of the
+//!   tools and system cache breakpoints (see [Prompt caching](#prompt-caching))
 //! - `ANTHROPIC_MAX_RETRIES`, `ANTHROPIC_INITIAL_RETRY_DELAY_MS`,
 //!   `ANTHROPIC_MAX_RETRY_DELAY_MS`: retry tuning (defaults 3 / 500 / 5000)
 //!
@@ -112,6 +114,16 @@
 //! system blocks and messages are serialized in the caller's order from
 //! structs, never from a map with random order. A prefix under the model's
 //! minimum (512 tokens on the 5.5 family) is simply not cached.
+//!
+//! The tools and system breakpoints live 5 minutes by default, or 1 hour
+//! with [`AnthropicCacheTtl::OneHour`]: a 1-hour write bills 2× input against
+//! 1.25×, and pays back on the first read once requests sharing the prefix
+//! arrive more than 5 minutes apart — a chat whose turns are minutes apart
+//! otherwise rewrites its whole prefix every turn. The automatic tail stays
+//! at 5 minutes, because Anthropic requires every 1-hour entry to come before
+//! any 5-minute one in render order and the tail is always last. The 1-hour
+//! share of a write is reported apart (`usage.cache_creation`) and carried on
+//! [`TokenUsage::cached_write_1h_tokens`] so pricing bills it at its own rate.
 //!
 //! ## Responses
 //!
@@ -238,6 +250,9 @@ const ANTHROPIC_EFFORT_ENV: &str = "ANTHROPIC_EFFORT";
 
 /// Environment variable for the `thinking` mode
 const ANTHROPIC_THINKING_ENV: &str = "ANTHROPIC_THINKING";
+
+/// Environment variable for the TTL of the tools and system cache breakpoints
+pub const ANTHROPIC_PREFIX_CACHE_TTL_ENV: &str = "ANTHROPIC_PREFIX_CACHE_TTL";
 
 /// Prefix of the retry-tuning environment variables
 const ANTHROPIC_ENV_PREFIX: &str = "ANTHROPIC";
@@ -378,6 +393,48 @@ impl AnthropicThinking {
     }
 }
 
+/// How long the stable-prefix cache entries (the tools and system
+/// breakpoints) live. The conversation-tail breakpoint is always 5 minutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnthropicCacheTtl {
+    /// `{"type": "ephemeral"}`: 5 minutes, written at 1.25× input
+    #[default]
+    FiveMinutes,
+    /// `{"type": "ephemeral", "ttl": "1h"}`: 1 hour, written at 2× input.
+    /// Pays back on the first read; the choice when requests sharing the
+    /// prefix arrive more than 5 minutes apart.
+    OneHour,
+}
+
+impl AnthropicCacheTtl {
+    /// The wire value (`5m` or `1h`)
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+
+    /// Parse a wire value, case-insensitively
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "5m" => Some(Self::FiveMinutes),
+            "1h" => Some(Self::OneHour),
+            _ => None,
+        }
+    }
+
+    /// The `cache_control` marker this TTL sends
+    const fn marker(self) -> CacheControl {
+        match self {
+            Self::FiveMinutes => EPHEMERAL,
+            Self::OneHour => EPHEMERAL_1H,
+        }
+    }
+}
+
 /// Configuration for the Anthropic provider.
 #[derive(Clone)]
 pub struct AnthropicConfig {
@@ -393,6 +450,8 @@ pub struct AnthropicConfig {
     pub effort: Option<AnthropicEffort>,
     /// `thinking`; `None` sends no field, so the model's default applies
     pub thinking: Option<AnthropicThinking>,
+    /// TTL of the tools and system cache breakpoints
+    pub prefix_cache_ttl: AnthropicCacheTtl,
     /// HTTP request timeout for a client the provider builds itself
     pub timeout: Duration,
     /// Retry policy for transient failures (502, 503, 529, network errors); a
@@ -411,6 +470,7 @@ impl AnthropicConfig {
             max_tokens: DEFAULT_MAX_TOKENS,
             effort: None,
             thinking: None,
+            prefix_cache_ttl: AnthropicCacheTtl::FiveMinutes,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             retry: HttpRetryConfig::default(),
         }
@@ -494,6 +554,16 @@ impl AnthropicConfig {
                 })
             })
             .transpose()?;
+        let prefix_cache_ttl = env_value(ANTHROPIC_PREFIX_CACHE_TTL_ENV)
+            .map(|raw| {
+                AnthropicCacheTtl::parse(&raw).ok_or_else(|| {
+                    RunnerError::config(format!(
+                        "{ANTHROPIC_PREFIX_CACHE_TTL_ENV} must be 5m or 1h; got {raw:?}"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(defaults.prefix_cache_ttl);
         if thinking == Some(AnthropicThinking::Disabled)
             && matches!(effort, Some(AnthropicEffort::XHigh | AnthropicEffort::Max))
         {
@@ -507,6 +577,7 @@ impl AnthropicConfig {
             max_tokens,
             effort,
             thinking,
+            prefix_cache_ttl,
             retry: HttpRetryConfig::from_env(ANTHROPIC_ENV_PREFIX),
             api_key: defaults.api_key,
             timeout: defaults.timeout,
@@ -548,6 +619,13 @@ impl AnthropicConfig {
         self
     }
 
+    /// Set the TTL of the tools and system cache breakpoints
+    #[must_use]
+    pub const fn with_prefix_cache_ttl(mut self, ttl: AnthropicCacheTtl) -> Self {
+        self.prefix_cache_ttl = ttl;
+        self
+    }
+
     /// Set the request timeout
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -572,6 +650,7 @@ impl Debug for AnthropicConfig {
             .field("max_tokens", &self.max_tokens)
             .field("effort", &self.effort)
             .field("thinking", &self.thinking)
+            .field("prefix_cache_ttl", &self.prefix_cache_ttl)
             .field("timeout", &self.timeout)
             .field("retry", &self.retry)
             .finish()
@@ -613,15 +692,28 @@ fn numbered_api_keys(lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
 // Wire types: request
 // ============================================================================
 
-/// A `cache_control` marker. Only the 5-minute `ephemeral` kind is sent.
+/// A `cache_control` marker: `ephemeral`, with no `ttl` (5 minutes) or `1h`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 /// The 5-minute ephemeral cache breakpoint
-const EPHEMERAL: CacheControl = CacheControl { kind: "ephemeral" };
+const EPHEMERAL: CacheControl = CacheControl {
+    kind: "ephemeral",
+    ttl: None,
+};
+
+/// The 1-hour ephemeral cache breakpoint. Anthropic requires a longer-lived
+/// entry to come before a shorter one, so it is only ever placed on the tools
+/// and system breakpoints, ahead of the 5-minute conversation tail.
+const EPHEMERAL_1H: CacheControl = CacheControl {
+    kind: "ephemeral",
+    ttl: Some("1h"),
+};
 
 /// `POST /v1/messages` body. Field order is the serialization order.
 #[derive(Debug, Serialize)]
@@ -827,6 +919,16 @@ struct WireUsage {
     cache_read: Option<u32>,
     #[serde(rename = "cache_creation_input_tokens", default)]
     cache_creation: Option<u32>,
+    /// `cache_creation_input_tokens` broken down by TTL
+    #[serde(rename = "cache_creation", default)]
+    cache_creation_by_ttl: Option<WireCacheCreation>,
+}
+
+/// `usage.cache_creation`: the cache write split by entry lifetime
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+struct WireCacheCreation {
+    #[serde(rename = "ephemeral_1h_input_tokens", default)]
+    one_hour: Option<u32>,
 }
 
 /// A streaming event, dispatched on its JSON `type`. Every field is
@@ -1016,7 +1118,10 @@ fn text_block(text: &str) -> Option<WireBlock> {
 }
 
 /// The messages of a conversation as Anthropic's `system` and `messages`.
-fn convert_messages(messages: &[ChatMessage]) -> (Vec<SystemBlock>, Vec<WireMessage>) {
+fn convert_messages(
+    messages: &[ChatMessage],
+    prefix_marker: CacheControl,
+) -> (Vec<SystemBlock>, Vec<WireMessage>) {
     let mut system: Vec<SystemBlock> = Vec::new();
     let mut turns: Vec<WireMessage> = Vec::new();
     // The tool calls of the most recent assistant turn: only these may be
@@ -1093,7 +1198,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<SystemBlock>, Vec<WireMess
     }
 
     if let Some(last) = system.last_mut() {
-        last.cache_control = Some(EPHEMERAL);
+        last.cache_control = Some(prefix_marker);
     }
     pair_tool_blocks(&mut turns);
     for turn in &mut turns {
@@ -1200,7 +1305,7 @@ fn push_turn(turns: &mut Vec<WireMessage>, role: &'static str, blocks: Vec<WireB
 }
 
 /// Tool definitions, the last one carrying the tools-prefix cache breakpoint
-fn convert_tools(tools: &[ToolDefinition]) -> Vec<WireTool> {
+fn convert_tools(tools: &[ToolDefinition], prefix_marker: CacheControl) -> Vec<WireTool> {
     let mut wire: Vec<WireTool> = tools
         .iter()
         .map(|tool| WireTool {
@@ -1214,7 +1319,7 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<WireTool> {
         })
         .collect();
     if let Some(last) = wire.last_mut() {
-        last.cache_control = Some(EPHEMERAL);
+        last.cache_control = Some(prefix_marker);
     }
     wire
 }
@@ -1240,11 +1345,12 @@ fn build_body(config: &AnthropicConfig, request: &ChatRequest, stream: bool) -> 
         .model
         .clone()
         .unwrap_or_else(|| config.model.clone());
-    let (system, messages) = convert_messages(&request.messages);
+    let prefix_marker = config.prefix_cache_ttl.marker();
+    let (system, messages) = convert_messages(&request.messages, prefix_marker);
     let tools = request
         .tools
         .as_deref()
-        .map(convert_tools)
+        .map(|tools| convert_tools(tools, prefix_marker))
         .unwrap_or_default();
     let tool_choice =
         (!tools.is_empty()).then(|| convert_tool_choice(request.tool_choice.as_ref(), &model));
@@ -1307,6 +1413,7 @@ fn gross_usage(usage: WireUsage) -> TokenUsage {
     let output = usage.output.unwrap_or(0);
     TokenUsage::new(prompt, output, prompt.saturating_add(output))
         .with_cache(usage.cache_read, usage.cache_creation)
+        .with_cache_write_1h(usage.cache_creation_by_ttl.and_then(|split| split.one_hour))
 }
 
 /// A parsed response as a [`ChatResponse`]
@@ -1693,6 +1800,7 @@ fn overlay_usage(base: Option<WireUsage>, update: WireUsage) -> WireUsage {
         output: update.output.or(base.output),
         cache_read: update.cache_read.or(base.cache_read),
         cache_creation: update.cache_creation.or(base.cache_creation),
+        cache_creation_by_ttl: update.cache_creation_by_ttl.or(base.cache_creation_by_ttl),
     }
 }
 
@@ -2403,6 +2511,80 @@ mod tests {
             first, second,
             "the cached prefix must be byte-identical between calls"
         );
+    }
+
+    #[test]
+    fn a_one_hour_prefix_ttl_marks_tools_and_system_and_leaves_the_tail_at_five_minutes() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::system("rules"),
+            ChatMessage::user("hi"),
+        ])
+        .with_tools(vec![weather_tool("a"), weather_tool("b")]);
+        let config = AnthropicConfig::new("k").with_prefix_cache_ttl(AnthropicCacheTtl::OneHour);
+        let body = body_json(&config, &request);
+        let one_hour = json!({"type": "ephemeral", "ttl": "1h"});
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"], one_hour);
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert_eq!(body["system"][1]["cache_control"], one_hour);
+        // A 1-hour entry must precede every 5-minute one: the 5-minute
+        // automatic tail lands after both 1-hour markers in render order.
+        assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
+        // count_tokens takes the same blocks, markers included.
+        let count = serde_json::to_value(CountTokensRequest::from(build_body(
+            &config, &request, false,
+        )))
+        .expect("serialises"); // Safe: test assertion
+        assert_eq!(count["system"][1]["cache_control"], one_hour);
+    }
+
+    #[test]
+    fn the_default_prefix_ttl_sends_no_ttl_field() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user("hi"),
+        ])
+        .with_tools(vec![weather_tool("a")]);
+        let wire = serde_json::to_string(&body_json(&AnthropicConfig::new("k"), &request))
+            .expect("serialises"); // Safe: test assertion
+        assert!(!wire.contains("\"ttl\""), "{wire}");
+    }
+
+    #[test]
+    fn the_one_hour_share_of_a_cache_write_is_carried_on_the_usage() {
+        let usage: WireUsage = serde_json::from_value(json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 9000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 8000}
+        }))
+        .expect("parses"); // Safe: test assertion
+        let usage = gross_usage(usage);
+        assert_eq!(usage.prompt_tokens, 9010);
+        assert_eq!(usage.cached_write_tokens, Some(9000));
+        assert_eq!(usage.cached_write_1h_tokens, Some(8000));
+
+        let without_split: WireUsage =
+            serde_json::from_value(json!({"input_tokens": 1, "cache_creation_input_tokens": 50}))
+                .expect("parses"); // Safe: test assertion
+        assert_eq!(gross_usage(without_split).cached_write_1h_tokens, None);
+    }
+
+    #[test]
+    fn a_streamed_delta_without_the_split_keeps_the_start_events_split() {
+        let start: WireUsage = serde_json::from_value(json!({
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 700,
+            "cache_creation": {"ephemeral_1h_input_tokens": 700}
+        }))
+        .expect("parses"); // Safe: test assertion
+        let delta: WireUsage =
+            serde_json::from_value(json!({"output_tokens": 30})).expect("parses"); // Safe: test assertion
+        let merged = gross_usage(overlay_usage(Some(start), delta));
+        assert_eq!(merged.cached_write_1h_tokens, Some(700));
+        assert_eq!(merged.completion_tokens, 30);
     }
 
     #[test]
@@ -3305,6 +3487,7 @@ mod tests {
             "ANTHROPIC_MAX_TOKENS",
             "ANTHROPIC_EFFORT",
             "ANTHROPIC_THINKING",
+            "ANTHROPIC_PREFIX_CACHE_TTL",
             "ANTHROPIC_MAX_RETRIES",
         ];
 
@@ -3349,6 +3532,7 @@ mod tests {
                     ("ANTHROPIC_MAX_TOKENS", "4096"),
                     ("ANTHROPIC_EFFORT", "high"),
                     ("ANTHROPIC_THINKING", "adaptive"),
+                    ("ANTHROPIC_PREFIX_CACHE_TTL", "1H"),
                     ("ANTHROPIC_MAX_RETRIES", "1"),
                 ],
                 AnthropicConfig::from_env,
@@ -3360,7 +3544,15 @@ mod tests {
             assert_eq!(config.max_tokens, 4096);
             assert_eq!(config.effort, Some(AnthropicEffort::High));
             assert_eq!(config.thinking, Some(AnthropicThinking::Adaptive));
+            assert_eq!(config.prefix_cache_ttl, AnthropicCacheTtl::OneHour);
             assert_eq!(config.retry.max_retries, 1);
+        }
+
+        #[test]
+        fn the_prefix_cache_ttl_defaults_to_five_minutes() {
+            let config = with_env(&[("ANTHROPIC_API_KEY", "k")], AnthropicConfig::from_env)
+                .expect("valid env"); // Safe: test assertion
+            assert_eq!(config.prefix_cache_ttl, AnthropicCacheTtl::FiveMinutes);
         }
 
         #[test]
@@ -3372,6 +3564,10 @@ mod tests {
                     ("ANTHROPIC_THINKING", "enabled"),
                 ][..],
                 &[("ANTHROPIC_API_KEY", "k"), ("ANTHROPIC_MAX_TOKENS", "0")][..],
+                &[
+                    ("ANTHROPIC_API_KEY", "k"),
+                    ("ANTHROPIC_PREFIX_CACHE_TTL", "24h"),
+                ][..],
                 &[
                     ("ANTHROPIC_API_KEY", "k"),
                     ("ANTHROPIC_THINKING", "disabled"),

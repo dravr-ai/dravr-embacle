@@ -61,7 +61,10 @@ pub mod openrouter;
 /// Line-buffering Server-Sent Events parser shared by every streaming provider.
 pub mod sse;
 
-pub use anthropic::{AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking};
+pub use anthropic::{
+    AnthropicCacheTtl, AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking,
+    ANTHROPIC_PREFIX_CACHE_TTL_ENV,
+};
 pub use cohere::{CohereConfig, CohereProvider};
 pub use gemini::{GeminiConfig, GeminiProvider};
 pub use groq::{GroqConfig, GroqProvider};

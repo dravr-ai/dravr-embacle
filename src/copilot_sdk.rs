@@ -628,6 +628,7 @@ impl TurnAccumulator {
             total_tokens: self.prompt_tokens.saturating_add(self.completion_tokens),
             cached_read_tokens: Some(self.cached_read_tokens),
             cached_write_tokens: Some(self.cached_write_tokens),
+            cached_write_1h_tokens: None,
             reasoning_tokens: Some(self.reasoning_tokens),
         });
         HeadlessToolResponse {

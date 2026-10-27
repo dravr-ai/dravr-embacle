@@ -247,9 +247,10 @@ pub use config_file::{
 // HTTP API provider re-exports (behind feature flag)
 #[cfg(feature = "http-api")]
 pub use http_api::{
-    AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking, CohereConfig,
-    CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
+    AnthropicCacheTtl, AnthropicConfig, AnthropicEffort, AnthropicProvider, AnthropicThinking,
+    CohereConfig, CohereProvider, GeminiConfig, GeminiProvider, GroqConfig, GroqProvider,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenRouterConfig, OpenRouterProvider,
+    ANTHROPIC_PREFIX_CACHE_TTL_ENV,
 };
 
 #[cfg(feature = "web-ui")]

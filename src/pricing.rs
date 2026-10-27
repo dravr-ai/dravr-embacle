@@ -64,6 +64,12 @@ pub struct ModelPricing {
     /// Fraction of `input_per_million` at which cache-write tokens bill.
     #[serde(default = "default_cache_write_rate")]
     pub cache_write_multiplier: f64,
+    /// Fraction of `input_per_million` at which a write to a 1-hour cache
+    /// entry bills (Anthropic 2.0×). `None` bills it at
+    /// [`Self::cache_write_multiplier`], which is right for every provider
+    /// with a single cache lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_multiplier: Option<f64>,
     /// A second rate card for long prompts, when the model has one: a
     /// request whose gross prompt exceeds its threshold bills every token —
     /// input, cache and output — at the long-prompt rates.
@@ -108,6 +114,7 @@ impl ModelPricing {
             output_per_million,
             cache_read_multiplier: DEFAULT_CACHE_READ_RATE,
             cache_write_multiplier: DEFAULT_CACHE_WRITE_RATE,
+            cache_write_1h_multiplier: None,
             long_prompt: None,
         }
     }
@@ -149,6 +156,21 @@ impl ModelPricing {
         self.cache_read_multiplier = read;
         self.cache_write_multiplier = write;
         self
+    }
+
+    /// Bill a write to a 1-hour cache entry at `write_1h` × input, apart
+    /// from the 5-minute [`Self::cache_write_multiplier`] — Anthropic at 2.0.
+    #[must_use]
+    pub const fn with_cache_write_1h_rate(mut self, write_1h: f64) -> Self {
+        self.cache_write_1h_multiplier = Some(write_1h);
+        self
+    }
+
+    /// The multiplier a 1-hour cache write bills at
+    #[must_use]
+    pub fn effective_cache_write_1h_multiplier(&self) -> f64 {
+        self.cache_write_1h_multiplier
+            .unwrap_or(self.cache_write_multiplier)
     }
 }
 
@@ -242,22 +264,28 @@ pub const PRICING_TABLE: &[(&str, &str, ModelPricing)] = &[
     // accounts "anthropic#N" price through pool_family). Cache reads bill at
     // 0.10x input — 0.05x on Opus 5.5 ($0.20/MTok) — and 5-minute cache
     // writes at 1.25x. Haiku 5.5 has two rate cards: $0.10/$0.50 for a
-    // prompt of 100K tokens or fewer, $0.50/$2.50 above that.
+    // prompt of 100K tokens or fewer, $0.50/$2.50 above that. A 1-hour cache
+    // write (ANTHROPIC_PREFIX_CACHE_TTL=1h) bills at 2x input on every model.
     (
         "anthropic",
         "claude-opus-5-5",
-        ModelPricing::new(4.0, 20.0).with_cache_rates(0.05, 1.25),
+        ModelPricing::new(4.0, 20.0)
+            .with_cache_rates(0.05, 1.25)
+            .with_cache_write_1h_rate(2.0),
     ),
     (
         "anthropic",
         "claude-sonnet-5-5",
-        ModelPricing::new(2.0, 10.0).with_cache_rates(0.10, 1.25),
+        ModelPricing::new(2.0, 10.0)
+            .with_cache_rates(0.10, 1.25)
+            .with_cache_write_1h_rate(2.0),
     ),
     (
         "anthropic",
         "claude-haiku-5-5",
         ModelPricing::new(0.10, 0.50)
             .with_cache_rates(0.10, 1.25)
+            .with_cache_write_1h_rate(2.0)
             .with_long_prompt_rates(100_000, 0.50, 2.50),
     ),
     // Groq models
@@ -854,6 +882,9 @@ pub struct TokenCounts {
     pub cached_read: i64,
     /// Prompt tokens written into the provider's context cache this call.
     pub cached_write: i64,
+    /// The part of `cached_write` written to a 1-hour cache entry, billed at
+    /// [`ModelPricing::cache_write_1h_multiplier`].
+    pub cached_write_1h: i64,
     /// Completion tokens, excluding separately-reported reasoning tokens.
     pub completion: i64,
     /// Reasoning / "thought" tokens, when the provider reports them apart
@@ -869,6 +900,7 @@ impl TokenCounts {
             prompt,
             cached_read: 0,
             cached_write: 0,
+            cached_write_1h: 0,
             completion,
             reasoning: 0,
         }
@@ -879,6 +911,13 @@ impl TokenCounts {
     pub const fn with_cache(mut self, read: i64, write: i64) -> Self {
         self.cached_read = read;
         self.cached_write = write;
+        self
+    }
+
+    /// Attach the 1-hour part of `cached_write`.
+    #[must_use]
+    pub const fn with_cache_write_1h(mut self, write_1h: i64) -> Self {
+        self.cached_write_1h = write_1h;
         self
     }
 
@@ -968,12 +1007,18 @@ pub fn cost_from_pricing(pricing: &ModelPricing, counts: &TokenCounts) -> f64 {
     // zero or bill a token twice.
     let cached_read = counts.cached_read.clamp(0, prompt);
     let cached_write = counts.cached_write.clamp(0, prompt - cached_read);
+    let one_hour_write = counts.cached_write_1h.clamp(0, cached_write);
+    let five_minute_write = cached_write - one_hour_write;
     let fresh_prompt = prompt - cached_read - cached_write;
 
     let (input, output) = pricing.rates_for_prompt(prompt);
     let fresh_prompt_cost = fresh_prompt as f64 * input / divisor;
     let cached_read_cost = cached_read as f64 * input * pricing.cache_read_multiplier / divisor;
-    let cached_write_cost = cached_write as f64 * input * pricing.cache_write_multiplier / divisor;
+    let cached_write_cost = (one_hour_write as f64).mul_add(
+        pricing.effective_cache_write_1h_multiplier(),
+        five_minute_write as f64 * pricing.cache_write_multiplier,
+    ) * input
+        / divisor;
     // Providers that report reasoning tokens exclude them from the completion
     // count, so they are added rather than carved out.
     let output_tokens = counts.completion.max(0) + counts.reasoning.max(0);

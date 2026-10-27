@@ -213,6 +213,7 @@ impl MetricsProvider {
                 optional(usage.and_then(|u| u.cached_read_tokens)),
                 optional(usage.and_then(|u| u.cached_write_tokens)),
             )
+            .with_cache_write_1h(optional(usage.and_then(|u| u.cached_write_1h_tokens)))
             .with_reasoning(optional(usage.and_then(|u| u.reasoning_tokens)));
         calculate_cost_for(self.inner.name(), model, &counts)
     }
@@ -679,6 +680,36 @@ mod tests {
 
         let report = metered.report().unwrap(); // Safe: test assertion
         let expected = 1000.0 * FLASH_IN * 0.25;
+        assert!(
+            (report.total_cost - expected).abs() < 1e-12,
+            "{}",
+            report.total_cost
+        );
+    }
+
+    /// The 1-hour share of a cache write reaches pricing: on Opus 5.5 it bills
+    /// at 2× input, the rest of the write at 1.25×.
+    #[tokio::test]
+    async fn cost_bills_the_one_hour_cache_write_at_its_own_rate() {
+        let response = ChatResponse {
+            model: "claude-opus-5-5".to_owned(),
+            ..flash_response(
+                "r",
+                Some(
+                    TokenUsage::new(1000, 0, 1000)
+                        .with_cache(Some(0), Some(1000))
+                        .with_cache_write_1h(Some(600)),
+                ),
+            )
+        };
+        let provider = TestProvider::named("anthropic", vec![Ok(response)]);
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        let report = metered.report().unwrap(); // Safe: test assertion
+        let input = 4.0 / 1_000_000.0;
+        let expected = 600.0f64.mul_add(input * 2.0, 400.0 * input * 1.25);
         assert!(
             (report.total_cost - expected).abs() < 1e-12,
             "{}",

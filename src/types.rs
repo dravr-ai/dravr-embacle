@@ -848,6 +848,13 @@ pub struct TokenUsage {
     /// cold prefix; the same shape on every turn means the prefix is churning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_write_tokens: Option<u32>,
+    /// The part of [`Self::cached_write_tokens`] written to a 1-hour cache
+    /// entry, when the provider breaks it out.
+    ///
+    /// Anthropic bills a 1-hour write at 2× input against 1.25× for the
+    /// 5-minute one, so pricing needs the split to price the write right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_write_1h_tokens: Option<u32>,
     /// Reasoning / "thought" tokens, when reported separately from completion.
     ///
     /// Billed as output by most providers but excluded from `completion_tokens`,
@@ -867,6 +874,7 @@ impl TokenUsage {
             total_tokens,
             cached_read_tokens: None,
             cached_write_tokens: None,
+            cached_write_1h_tokens: None,
             reasoning_tokens: None,
         }
     }
@@ -876,6 +884,14 @@ impl TokenUsage {
     pub const fn with_cache(mut self, read: Option<u32>, write: Option<u32>) -> Self {
         self.cached_read_tokens = read;
         self.cached_write_tokens = write;
+        self
+    }
+
+    /// Attach the 1-hour part of the cache write. Pass `None` when the
+    /// provider did not break the write down by lifetime.
+    #[must_use]
+    pub const fn with_cache_write_1h(mut self, write_1h: Option<u32>) -> Self {
+        self.cached_write_1h_tokens = write_1h;
         self
     }
 

@@ -14,7 +14,8 @@
 use std::collections::BTreeSet;
 
 use embacle::pricing::{
-    calculate_cost, calculate_cost_for, lookup_pricing, ModelPricing, TokenCounts, PRICING_TABLE,
+    calculate_cost, calculate_cost_for, cost_from_pricing, lookup_pricing, ModelPricing,
+    TokenCounts, PRICING_TABLE,
 };
 
 #[test]
@@ -249,6 +250,57 @@ fn cache_counts_are_clamped_to_the_prompt() {
         (cost - expected).abs() < 1e-12,
         "expected {expected}, got {cost}"
     );
+}
+
+/// A 1-hour cache write bills at 2x input on the Anthropic API, against
+/// 1.25x for the 5-minute one, so a mixed write prices each share at its own
+/// rate. Priced at the 5-minute rate, the 1-hour share was under-billed by
+/// 0.75x input per token.
+#[test]
+fn anthropic_one_hour_cache_write_bills_at_twice_input() {
+    // Opus 5.5: $4/M input. 800K written for 1 hour, 200K for 5 minutes.
+    let counts = TokenCounts::new(1_000_000, 0)
+        .with_cache(0, 1_000_000)
+        .with_cache_write_1h(800_000);
+    let cost = calculate_cost_for("anthropic", "claude-opus-5-5", &counts);
+    let expected = 0.8f64.mul_add(4.0 * 2.0, 0.2 * 4.0 * 1.25);
+    assert!(
+        (cost - expected).abs() < 1e-9,
+        "expected {expected}, got {cost}"
+    );
+    // Pool accounts price through the same row.
+    let pooled = calculate_cost_for("anthropic#2", "claude-opus-5-5", &counts);
+    assert!((pooled - expected).abs() < 1e-9, "pool: {pooled}");
+}
+
+/// A row with a single cache lifetime bills a 1-hour share at its one write
+/// rate, and a 1-hour count above the write is clamped to it.
+#[test]
+fn a_one_hour_write_falls_back_to_the_write_rate_and_is_clamped() {
+    let pricing = ModelPricing::new(10.0, 0.0).with_cache_rates(0.10, 1.25);
+    assert!((pricing.effective_cache_write_1h_multiplier() - 1.25).abs() < f64::EPSILON);
+    let over = TokenCounts::new(1_000_000, 0)
+        .with_cache(0, 500_000)
+        .with_cache_write_1h(900_000);
+    let cost = cost_from_pricing(&pricing.with_cache_write_1h_rate(2.0), &over);
+    // 500K fresh at $10/M + 500K written, all of it 1-hour, at 2x.
+    let expected = 0.5f64.mul_add(10.0, 0.5 * 10.0 * 2.0);
+    assert!(
+        (cost - expected).abs() < 1e-9,
+        "expected {expected}, got {cost}"
+    );
+}
+
+/// An operator override stored before the 1-hour rate existed still
+/// deserializes, and bills a 1-hour write at its write rate.
+#[test]
+fn a_stored_override_without_the_one_hour_rate_deserializes() {
+    let pricing: ModelPricing = serde_json::from_str(
+        r#"{"input_per_million":4.0,"output_per_million":20.0,"cache_read_multiplier":0.05,"cache_write_multiplier":1.25}"#,
+    )
+    .unwrap();
+    assert_eq!(pricing.cache_write_1h_multiplier, None);
+    assert!((pricing.effective_cache_write_1h_multiplier() - 1.25).abs() < f64::EPSILON);
 }
 
 // ============================================================================
