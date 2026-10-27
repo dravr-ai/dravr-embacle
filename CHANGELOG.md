@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.40.1] — 2026-10-27
+
+### Fixed
+
+- fix(runners): run every CLI runner on the model the request names
+
+### Other
+
+- build(cargo): declare rust-version, the fleet pin
+
+
 ## [0.40.0] — 2026-10-26
 
 ### Added
