@@ -204,6 +204,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{RequestBuilder, Response, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_stream::Stream;
@@ -650,6 +651,40 @@ struct MessagesRequest {
     stream: bool,
 }
 
+/// `POST /v1/messages/count_tokens` body: the fields of a [`MessagesRequest`]
+/// that are part of its input. `max_tokens`, sampling, stop sequences,
+/// streaming and the automatic breakpoint shape the reply or the cache, not
+/// what the prompt is billed.
+#[derive(Debug, Serialize)]
+struct CountTokensRequest {
+    model: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<SystemBlock>,
+    messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<WireToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<WireThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
+}
+
+impl From<MessagesRequest> for CountTokensRequest {
+    fn from(body: MessagesRequest) -> Self {
+        Self {
+            model: body.model,
+            system: body.system,
+            messages: body.messages,
+            tools: body.tools,
+            tool_choice: body.tool_choice,
+            thinking: body.thinking,
+            output_config: body.output_config,
+        }
+    }
+}
+
 /// One block of the top-level `system` array
 #[derive(Debug, Serialize)]
 struct SystemBlock {
@@ -748,6 +783,12 @@ struct MessagesResponse {
     stop_details: Option<StopDetails>,
     #[serde(default)]
     usage: Option<WireUsage>,
+}
+
+/// A `/v1/messages/count_tokens` response
+#[derive(Debug, Deserialize)]
+struct CountTokensResponse {
+    input_tokens: u32,
 }
 
 /// A content block of a response. `thinking`, `redacted_thinking` and any
@@ -1796,6 +1837,41 @@ impl AnthropicProvider {
         self
     }
 
+    /// Count the input tokens `request` would be billed, with the tokenizer of
+    /// the model it names (`POST /v1/messages/count_tokens`).
+    ///
+    /// The count covers what [`LlmProvider::complete`] would send for the same
+    /// request: system blocks, messages and tool definitions, with the tool-use
+    /// preamble Anthropic adds whenever tools are present. Counting a request
+    /// with its tools and again without them therefore gives the tools block's
+    /// cost on that model. The endpoint is free and rate-limited apart from
+    /// Messages; Anthropic documents the figure as an estimate that can differ
+    /// slightly from billed usage. The request must carry at least one message.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`LlmProvider::complete`]: a key the API refuses, an
+    /// unknown model, a rate limit or a spent credit, or a body that is not a
+    /// count.
+    #[instrument(skip(self, request), fields(model = %request.model.as_deref().unwrap_or(&self.config.model)))]
+    pub async fn count_tokens(&self, request: &ChatRequest) -> Result<u32, RunnerError> {
+        let body = CountTokensRequest::from(build_body(&self.config, request, false));
+        let body = &body;
+        with_retries(
+            &self.config.retry,
+            PROVIDER_NAME,
+            "Anthropic token count",
+            |attempt| async move {
+                debug!(attempt, "Counting tokens on the Anthropic Messages API");
+                let counted: CountTokensResponse = self
+                    .attempt_json("messages/count_tokens", body, &body.model)
+                    .await?;
+                Ok(counted.input_tokens)
+            },
+        )
+        .await
+    }
+
     /// `{base_url}/v1/{path}`
     fn api_url(&self, path: &str) -> String {
         format!("{}/v1/{path}", self.config.base_url.trim_end_matches('/'))
@@ -1816,11 +1892,11 @@ impl AnthropicProvider {
         Ok(headers)
     }
 
-    /// An authenticated `POST /v1/messages`
-    fn post_messages(&self, body: &MessagesRequest) -> Result<RequestBuilder, RunnerError> {
+    /// An authenticated JSON `POST /v1/{path}`
+    fn post_json<B: Serialize>(&self, path: &str, body: &B) -> Result<RequestBuilder, RunnerError> {
         Ok(self
             .client
-            .post(self.api_url("messages"))
+            .post(self.api_url(path))
             .headers(self.auth_headers()?)
             .header(CONTENT_TYPE, "application/json")
             .json(body))
@@ -1828,8 +1904,20 @@ impl AnthropicProvider {
 
     /// One non-streaming attempt
     async fn attempt_complete(&self, body: &MessagesRequest) -> Result<ChatResponse, AttemptError> {
+        let parsed: MessagesResponse = self.attempt_json("messages", body, &body.model).await?;
+        Ok(into_chat_response(parsed, &body.model))
+    }
+
+    /// One non-streaming attempt at `POST /v1/{path}`: the parsed body, once
+    /// its status is a success
+    async fn attempt_json<B: Serialize + Sync, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        model: &str,
+    ) -> Result<T, AttemptError> {
         let response = self
-            .post_messages(body)
+            .post_json(path, body)
             .map_err(AttemptError::permanent)?
             .send()
             .await
@@ -1847,24 +1935,23 @@ impl AnthropicProvider {
         if !status.is_success() {
             return Err(attempt_error(
                 status,
-                map_api_error(status, &text, retry_after, &body.model),
+                map_api_error(status, &text, retry_after, model),
             ));
         }
 
-        let parsed: MessagesResponse = serde_json::from_str(&text).map_err(|e| {
+        serde_json::from_str(&text).map_err(|e| {
             AttemptError::permanent(RunnerError::external_service(
                 PROVIDER_NAME,
                 format!("Failed to parse response: {e}"),
             ))
-        })?;
-        Ok(into_chat_response(parsed, &body.model))
+        })
     }
 
     /// One attempt at opening a stream: the response, once its status is a
     /// success
     async fn open_stream(&self, body: &MessagesRequest) -> Result<Response, AttemptError> {
         let response = self
-            .post_messages(body)
+            .post_json("messages", body)
             .map_err(AttemptError::permanent)?
             .send()
             .await
@@ -2057,6 +2144,37 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} tool"),
             parameters: Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
+        }
+    }
+
+    #[test]
+    fn the_count_body_keeps_the_input_and_drops_what_shapes_the_reply() {
+        let config = AnthropicConfig::new("k").with_model("claude-haiku-5-5");
+        let mut request = ChatRequest::new(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user("hi"),
+        ])
+        .with_tools(vec![weather_tool("get_weather")]);
+        request.temperature = Some(0.2);
+        request.stop = Some(vec!["END".to_owned()]);
+
+        let full = body_json(&config, &request);
+        let count = serde_json::to_value(CountTokensRequest::from(build_body(
+            &config, &request, true,
+        )))
+        .expect("serialises"); // Safe: test assertion
+
+        for kept in ["model", "system", "messages", "tools", "tool_choice"] {
+            assert_eq!(count[kept], full[kept], "{kept} is part of the input");
+        }
+        for dropped in [
+            "max_tokens",
+            "temperature",
+            "stop_sequences",
+            "cache_control",
+            "stream",
+        ] {
+            assert!(count.get(dropped).is_none(), "{dropped} is not input");
         }
     }
 

@@ -11,6 +11,7 @@
 mod support;
 
 mod agui;
+mod anthropic_count_tokens;
 mod anthropic_pool;
 mod claude_code_result_document;
 mod cli_argv_secrets;
@@ -22,6 +23,7 @@ mod fallback_observer;
 mod fallback_policy;
 mod function_call_serde;
 mod github_rate_limit;
+mod http_listener;
 mod http_model_override;
 mod http_provider_metadata;
 mod http_sse_parser;
