@@ -133,6 +133,20 @@ enum ContentPart {
         #[serde(rename = "functionResponse")]
         function_response: GeminiFunctionResponse,
     },
+    /// Inline media: an image a user message carries, as base64 bytes
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: GeminiBlob,
+    },
+}
+
+/// Inline bytes with their media type (the API's `Blob`)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBlob {
+    mime_type: String,
+    /// Base64-encoded bytes
+    data: String,
 }
 
 /// Function call made by the model
@@ -368,6 +382,32 @@ impl GeminiProvider {
         )
     }
 
+    /// The parts of one non-system message: its text, then one `inlineData`
+    /// part per image a user message carries.
+    ///
+    /// An image-only user message sends no text part, since the API rejects
+    /// an empty one.
+    fn message_parts(message: &ChatMessage) -> Vec<ContentPart> {
+        let images = message
+            .images
+            .as_deref()
+            .filter(|_| message.role == MessageRole::User)
+            .unwrap_or_default();
+        let mut parts = Vec::with_capacity(1 + images.len());
+        if images.is_empty() || !message.content.is_empty() {
+            parts.push(ContentPart::Text {
+                text: message.content.clone(),
+            });
+        }
+        parts.extend(images.iter().map(|image| ContentPart::InlineData {
+            inline_data: GeminiBlob {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+            },
+        }));
+        parts
+    }
+
     /// Convert chat messages to Gemini format
     fn convert_messages(messages: &[ChatMessage]) -> (Vec<GeminiContent>, Option<GeminiContent>) {
         let mut contents = Vec::new();
@@ -383,9 +423,7 @@ impl GeminiProvider {
             } else {
                 contents.push(GeminiContent {
                     role: Some(Self::convert_role(message.role).to_owned()),
-                    parts: vec![ContentPart::Text {
-                        text: message.content.clone(),
-                    }],
+                    parts: Self::message_parts(message),
                 });
             }
         }
@@ -476,6 +514,9 @@ impl GeminiProvider {
             )),
             ContentPart::FunctionResponse { .. } => Err(RunnerError::internal(
                 "Unexpected function response in model output",
+            )),
+            ContentPart::InlineData { .. } => Err(RunnerError::internal(
+                "Unexpected inline media in model output",
             )),
         }
     }
@@ -590,7 +631,9 @@ impl GeminiProvider {
                             function_call.name, function_call.args
                         )
                     }
-                    ContentPart::FunctionResponse { .. } => return None,
+                    ContentPart::FunctionResponse { .. } | ContentPart::InlineData { .. } => {
+                        return None
+                    }
                 };
 
                 Some(Ok(StreamChunk {
@@ -805,6 +848,7 @@ impl Debug for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ImagePart;
 
     fn provider() -> GeminiProvider {
         GeminiProvider::with_client(
@@ -840,6 +884,43 @@ mod tests {
             "unexpected part {:?}",
             system.parts[0]
         );
+    }
+
+    #[test]
+    fn a_user_image_rides_as_inline_data_after_the_text() {
+        let image = ImagePart::new("aGVsbG8=", "image/png").expect("valid mime"); // Safe: test assertion
+        let request = ChatRequest::new(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user_with_images("read the label", vec![image]),
+        ]);
+        let body = GeminiProvider::build_gemini_request(&request);
+        let json = serde_json::to_value(&body).expect("serialises"); // Safe: test assertion
+        assert_eq!(
+            json["contents"][0]["parts"],
+            serde_json::json!([
+                {"text": "read the label"},
+                {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}}
+            ])
+        );
+    }
+
+    #[test]
+    fn an_image_only_message_sends_no_empty_text_part() {
+        let image = ImagePart::new("aGVsbG8=", "image/jpeg").expect("valid mime"); // Safe: test assertion
+        let (contents, _) =
+            GeminiProvider::convert_messages(&[ChatMessage::user_with_images("", vec![image])]);
+        let json = serde_json::to_value(&contents[0].parts).expect("serialises"); // Safe: test assertion
+        assert_eq!(
+            json,
+            serde_json::json!([{"inlineData": {"mimeType": "image/jpeg", "data": "aGVsbG8="}}])
+        );
+    }
+
+    #[test]
+    fn a_text_message_is_one_text_part() {
+        let (contents, _) = GeminiProvider::convert_messages(&[ChatMessage::user("")]);
+        let json = serde_json::to_value(&contents[0].parts).expect("serialises"); // Safe: test assertion
+        assert_eq!(json, serde_json::json!([{"text": ""}]));
     }
 
     #[test]

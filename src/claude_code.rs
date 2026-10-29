@@ -13,8 +13,8 @@ use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
 use crate::types::{
-    ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpServerConfig,
-    McpTransport, RunnerError, StreamChunk, TokenUsage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, ImagePart, LlmCapabilities, LlmProvider,
+    McpServerConfig, McpTransport, MessageRole, RunnerError, StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -29,7 +29,7 @@ use crate::config::RunnerConfig;
 use crate::process::{
     feed_stdin, private_config_file, read_stderr_capped, run_cli_command_with_input,
 };
-use crate::prompt::{extract_system_message, prepare_user_prompt};
+use crate::prompt::{build_user_prompt, extract_system_message};
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
 
@@ -225,6 +225,115 @@ const ISOLATION_ENV: &[(&str, &str)] = &[
 /// operator's (an `apiKeyHelper`, for one), not a caller's.
 const SETTING_SOURCES: &str = "user";
 
+/// The CLI's `--input-format` for a turn that carries images: one JSON user
+/// message per line, whose content blocks the CLI hands to the model as-is.
+const STREAM_JSON: &str = "stream-json";
+
+/// What the runner writes to the CLI's stdin for one request.
+///
+/// A text-only request is the plain prompt, read with the default
+/// `--input-format text`. A request whose user messages carry images is one
+/// `stream-json` user message: the prompt as a text block, then every user
+/// message's images, in order, as base64 image blocks, so the model sees the
+/// bytes rather than a file path it would need a tool to open. The CLI only
+/// accepts `stream-json` input with `stream-json` output, so such a turn is
+/// read back from the stream's `result` line.
+#[derive(Debug, PartialEq, Eq)]
+enum Turn {
+    /// The prompt text, written as-is
+    Text(String),
+    /// One `stream-json` user message line carrying the images
+    WithImages(String),
+}
+
+impl Turn {
+    /// The stdin payload for these messages, system messages excluded (they
+    /// ride on `--system-prompt`).
+    fn of(messages: &[ChatMessage]) -> Self {
+        let prompt = build_user_prompt(messages);
+        let images: Vec<&ImagePart> = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .filter_map(|m| m.images.as_deref())
+            .flatten()
+            .collect();
+        if images.is_empty() {
+            Self::Text(prompt)
+        } else {
+            Self::WithImages(stream_json_user_line(&prompt, &images))
+        }
+    }
+
+    /// The bytes written to the child's stdin
+    fn stdin(&self) -> &[u8] {
+        match self {
+            Self::Text(prompt) => prompt.as_bytes(),
+            Self::WithImages(line) => line.as_bytes(),
+        }
+    }
+
+    /// Whether this turn is read as `stream-json` input
+    const fn carries_images(&self) -> bool {
+        matches!(self, Self::WithImages(_))
+    }
+
+    /// The `--output-format` a non-streaming call uses for this turn
+    const fn completion_output_format(&self) -> &'static str {
+        if self.carries_images() {
+            STREAM_JSON
+        } else {
+            "json"
+        }
+    }
+
+    /// Add the `--input-format` this turn's stdin needs
+    fn declare_input(&self, cmd: &mut Command) {
+        if self.carries_images() {
+            cmd.args(["--input-format", STREAM_JSON]);
+        }
+    }
+}
+
+/// One `stream-json` user message: the text block (omitted when empty), then
+/// one Anthropic base64 image block per image, newline-terminated.
+fn stream_json_user_line(text: &str, images: &[&ImagePart]) -> String {
+    let mut content = Vec::with_capacity(1 + images.len());
+    if !text.is_empty() {
+        content.push(json!({"type": "text", "text": text}));
+    }
+    content.extend(images.iter().map(|image| {
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.mime_type,
+                "data": image.data,
+            },
+        })
+    }));
+    let mut line = json!({
+        "type": "user",
+        "message": {"role": "user", "content": content},
+    })
+    .to_string();
+    line.push('\n');
+    line
+}
+
+/// The `result` line of a `stream-json` transcript, the same document
+/// `--output-format json` prints; empty when there is none, so parsing it
+/// fails as "not a result document" and the exit code speaks.
+fn stream_result_line(stdout: &[u8]) -> &[u8] {
+    stdout
+        .split(|b| *b == b'\n')
+        .rev()
+        .find(|line| {
+            serde_json::from_slice::<Value>(line)
+                .is_ok_and(|v| v.get("type").and_then(Value::as_str) == Some("result"))
+        })
+        .unwrap_or_default()
+}
+
 /// Claude Code CLI response JSON structure
 #[derive(Debug, Deserialize)]
 struct ClaudeResponse {
@@ -360,7 +469,7 @@ impl ClaudeCodeRunner {
         ]);
 
         // stream-json requires --verbose flag in Claude Code CLI
-        if output_format == "stream-json" {
+        if output_format == STREAM_JSON {
             cmd.arg("--verbose");
         }
 
@@ -587,42 +696,51 @@ impl LlmProvider for ClaudeCodeRunner {
     crate::delegate_provider_base!(
         "claude-code",
         "Claude Code CLI",
-        LlmCapabilities::STREAMING | LlmCapabilities::TEMPERATURE | LlmCapabilities::MAX_TOKENS
+        LlmCapabilities::STREAMING
+            | LlmCapabilities::TEMPERATURE
+            | LlmCapabilities::MAX_TOKENS
+            | LlmCapabilities::VISION
     );
 
     #[instrument(skip_all, fields(runner = "claude_code"))]
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let system = extract_system_message(&request.messages);
-        let prepared = prepare_user_prompt(&request.messages)?;
-        let prompt = &prepared.prompt;
+        let turn = Turn::of(&request.messages);
 
         let sent_model = self.base.model_for(request.model.as_deref());
         // Removed when it drops, after the child has exited.
         let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
             system,
-            "json",
+            turn.completion_output_format(),
             request.max_tokens,
             &request.mcp_servers,
             mcp_config.as_deref(),
             sent_model,
         );
+        turn.declare_input(&mut cmd);
 
         debug!(
             binary = %self.base.config.binary_path.display(),
             model = sent_model,
             has_system_prompt = system.is_some(),
-            prompt_len = prompt.len(),
+            has_images = turn.carries_images(),
+            prompt_len = turn.stdin().len(),
             "Spawning claude CLI"
         );
 
         let output = run_cli_command_with_input(
             &mut cmd,
-            Some(prompt.as_bytes()),
+            Some(turn.stdin()),
             self.base.config.timeout,
             MAX_OUTPUT_BYTES,
         )
         .await?;
+        let document = if turn.carries_images() {
+            stream_result_line(&output.stdout)
+        } else {
+            &output.stdout
+        };
 
         // The CLI reports every failure it understands as a result document
         // with `is_error: true` and exit 1, the reason in its last field.
@@ -632,7 +750,7 @@ impl LlmProvider for ClaudeCodeRunner {
         // fault with no reason. The exit code only speaks when stdout is not
         // a result document, or when a document claims success on a
         // non-zero exit.
-        let parsed = match Self::parse_result_document(&output.stdout) {
+        let parsed = match Self::parse_result_document(document) {
             Ok(parsed) => parsed,
             Err(not_a_document) => {
                 self.base.check_exit_code(&output, "claude-code")?;
@@ -648,20 +766,20 @@ impl LlmProvider for ClaudeCodeRunner {
     #[instrument(skip_all, fields(runner = "claude_code"))]
     async fn complete_stream(&self, request: &ChatRequest) -> Result<ChatStream, RunnerError> {
         let system = extract_system_message(&request.messages);
-        let prepared = prepare_user_prompt(&request.messages)?;
-        let prompt = &prepared.prompt;
+        let turn = Turn::of(&request.messages);
 
         let sent_model = self.base.model_for(request.model.as_deref());
         // Held by the stream, so it outlives the child that reads it.
         let mcp_config = mcp_config_file(&request.mcp_servers)?;
         let mut cmd = self.build_command(
             system,
-            "stream-json",
+            STREAM_JSON,
             request.max_tokens,
             &request.mcp_servers,
             mcp_config.as_deref(),
             sent_model,
         );
+        turn.declare_input(&mut cmd);
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -669,7 +787,7 @@ impl LlmProvider for ClaudeCodeRunner {
         let mut child = cmd.spawn().map_err(|e| {
             RunnerError::internal(format!("Failed to spawn claude for streaming: {e}"))
         })?;
-        feed_stdin(child.stdin.take(), prompt.as_bytes().to_vec());
+        feed_stdin(child.stdin.take(), turn.stdin().to_vec());
 
         let stdout = child.stdout.take().ok_or_else(|| {
             RunnerError::internal("Failed to capture claude stdout for streaming")
@@ -699,6 +817,7 @@ impl LlmProvider for ClaudeCodeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::prepare_user_prompt;
     use crate::types::{ErrorKind, McpHeader};
     use std::ffi::OsStr;
     use std::path::PathBuf;
@@ -706,6 +825,109 @@ mod tests {
     /// Parse a result document straight through to the response, as `complete` does.
     fn parse_response(raw: &[u8]) -> Result<ChatResponse, RunnerError> {
         ClaudeCodeRunner::response_from(ClaudeCodeRunner::parse_result_document(raw)?, "opus")
+    }
+
+    #[test]
+    fn a_text_turn_is_the_prompt_the_cli_always_read() {
+        let messages = vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+            ChatMessage::user("how are you"),
+        ];
+        let turn = Turn::of(&messages);
+        let before = prepare_user_prompt(&messages).expect("prompt"); // Safe: test assertion
+        assert_eq!(turn, Turn::Text(before.prompt));
+        assert_eq!(turn.completion_output_format(), "json");
+        let mut cmd = Command::new("claude");
+        turn.declare_input(&mut cmd);
+        assert_eq!(cmd.as_std().get_args().count(), 0);
+    }
+
+    #[test]
+    fn an_image_turn_is_one_stream_json_user_message() {
+        let image = ImagePart::new("aGVsbG8=", "image/png").expect("valid mime"); // Safe: test assertion
+        let messages = vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user_with_images("read the label", vec![image]),
+        ];
+        let turn = Turn::of(&messages);
+        let Turn::WithImages(line) = &turn else {
+            panic!("expected an image turn, got {turn:?}");
+        };
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+        let value: Value = serde_json::from_str(line).expect("one JSON line"); // Safe: test assertion
+        assert_eq!(
+            value,
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "[user]\nread the label"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png", "data": "aGVsbG8="
+                        }}
+                    ]
+                }
+            })
+        );
+        assert_eq!(turn.completion_output_format(), "stream-json");
+        let mut cmd = Command::new("claude");
+        turn.declare_input(&mut cmd);
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(args, ["--input-format", "stream-json"]);
+    }
+
+    #[test]
+    fn every_user_message_s_images_ride_in_order() {
+        let first = ImagePart::new("Zmlyc3Q=", "image/jpeg").expect("valid mime"); // Safe: test assertion
+        let second = ImagePart::new("c2Vjb25k", "image/webp").expect("valid mime"); // Safe: test assertion
+        let mut from_assistant = ChatMessage::assistant("ignored image");
+        from_assistant.images = Some(vec![first.clone()]);
+        let turn = Turn::of(&[
+            ChatMessage::user_with_images("one", vec![first]),
+            from_assistant,
+            ChatMessage::user_with_images("two", vec![second]),
+        ]);
+        let Turn::WithImages(line) = turn else {
+            panic!("expected an image turn");
+        };
+        let value: Value = serde_json::from_str(&line).expect("one JSON line"); // Safe: test assertion
+        let data: Vec<&str> = value["message"]["content"]
+            .as_array()
+            .expect("content array") // Safe: test assertion
+            .iter()
+            .filter_map(|block| block["source"]["data"].as_str())
+            .collect();
+        assert_eq!(data, ["Zmlyc3Q=", "c2Vjb25k"]);
+    }
+
+    #[test]
+    fn an_empty_prompt_sends_no_empty_text_block() {
+        let image = ImagePart::new("aGVsbG8=", "image/gif").expect("valid mime"); // Safe: test assertion
+        let line = stream_json_user_line("", &[&image]);
+        let value: Value = serde_json::from_str(&line).expect("one JSON line"); // Safe: test assertion
+        let content = value["message"]["content"].as_array().expect("content"); // Safe: test assertion
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn an_image_turn_answers_from_the_stream_s_result_line() {
+        let transcript = concat!(
+            r#"{"type":"system","subtype":"init"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"CARBS 42 g"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"CARBS 42 g"}"#,
+            "\n",
+        );
+        let response =
+            parse_response(stream_result_line(transcript.as_bytes())).expect("result line parses"); // Safe: test assertion
+        assert_eq!(response.content, "CARBS 42 g");
+        let none = br#"{"type":"system","subtype":"init"}"#;
+        assert!(parse_response(stream_result_line(none)).is_err());
     }
 
     #[test]

@@ -699,10 +699,13 @@ Embacle supports sending images alongside text prompts via the `ImagePart` type.
 | Copilot Headless (ACP) | Native | Images sent as ACP `image` content blocks |
 | Copilot SDK | Native | Images written to the turn's scratch directory and attached as files |
 | OpenAI API | Native | Images sent as `image_url` parts with `data:` URIs |
+| Anthropic API | Native | Images sent as base64 `image` content blocks |
+| Gemini API | Native | Images sent as `inlineData` parts after the message text |
+| Claude Code CLI | Native | One `--input-format stream-json` user message carrying base64 `image` content blocks |
 | C FFI | Native | Images forwarded to copilot headless via `image_url` content |
-| All 12 CLI runners | Tempfile | Images decoded to temp files, file paths injected into prompt |
+| The other 11 CLI runners | Tempfile | Images decoded to temp files, file paths injected into prompt |
 
-CLI runners materialize base64 images to a temp directory and append `[Attached images]` with file paths to the user message. The temp directory is kept alive until the subprocess finishes.
+Those 11 CLI runners materialize base64 images to a temp directory and append `[Attached images]` with file paths to the user message. The temp directory is kept alive until the subprocess finishes.
 
 ### Library usage
 
@@ -734,7 +737,7 @@ curl http://localhost:3000/v1/chat/completions \
   }'
 ```
 
-Plain string messages continue to work unchanged. All providers accept images — native providers send them directly, CLI runners materialize them to temp files.
+Plain string messages continue to work unchanged. All providers accept images — native providers send them directly, the tempfile CLI runners materialize them to temp files.
 
 ## Docker
 
