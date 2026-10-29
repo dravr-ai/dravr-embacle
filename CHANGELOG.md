@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.43.0] — 2026-10-29
+
+### Added
+
+- feat(anthropic): load deferred tools on demand through tool search
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.2.1 -> 6.3.0
+- review: apply coding standards to the request-model fix
+
+
 ## [0.42.0] — 2026-10-27
 
 ### Added
