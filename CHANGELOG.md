@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.44.0] — 2026-10-29
+
+### Fixed
+
+- fix(vision): send images through the Gemini API and Claude Code runners
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.4.0 -> 6.5.0
+- chore(deps): bump dravr-tronc 6.3.0 -> 6.4.0
+
+
 ## [0.43.0] — 2026-10-29
 
 ### Added
