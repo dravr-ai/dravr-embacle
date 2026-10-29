@@ -265,11 +265,11 @@ async fn a_tool_stream_leaves_a_spent_account_and_streams_the_reply_then_the_cal
     let chain: Box<dyn LlmProvider> =
         Box::new(Arc::new(FallbackProvider::new(tiers).expect("chain")));
     let request = ChatRequest::new(vec![ChatMessage::user("mes sorties?")]).with_tools(vec![
-        ToolDefinition {
-            name: "get_activities".to_owned(),
-            description: "Recent activities".to_owned(),
-            parameters: None,
-        },
+        ToolDefinition::new(
+            "get_activities".to_owned(),
+            "Recent activities".to_owned(),
+            None,
+        ),
     ]);
     let stream = chain
         .complete_stream_with_tools(&request)

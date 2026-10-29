@@ -52,16 +52,15 @@ const COACH_PROMPT: &str = "You are an endurance coach for an athlete named Phil
 /// descriptions so the model sees exactly what production publishes.
 fn declarations() -> Vec<FunctionDeclaration> {
     vec![
-        FunctionDeclaration {
-            name: "prescribe_workout".into(),
-            description: "Write one workout onto the athlete's Intervals.icu calendar for a \
+        FunctionDeclaration::new(
+            "prescribe_workout",
+            "Write one workout onto the athlete's Intervals.icu calendar for a \
                  given date, and record it in the prescribed_workouts audit trail. Requires a \
                  connected Intervals.icu account. Pass EITHER template_slug — one of the \
                  cornerstones (long_run_z2, threshold_4x8, vo2_5x3, recovery_30min, \
                  tempo_progression, sweet_spot_2x20) — OR session, a structured session you \
-                 authored. Args: date (YYYY-MM-DD), template_slug or session, optional coach_id."
-                .into(),
-            parameters: Some(json!({
+                 authored. Args: date (YYYY-MM-DD), template_slug or session, optional coach_id.",
+            Some(json!({
                 "type": "object",
                 "properties": {
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
@@ -69,23 +68,21 @@ fn declarations() -> Vec<FunctionDeclaration> {
                 },
                 "required": ["date"]
             })),
-        },
-        FunctionDeclaration {
-            name: "list_workout_templates".into(),
-            description: "List the Endurance cornerstone workout templates with their \
-                 structured steps and target zones."
-                .into(),
-            parameters: Some(json!({"type": "object", "properties": {}})),
-        },
-        FunctionDeclaration {
-            name: "get_activities".into(),
-            description: "Fetch the athlete's recent activities from their connected provider."
-                .into(),
-            parameters: Some(json!({
+        ),
+        FunctionDeclaration::new(
+            "list_workout_templates",
+            "List the Endurance cornerstone workout templates with their \
+                 structured steps and target zones.",
+            Some(json!({"type": "object", "properties": {}})),
+        ),
+        FunctionDeclaration::new(
+            "get_activities",
+            "Fetch the athlete's recent activities from their connected provider.",
+            Some(json!({
                 "type": "object",
                 "properties": {"limit": {"type": "integer"}}
             })),
-        },
+        ),
     ]
 }
 

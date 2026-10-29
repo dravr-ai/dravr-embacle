@@ -30,11 +30,11 @@
 //!
 //! # async fn example(provider: &dyn LlmProvider) -> Result<(), embacle::types::RunnerError> {
 //! let declarations = vec![
-//!     FunctionDeclaration {
-//!         name: "get_weather".into(),
-//!         description: "Get weather for a city".into(),
-//!         parameters: Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
-//!     },
+//!     FunctionDeclaration::new(
+//!         "get_weather",
+//!         "Get weather for a city",
+//!         Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
+//!     ),
 //! ];
 //!
 //! let handler: TextToolHandler = Arc::new(|name, args| {
@@ -169,11 +169,11 @@ pub struct TextToolResponse {
 /// use embacle::tool_simulation::{FunctionDeclaration, generate_tool_catalog};
 /// use serde_json::json;
 ///
-/// let decls = vec![FunctionDeclaration {
-///     name: "search".into(),
-///     description: "Search the web".into(),
-///     parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})),
-/// }];
+/// let decls = vec![FunctionDeclaration::new(
+///     "search",
+///     "Search the web",
+///     Some(json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})),
+/// )];
 ///
 /// let catalog = generate_tool_catalog(&decls);
 /// assert!(catalog.contains("### search"));
@@ -858,6 +858,7 @@ And some more text."#;
                     },
                     "required": ["provider"]
                 })),
+                defer_loading: false,
             },
             FunctionDeclaration {
                 name: "get_athlete".to_owned(),
@@ -869,6 +870,7 @@ And some more text."#;
                     },
                     "required": ["provider"]
                 })),
+                defer_loading: false,
             },
         ];
 
@@ -886,6 +888,7 @@ And some more text."#;
             name: "ping".to_owned(),
             description: "Check connectivity".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let catalog = generate_tool_catalog(&declarations);
@@ -905,6 +908,7 @@ And some more text."#;
             name: "get_activities".to_owned(),
             description: "Get the user's recent activities".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
         let catalog = generate_tool_catalog(&declarations);
 
@@ -976,6 +980,7 @@ And some more text."#;
                 },
                 "required": ["outline"]
             })),
+            defer_loading: false,
         }
     }
 
@@ -1025,6 +1030,7 @@ And some more text."#;
                 },
                 "required": ["provider"]
             })),
+            defer_loading: false,
         }]);
 
         assert!(

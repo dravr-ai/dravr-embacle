@@ -80,11 +80,11 @@ pub struct AgentResult {
 /// # use serde_json::json;
 /// # use std::sync::Arc;
 /// # async fn example(provider: &dyn LlmProvider) -> Result<(), embacle::types::RunnerError> {
-/// let declarations = vec![FunctionDeclaration {
-///     name: "search".into(),
-///     description: "Search the web".into(),
-///     parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
-/// }];
+/// let declarations = vec![FunctionDeclaration::new(
+///     "search",
+///     "Search the web",
+///     Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
+/// )];
 ///
 /// let handler: TextToolHandler = Arc::new(|name, _args| {
 ///     FunctionResponse { name: name.to_owned(), response: json!({"results": []}) }
@@ -398,6 +398,7 @@ mod tests {
             name: "search".to_owned(),
             description: "Search the web".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
@@ -433,6 +434,7 @@ mod tests {
             name: "search".to_owned(),
             description: "Search the web".to_owned(),
             parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
+            defer_loading: false,
         }];
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
@@ -474,6 +476,7 @@ mod tests {
             name: "search".to_owned(),
             description: "Search the web".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());
@@ -518,6 +521,7 @@ mod tests {
             name: "ping".to_owned(),
             description: "Ping".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let turn_log: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -552,6 +556,7 @@ mod tests {
             name: "loop".to_owned(),
             description: "Loop forever".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let executor =
@@ -642,6 +647,7 @@ mod tests {
             name: "a".to_owned(),
             description: "Tool A".to_owned(),
             parameters: None,
+            defer_loading: false,
         }];
 
         let executor = AgentExecutor::new(&provider, declarations, noop_handler());

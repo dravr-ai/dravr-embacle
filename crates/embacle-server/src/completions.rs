@@ -751,11 +751,11 @@ fn convert_messages(messages: &[ChatCompletionMessage]) -> Vec<ChatMessage> {
 
 /// Convert a server `ToolDefinition` to core `ToolDefinition`
 fn server_tool_to_core(tool: &OpenAiToolDefinition) -> embacle::ToolDefinition {
-    embacle::ToolDefinition {
-        name: tool.function.name.clone(),
-        description: tool.function.description.clone().unwrap_or_default(),
-        parameters: tool.function.parameters.clone(),
-    }
+    embacle::ToolDefinition::new(
+        tool.function.name.clone(),
+        tool.function.description.clone().unwrap_or_default(),
+        tool.function.parameters.clone(),
+    )
 }
 
 /// Convert a server `ToolChoice` to core `ToolChoice`
@@ -788,10 +788,12 @@ fn server_format_to_core(format: &ResponseFormatRequest) -> embacle::ResponseFor
 fn tools_to_declarations(tools: &[OpenAiToolDefinition]) -> Vec<FunctionDeclaration> {
     tools
         .iter()
-        .map(|t| FunctionDeclaration {
-            name: t.function.name.clone(),
-            description: t.function.description.clone().unwrap_or_default(),
-            parameters: t.function.parameters.clone(),
+        .map(|t| {
+            FunctionDeclaration::new(
+                t.function.name.clone(),
+                t.function.description.clone().unwrap_or_default(),
+                t.function.parameters.clone(),
+            )
         })
         .collect()
 }
@@ -1102,11 +1104,7 @@ mod tests {
 
     /// Helper to build a server-side declaration with just a name.
     fn named_decl(name: &str) -> FunctionDeclaration {
-        FunctionDeclaration {
-            name: name.to_owned(),
-            description: String::new(),
-            parameters: None,
-        }
+        FunctionDeclaration::new(name.to_owned(), String::new(), None)
     }
 
     #[test]
@@ -1331,11 +1329,11 @@ mod tests {
                 ),
             ]),
         };
-        let declarations = vec![FunctionDeclaration {
-            name: "lookup".to_owned(),
-            description: "Look something up".to_owned(),
-            parameters: None,
-        }];
+        let declarations = vec![FunctionDeclaration::new(
+            "lookup".to_owned(),
+            "Look something up".to_owned(),
+            None,
+        )];
         let handler = create_mcp_tool_handler(Arc::new(EchoTools));
         let result = AgentExecutor::new(&provider, declarations, handler)
             .run(vec![ChatMessage::user("Find it")])

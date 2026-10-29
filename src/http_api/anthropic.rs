@@ -135,6 +135,29 @@
 //! share of a write is reported apart (`usage.cache_creation`) and carried on
 //! [`TokenUsage::cached_write_1h_tokens`] so pricing bills it at its own rate.
 //!
+//! ## Deferred tools
+//!
+//! A tool marked [`ToolDefinition::defer_loading`] is sent with
+//! `defer_loading: true`, and the request then declares the server-side tool
+//! search (`tool_search_tool_regex_20251119`) ahead of every tool. The API
+//! keeps a deferred tool's schema out of the model's context and out of the
+//! cached prefix until the model searches for it; the search runs inside the
+//! same call, and its `server_tool_use` and `tool_search_tool_result` blocks
+//! are read past like any other non-text block. The loaded tools follow the
+//! search in the caller's order, the deferred ones close the list, and the
+//! tools breakpoint sits on the last loaded tool, since the API refuses
+//! `cache_control` on a deferred one. A tool a `tool_choice` forces is always
+//! loaded. A model that predates tool search gets every tool loaded and no
+//! search, and a request that defers nothing is the one this crate always
+//! sent. `count_tokens` takes the same tools and counts what is loaded.
+//!
+//! The regex variant, not BM25: the model writes the pattern, so a tool the
+//! caller's prompt names is found by its exact name whatever language the
+//! conversation is in, where BM25 matches words and a French question finds
+//! nothing in English descriptions (measured on Haiku 5.5, 2026-10-29). Name
+//! the tools in the prompt and say they load by search, or the model calls a
+//! deferred tool by name with arguments it guessed.
+//!
 //! ## Responses
 //!
 //! - Text blocks are concatenated into `content`; `tool_use` blocks become
@@ -218,6 +241,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::iter;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -320,6 +344,27 @@ const PRE_EFFORT_MODEL_PREFIXES: &[&str] = &[
     "claude-opus-4-1",
     "claude-opus-4-2",
 ];
+
+/// Model-id prefixes that predate tool search: a deferred tool is sent loaded
+/// to them, with no search tool, as if nothing had been deferred
+const PRE_TOOL_SEARCH_MODEL_PREFIXES: &[&str] = &[
+    "claude-3",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-2",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-2",
+];
+
+/// The server-side search the request carries when it defers a tool. The
+/// regex variant, because the model searches with patterns it writes itself,
+/// so a tool named in the caller's prompt is found by its exact name whatever
+/// language the conversation is in; BM25 matches words, and a French query
+/// finds nothing in English descriptions.
+const TOOL_SEARCH_TYPE: &str = "tool_search_tool_regex_20251119";
+
+/// The name the search tool is declared and called under
+const TOOL_SEARCH_NAME: &str = "tool_search_tool_regex";
 
 /// Model-id prefixes that take `effort` but not adaptive thinking
 const PRE_ADAPTIVE_MODEL_PREFIXES: &[&str] = &["claude-opus-4-5"];
@@ -835,15 +880,37 @@ struct ImageSource {
     data: String,
 }
 
-/// A tool definition
+/// A tool definition: the caller's own, or the server-side tool search
 #[derive(Debug, Serialize)]
 struct WireTool {
+    /// The server tool's type; absent on a caller's tool
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
     name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     description: String,
-    input_schema: Value,
+    /// Absent on the server tool, whose schema is the API's own
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_schema: Option<Value>,
+    /// Loaded into context only when the model searches for it
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    defer_loading: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
+}
+
+impl WireTool {
+    /// The server-side tool search
+    fn tool_search() -> Self {
+        Self {
+            kind: Some(TOOL_SEARCH_TYPE),
+            name: TOOL_SEARCH_NAME.to_owned(),
+            description: String::new(),
+            input_schema: None,
+            defer_loading: false,
+            cache_control: None,
+        }
+    }
 }
 
 /// `tool_choice`
@@ -1354,22 +1421,59 @@ fn push_turn(turns: &mut Vec<WireMessage>, role: &'static str, blocks: Vec<WireB
     }
 }
 
-/// Tool definitions, the last one carrying the tools-prefix cache breakpoint
-fn convert_tools(tools: &[ToolDefinition], prefix_marker: CacheControl) -> Vec<WireTool> {
-    let mut wire: Vec<WireTool> = tools
-        .iter()
-        .map(|tool| WireTool {
-            name: tool.name.clone(),
-            description: tool.description.clone(),
-            input_schema: tool
-                .parameters
+/// Whether `model` can search for a deferred tool
+fn supports_tool_search(model: &str) -> bool {
+    !has_prefix(model, PRE_TOOL_SEARCH_MODEL_PREFIXES)
+}
+
+/// One caller tool in wire shape, deferred or not
+fn wire_tool(tool: &ToolDefinition, defer_loading: bool) -> WireTool {
+    WireTool {
+        kind: None,
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_schema: Some(
+            tool.parameters
                 .clone()
                 .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
-            cache_control: None,
-        })
-        .collect();
-    if let Some(last) = wire.last_mut() {
-        last.cache_control = Some(prefix_marker);
+        ),
+        defer_loading,
+        cache_control: None,
+    }
+}
+
+/// Tool definitions, the last loaded one carrying the tools-prefix cache
+/// breakpoint.
+///
+/// When `tools` defers any tool and `model` can search, the server-side tool
+/// search leads the list, the loaded tools follow in the caller's order and
+/// the deferred ones close it, also in order. The API leaves deferred tools
+/// out of the cached prefix and refuses `cache_control` on one, so the
+/// breakpoint sits on the last loaded tool: the prefix is the search tool and
+/// the loaded set, and a change to a deferred tool's schema rewrites none of
+/// it. A tool `forced` by `tool_choice` is always loaded, since the model
+/// cannot be made to call a tool it has not seen. Otherwise every tool is
+/// loaded, in order, and the request is the one this crate always sent.
+fn convert_tools(
+    tools: &[ToolDefinition],
+    model: &str,
+    forced: Option<&str>,
+    prefix_marker: CacheControl,
+) -> Vec<WireTool> {
+    let defers = |tool: &ToolDefinition| tool.defer_loading && forced != Some(tool.name.as_str());
+    let searching = supports_tool_search(model) && tools.iter().any(defers);
+    let mut wire: Vec<WireTool> = if searching {
+        let (deferred, loaded): (Vec<&ToolDefinition>, Vec<&ToolDefinition>) =
+            tools.iter().partition(|tool| defers(tool));
+        iter::once(WireTool::tool_search())
+            .chain(loaded.into_iter().map(|tool| wire_tool(tool, false)))
+            .chain(deferred.into_iter().map(|tool| wire_tool(tool, true)))
+            .collect()
+    } else {
+        tools.iter().map(|tool| wire_tool(tool, false)).collect()
+    };
+    if let Some(last_loaded) = wire.iter_mut().rev().find(|tool| !tool.defer_loading) {
+        last_loaded.cache_control = Some(prefix_marker);
     }
     wire
 }
@@ -1397,10 +1501,14 @@ fn build_body(config: &AnthropicConfig, request: &ChatRequest, stream: bool) -> 
         .unwrap_or_else(|| config.model.clone());
     let prefix_marker = config.prefix_cache_ttl.marker();
     let (system, messages) = convert_messages(&request.messages, prefix_marker);
+    let forced = match &request.tool_choice {
+        Some(ToolChoice::Specific { name }) => Some(name.as_str()),
+        _ => None,
+    };
     let tools = request
         .tools
         .as_deref()
-        .map(|tools| convert_tools(tools, prefix_marker))
+        .map(|tools| convert_tools(tools, &model, forced, prefix_marker))
         .unwrap_or_default();
     let tool_choice =
         (!tools.is_empty()).then(|| convert_tool_choice(request.tool_choice.as_ref(), &model));
@@ -2302,6 +2410,7 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} tool"),
             parameters: Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
+            defer_loading: false,
         }
     }
 
@@ -2589,6 +2698,118 @@ mod tests {
         assert_eq!(count["system"][1]["cache_control"], one_hour);
     }
 
+    fn deferred(name: &str) -> ToolDefinition {
+        weather_tool(name).with_defer_loading(true)
+    }
+
+    fn tool_names(body: &Value) -> Vec<&str> {
+        body["tools"]
+            .as_array()
+            .expect("tools") // Safe: test assertion
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name")) // Safe: test assertion
+            .collect()
+    }
+
+    #[test]
+    fn a_deferred_tool_brings_the_search_first_and_goes_last_behind_the_loaded_breakpoint() {
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]).with_tools(vec![
+            deferred("a"),
+            weather_tool("b"),
+            deferred("c"),
+            weather_tool("d"),
+        ]);
+        let config = AnthropicConfig::new("k").with_prefix_cache_ttl(AnthropicCacheTtl::OneHour);
+        let body = body_json(&config, &request);
+        assert_eq!(tool_names(&body), [TOOL_SEARCH_NAME, "b", "d", "a", "c"]);
+        let tools = &body["tools"];
+        assert_eq!(
+            tools[0],
+            json!({"type": TOOL_SEARCH_TYPE, "name": TOOL_SEARCH_NAME})
+        );
+        assert!(tools[1].get("type").is_none());
+        // The breakpoint closes the loaded set; the API refuses one on a
+        // deferred tool, and leaves deferred tools out of the prefix anyway.
+        assert_eq!(
+            tools[2]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        for (index, deferred) in [(3, true), (4, true), (1, false), (2, false)] {
+            assert_eq!(tools[index].get("defer_loading").is_some(), deferred);
+        }
+        assert_eq!(tools[3]["defer_loading"], json!(true));
+        assert!(tools[3].get("cache_control").is_none());
+        assert!(tools[4].get("cache_control").is_none());
+        // count_tokens takes the search tool and counts what is loaded.
+        let count = serde_json::to_value(CountTokensRequest::from(build_body(
+            &config, &request, false,
+        )))
+        .expect("serialises"); // Safe: test assertion
+        assert_eq!(count["tools"], body["tools"]);
+    }
+
+    #[test]
+    fn with_nothing_deferred_the_tools_go_out_as_they_always_did() {
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_tools(vec![weather_tool("a"), weather_tool("b")]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(
+            body["tools"],
+            json!([
+                {"name": "a", "description": "a tool",
+                 "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}},
+                {"name": "b", "description": "b tool",
+                 "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                 "cache_control": {"type": "ephemeral"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn every_tool_deferred_leaves_the_search_loaded_and_carrying_the_breakpoint() {
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_tools(vec![deferred("a"), deferred("b")]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(tool_names(&body), [TOOL_SEARCH_NAME, "a", "b"]);
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(body["tools"][0].get("defer_loading").is_none());
+    }
+
+    #[test]
+    fn a_model_without_tool_search_gets_every_tool_loaded_and_no_search() {
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_model("claude-opus-4-1-20250805")
+            .with_tools(vec![deferred("a"), weather_tool("b")]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(tool_names(&body), ["a", "b"]);
+        assert!(body["tools"][0].get("defer_loading").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn a_tool_the_choice_forces_is_loaded_even_when_deferred() {
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")])
+            .with_model("claude-haiku-5-5")
+            .with_tools(vec![deferred("a"), deferred("b")])
+            .with_tool_choice(ToolChoice::Specific {
+                name: "b".to_owned(),
+            });
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(tool_names(&body), [TOOL_SEARCH_NAME, "b", "a"]);
+        assert!(body["tools"][1].get("defer_loading").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(body["tool_choice"], json!({"type": "tool", "name": "b"}));
+    }
+
     #[test]
     fn a_stable_prefix_is_its_own_block_cached_with_the_tools_and_the_rest_at_five_minutes() {
         let prompt = "contract and persona\n\nfollowups and plan";
@@ -2734,6 +2955,7 @@ mod tests {
                 name: "now".to_owned(),
                 description: String::new(),
                 parameters: None,
+                defer_loading: false,
             }]);
         let body = body_json(&AnthropicConfig::new("k"), &request);
         assert_eq!(

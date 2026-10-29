@@ -46,7 +46,7 @@ use github_copilot_sdk::{
     ErrorKind as SdkErrorKind, EventSubscription, IndexMap, LogLevel, McpHttpServerConfig,
     McpServerConfig, McpStdioServerConfig, MessageOptions, PermissionRequestData,
     PermissionRequestKind, ProtocolErrorKind, ProviderConfig, RequestId, SessionConfig,
-    SessionErrorKind, SessionEvent, SessionId, SystemMessageConfig, Transport,
+    SessionErrorKind, SessionEvent, SessionId, SystemMessageConfig, ToolSearchConfig, Transport,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -370,8 +370,17 @@ impl Inner {
             config = config.with_mcp_servers(servers);
             available.push("mcp:*".to_owned());
         }
+        // Tool search off, explicitly. Left unset, the runtime defers every
+        // MCP tool behind its own search once a turn carries more than 30, so
+        // a wide caller catalogue was silently half-hidden on this provider
+        // alone. Deferral is the caller's decision
+        // (`ToolDefinition::defer_loading`), made where it can be measured;
+        // and under `ClientMode::Empty` the `mcp:*` allowlist is not known to
+        // admit the runtime's built-in search tool, so a deferred tool might
+        // not be reachable at all.
         config
             .with_available_tools(available)
+            .with_tool_search(ToolSearchConfig::new().with_enabled(false))
             .with_permission_handler(self.permission_handler(registered))
     }
 
@@ -1104,6 +1113,19 @@ mod tests {
             json!({"errorType": "quota", "message": "premium requests exhausted"}),
         );
         assert!(acc.absorb(&err, None).is_err());
+    }
+
+    #[test]
+    fn tool_search_is_off_whatever_the_catalogue_width() {
+        let runner = CopilotSdkRunner::with_config(CopilotSdkConfig::default());
+        let scratch = tempfile::tempdir().expect("scratch"); // Safe: test assertion
+        let config = runner.inner.session_config(
+            &ChatRequest::new(vec![ChatMessage::user("hi")]),
+            "claude-sonnet-5.5",
+            scratch.path(),
+        );
+        let search = config.tool_search.expect("tool search is set"); // Safe: test assertion
+        assert_eq!(search.enabled, Some(false));
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub fn mcp_tools_to_declarations(tools: &[McpToolDefinition]) -> Vec<FunctionDec
             name: tool.name.clone(),
             description: tool.description.clone(),
             parameters: Some(tool.input_schema.clone()),
+            defer_loading: false,
         })
         .collect()
 }

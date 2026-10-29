@@ -37,11 +37,11 @@ fn request_with_a_tool() -> ChatRequest {
         ChatMessage::system("You are a coach."),
         ChatMessage::user("What is my plan?"),
     ])
-    .with_tools(vec![ToolDefinition {
-        name: "get_training_plan".to_owned(),
-        description: "Fetch the athlete's active training plan.".to_owned(),
-        parameters: Some(json!({"type": "object", "properties": {}})),
-    }])
+    .with_tools(vec![ToolDefinition::new(
+        "get_training_plan".to_owned(),
+        "Fetch the athlete's active training plan.".to_owned(),
+        Some(json!({"type": "object", "properties": {}})),
+    )])
 }
 
 #[tokio::test]

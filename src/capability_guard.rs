@@ -230,6 +230,7 @@ mod tests {
                 name: "test".to_owned(),
                 description: "test".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }]);
         let err = validate_capabilities("test", caps, &request, true).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
@@ -273,6 +274,7 @@ mod tests {
                 name: "test".to_owned(),
                 description: "test".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }]);
         let warnings = validate_capabilities("test", caps, &request, false).unwrap(); // Safe: test assertion
         assert_eq!(warnings.len(), 1);

@@ -180,11 +180,11 @@ fn full_request() -> ChatRequest {
         name: "forecast".to_owned(),
         schema: json!({"type": "object"}),
     })
-    .with_tools(vec![ToolDefinition {
-        name: "get_weather".to_owned(),
-        description: "Weather for a city".to_owned(),
-        parameters: Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
-    }])
+    .with_tools(vec![ToolDefinition::new(
+        "get_weather".to_owned(),
+        "Weather for a city".to_owned(),
+        Some(json!({"type": "object", "properties": {"city": {"type": "string"}}})),
+    )])
     .with_tool_choice(ToolChoice::Specific {
         name: "get_weather".to_owned(),
     })
@@ -350,11 +350,11 @@ async fn tool_choice_travels_only_beside_tools() {
     let provider = openai_api(&base);
 
     let with_tools =
-        ChatRequest::new(vec![ChatMessage::user("hi")]).with_tools(vec![ToolDefinition {
-            name: "lookup".to_owned(),
-            description: "Lookup".to_owned(),
-            parameters: None,
-        }]);
+        ChatRequest::new(vec![ChatMessage::user("hi")]).with_tools(vec![ToolDefinition::new(
+            "lookup".to_owned(),
+            "Lookup".to_owned(),
+            None,
+        )]);
     let empty_tools = ChatRequest::new(vec![ChatMessage::user("hi")])
         .with_tools(vec![])
         .with_tool_choice(ToolChoice::Required);

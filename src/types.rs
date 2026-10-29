@@ -568,7 +568,12 @@ pub struct ToolCallRequest {
 }
 
 /// Definition of a tool that can be called by the model
+///
+/// `#[non_exhaustive]`: providers keep adding per-tool options (deferred
+/// loading was the first), so construct with [`ToolDefinition::new`] and the
+/// setters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolDefinition {
     /// Name of the function
     pub name: String,
@@ -577,6 +582,40 @@ pub struct ToolDefinition {
     /// JSON Schema describing the function parameters
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+    /// Keep this tool's schema out of the model's context until the model
+    /// looks it up.
+    ///
+    /// A provider with on-demand tool loading (Anthropic's tool search) still
+    /// sends the definition, but loads it into context only when the model
+    /// searches for it, so a wide catalogue stops costing its full width on
+    /// every request. Every other provider ignores it and sends the tool as
+    /// usual, so the same request falls back across providers unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
+}
+
+impl ToolDefinition {
+    /// A tool named `name`, described by `description`, taking `parameters`
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            defer_loading: false,
+        }
+    }
+
+    /// Load this tool on demand (see [`ToolDefinition::defer_loading`])
+    #[must_use]
+    pub const fn with_defer_loading(mut self, defer_loading: bool) -> Self {
+        self.defer_loading = defer_loading;
+        self
+    }
 }
 
 /// Controls which tools the model may call
@@ -1214,6 +1253,7 @@ mod tests {
             name: "search".to_owned(),
             description: "Search the web".to_owned(),
             parameters: Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
+            defer_loading: false,
         };
         let json = serde_json::to_string(&td).unwrap(); // Safe: test assertion
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap(); // Safe: test assertion
@@ -1227,6 +1267,7 @@ mod tests {
             name: "ping".to_owned(),
             description: "Check connectivity".to_owned(),
             parameters: None,
+            defer_loading: false,
         };
         let json = serde_json::to_string(&td).unwrap(); // Safe: test assertion
         assert!(!json.contains("parameters"));
@@ -1384,6 +1425,7 @@ mod tests {
                 name: "test".to_owned(),
                 description: "test fn".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }])
             .with_tool_choice(ToolChoice::Required)
             .with_top_p(0.9)

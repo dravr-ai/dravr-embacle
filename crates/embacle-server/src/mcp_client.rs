@@ -105,11 +105,11 @@ impl McpClientPool {
                     );
                     continue;
                 }
-                declarations.push(FunctionDeclaration {
-                    name: name.clone(),
-                    description: tool.description.map(|d| d.to_string()).unwrap_or_default(),
-                    parameters: Some(Value::Object((*tool.input_schema).clone())),
-                });
+                declarations.push(FunctionDeclaration::new(
+                    name.clone(),
+                    tool.description.map(|d| d.to_string()).unwrap_or_default(),
+                    Some(Value::Object((*tool.input_schema).clone())),
+                ));
                 routing.insert(name, server_idx);
                 registered += 1;
             }

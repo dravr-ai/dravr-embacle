@@ -439,6 +439,7 @@ mod tests {
             name: "get_weather".to_owned(),
             description: "Weather".to_owned(),
             parameters: Some(json!({"type": "object"})),
+            defer_loading: false,
         }])
         .with_tool_choice(ToolChoice::Required);
 
@@ -476,6 +477,7 @@ mod tests {
                 name: "get_weather".to_owned(),
                 description: "Weather".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }]);
         let body = serde_json::to_value(provider.build_body(&request, true)).expect("serialises"); // Safe: test assertion
         assert_eq!(body["tool_choice"], "auto");

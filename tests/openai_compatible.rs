@@ -280,15 +280,15 @@ async fn live_complete_with_tools() {
     let request = ChatRequest::new(vec![ChatMessage::user(
         "What's the weather like in Paris? Use the get_weather tool.",
     )])
-    .with_tools(vec![ToolDefinition {
-        name: "get_weather".to_owned(),
-        description: "Get current weather for a location".to_owned(),
-        parameters: Some(serde_json::json!({
+    .with_tools(vec![ToolDefinition::new(
+        "get_weather".to_owned(),
+        "Get current weather for a location".to_owned(),
+        Some(serde_json::json!({
             "type": "object",
             "properties": { "location": { "type": "string", "description": "City name" } },
             "required": ["location"]
         })),
-    }]);
+    )]);
 
     let response = provider.complete(&request).await;
     assert!(

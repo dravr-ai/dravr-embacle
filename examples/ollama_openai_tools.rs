@@ -44,11 +44,11 @@ async fn main() {
         temperature: Some(0.0),
         max_tokens: Some(256),
         stream: false,
-        tools: Some(vec![ToolDefinition {
-            name: "get_secret_number".to_owned(),
-            description: "Returns the secret number. The ONLY way to learn it.".to_owned(),
-            parameters: Some(json!({ "type": "object", "properties": {} })),
-        }]),
+        tools: Some(vec![ToolDefinition::new(
+            "get_secret_number".to_owned(),
+            "Returns the secret number. The ONLY way to learn it.".to_owned(),
+            Some(json!({ "type": "object", "properties": {} })),
+        )]),
         tool_choice: None,
         top_p: None,
         stop: None,

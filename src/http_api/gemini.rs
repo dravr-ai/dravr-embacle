@@ -849,6 +849,7 @@ mod tests {
                 name: "get_weather".to_owned(),
                 description: "Weather".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }]);
         let body = GeminiProvider::build_gemini_request(&request);
         let json = serde_json::to_value(&body).expect("serialises"); // Safe: test assertion

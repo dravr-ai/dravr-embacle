@@ -529,6 +529,7 @@ mod tests {
                 name: "lookup".to_owned(),
                 description: "Lookup".to_owned(),
                 parameters: None,
+                defer_loading: false,
             }])
             .with_tool_choice(ToolChoice::Specific {
                 name: "lookup".to_owned(),
