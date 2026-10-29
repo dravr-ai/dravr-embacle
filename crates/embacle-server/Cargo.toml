@@ -37,7 +37,7 @@ path = "src/main.rs"
 [dependencies]
 embacle = { path = "../..", version = "0.43.0", features = ["config-file", "copilot-headless", "otel"] }
 embacle-mcp = { path = "../embacle-mcp", version = "0.43.0" }
-dravr-tronc = { version = "6.4.0", features = ["notifications"] }
+dravr-tronc = { version = "6.5.0", features = ["notifications"] }
 # A client of downstream tool servers only: not rmcp's `server` or `macros`.
 rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"], optional = true }
 async-trait = "0.1"
