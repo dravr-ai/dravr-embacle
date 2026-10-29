@@ -817,9 +817,9 @@ dependencies = [
 
 [[package]]
 name = "dravr-tronc"
-version = "6.3.0"
+version = "6.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64b22301f4d487bce699dfbf1d5f945eb98c50e6153151d222d0a11408be37c1"
+checksum = "49fc5948257d0b8188e2cec0dc0475f1462a6eda9951771821c8504e88601306"
 dependencies = [
  "async-trait",
  "axum",
@@ -831,6 +831,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "hex",
+ "percent-encoding",
  "reqwest 0.12.28",
  "ring",
  "serde",
