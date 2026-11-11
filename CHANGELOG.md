@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1] — 2026-11-11
+
+### Other
+
+- ci(release): build x86_64-apple-darwin on macos-latest
+
+
 ## [0.45.0] — 2026-11-11
 
 ### Fixed
