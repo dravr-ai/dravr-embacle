@@ -31,7 +31,7 @@ use crate::copilot_common::{
     ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG, DISABLE_BUILTIN_MCPS_FLAG,
 };
 use crate::copilot_headless_config::CopilotHeadlessConfig;
-use crate::copilot_models::catalog_ids;
+use crate::copilot_models::{catalog_ids, default_effort_for, ReasoningEffort};
 use crate::sandbox::{apply_sandbox, SandboxPolicy};
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
@@ -193,8 +193,13 @@ fn acp_prompt_timeout() -> Duration {
 /// Build the JSON params for an ACP `session/prompt` request.
 ///
 /// Always includes `sessionId` and `prompt` blocks. When `max_tokens` is
-/// specified, forwards it as `maxTokens` so the ACP provider can respect
-/// the caller's output length limit.
+/// specified, forwards it as `maxTokens`, which the ACP schema defines.
+///
+/// Copilot does not apply it: on CLI 1.0.108 a `maxTokens` of 64 came back
+/// with 5,401 output tokens and `stopReason: "end_turn"`. That is why
+/// [`CopilotHeadlessRunner`] does not advertise `MAX_TOKENS`, and a caller's
+/// capability check reports the value as ignored. It is still sent so an agent
+/// that honours it does.
 fn build_prompt_params(session_id: &str, prompt: &[Value], max_tokens: Option<u32>) -> Value {
     let mut params = json!({
         "sessionId": session_id,
@@ -249,6 +254,19 @@ fn build_session_params(
     system_prompt: Option<&str>,
     mcp_servers: &[McpServerConfig],
 ) -> Value {
+    // The CLI advertises `mcpCapabilities {http, sse}` and drops any other
+    // server a client sends, saying so only in its own log (CLI 1.0.108:
+    // "Rejecting non-http/sse MCP server"). Its tools are then silently
+    // absent from the turn, so say it where the host can see it.
+    for server in mcp_servers {
+        if matches!(server.transport, McpTransport::Stdio { .. }) {
+            warn!(
+                server = %server.name,
+                "ACP: copilot --acp accepts only http and sse MCP servers; \
+                 this stdio server's tools will not be available"
+            );
+        }
+    }
     let mut params = json!({
         "model": model,
         "cwd": cwd.to_string_lossy(),
@@ -411,6 +429,16 @@ impl AcpTransport {
 
         self.write_message(&msg).await?;
         Ok(id)
+    }
+
+    /// Send a JSON-RPC notification: a request with no id, which gets no reply.
+    async fn send_notification(&mut self, method: &str, params: Value) -> Result<(), RunnerError> {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        self.write_message(&msg).await
     }
 
     /// Send a JSON-RPC response (for server-to-client requests like permission).
@@ -579,9 +607,25 @@ fn write_settings_model(copilot_dir: &Path, model: &str) -> Result<PathBuf, Runn
 /// The child starts from a cleared environment ([`acp_sandbox`]), as every
 /// `-p` runner's does: the model it runs can be steered by its prompt, and
 /// its tools read their own environment.
+///
+/// The reasoning effort is always passed when one is known (see
+/// [`AcpLaunch::effort_for`]): without the flag the child takes the
+/// `effortLevel` of the host user's `~/.copilot/settings.json`, so the same
+/// build reasoned at `high` on one machine and at the model's default on
+/// another.
+///
+/// Unless the host keeps them ([`AcpLaunch::builtin_tools`]), the CLI's
+/// built-in tools are left out with [`AVAILABLE_TOOLS_FLAG`]. The allowlist
+/// does not reach the MCP servers a session brings: on CLI 1.0.108 a caller's
+/// server stayed callable under it, with or without the `mcp:*` entry.
+/// `task_complete` is the tool Autopilot ends a run with: allowlisting MCP
+/// alone took a one-tool Autopilot turn from 3 model requests to 7, the
+/// runtime asking again and again for a completion the model could not mark.
+/// The CLI announces the cut in the reply stream as an `Info: Disabled tools:`
+/// notice, which [`cli_notice`] keeps out of the reply.
 fn acp_command(
     cli_path: &Path,
-    github_token: Option<&str>,
+    launch: &AcpLaunch<'_>,
     model: &str,
     session_cwd: &Path,
 ) -> Command {
@@ -592,11 +636,46 @@ fn acp_command(
     }
     cmd.arg(ALLOW_ALL_MCP_SERVER_INSTRUCTIONS_FLAG);
     cmd.arg(DISABLE_BUILTIN_MCPS_FLAG);
+    if let Some(effort) = launch.effort_for(model) {
+        cmd.args(["--reasoning-effort", effort.as_str()]);
+    }
+    if !launch.builtin_tools {
+        cmd.arg(AVAILABLE_TOOLS_FLAG).args(AVAILABLE_TOOLS);
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_sandbox(&mut cmd, &acp_sandbox(session_cwd, github_token));
+    apply_sandbox(&mut cmd, &acp_sandbox(session_cwd, launch.github_token));
     cmd
+}
+
+/// The CLI flag that restricts the model to the tools it names.
+const AVAILABLE_TOOLS_FLAG: &str = "--available-tools";
+
+/// What the model may call when the CLI's built-ins are left out: every MCP
+/// tool, and the tool an Autopilot run ends with (see [`acp_command`]).
+const AVAILABLE_TOOLS: [&str; 2] = ["mcp:*", "task_complete"];
+
+/// How one runner launches every `copilot --acp` child it spawns.
+///
+/// Fixed at spawn, like the model: a warm child serves every turn with the
+/// flags it was started with, and every child of a runner gets the same ones.
+#[derive(Debug, Clone, Copy)]
+struct AcpLaunch<'cfg> {
+    /// The token the child authenticates with, when the host configured one.
+    github_token: Option<&'cfg str>,
+    /// The host's explicit reasoning effort, ahead of the model's default.
+    reasoning_effort: Option<ReasoningEffort>,
+    /// Whether the CLI's built-in tools stay available to the model.
+    builtin_tools: bool,
+}
+
+impl AcpLaunch<'_> {
+    /// The effort a child pinned to `model` reasons at: the host's, else the
+    /// model family's default, else none (the CLI's own setting).
+    fn effort_for(&self, model: &str) -> Option<ReasoningEffort> {
+        self.reasoning_effort.or_else(|| default_effort_for(model))
+    }
 }
 
 /// The environment and directory the `copilot --acp` child runs in: the host
@@ -634,7 +713,7 @@ const GITHUB_TOKEN_ENV: &str = "COPILOT_GITHUB_TOKEN";
 /// it does not exist; unset, that is a scratch directory, not the host's cwd.
 fn spawn_copilot(
     cli_path: &Path,
-    github_token: Option<&str>,
+    launch: &AcpLaunch<'_>,
     model: &str,
     session_cwd: &Path,
 ) -> Result<Child, RunnerError> {
@@ -656,12 +735,14 @@ fn spawn_copilot(
     fs::create_dir_all(session_cwd).map_err(|e| {
         RunnerError::internal(format!("create session cwd {}: {e}", session_cwd.display()))
     })?;
-    let mut cmd = acp_command(cli_path, github_token, model, session_cwd);
+    let mut cmd = acp_command(cli_path, launch, model, session_cwd);
 
     info!(
         cli_path = %cli_path.display(),
         model = %model,
         cwd = %session_cwd.display(),
+        reasoning_effort = launch.effort_for(model).map_or("cli default", ReasoningEffort::as_str),
+        builtin_tools = launch.builtin_tools,
         "Spawning copilot --acp subprocess"
     );
 
@@ -729,7 +810,7 @@ async fn set_autopilot_mode(
 /// Times out after [`acp_session_timeout`] to detect hung copilot processes early.
 async fn setup_session(
     cli_path: &Path,
-    github_token: Option<&str>,
+    launch: &AcpLaunch<'_>,
     model: &str,
     session_cwd: &Path,
     system_prompt: Option<&str>,
@@ -739,7 +820,7 @@ async fn setup_session(
     // turn spawns a child every time, so skipping the gate here would race
     // every concurrent stream, and every pooled spawn, for settings.json.
     let routing_gate = MODEL_ROUTING_GATE.lock().await;
-    let mut child = spawn_copilot(cli_path, github_token, model, session_cwd)?;
+    let mut child = spawn_copilot(cli_path, launch, model, session_cwd)?;
     let stderr_ring = StderrRing::drain(child.stderr.take());
 
     let stdin = child
@@ -893,13 +974,13 @@ impl AcpProcess {
     /// is returned so callers never leak a half-initialized child.
     async fn spawn_and_initialize(
         cli_path: &Path,
-        github_token: Option<&str>,
+        launch: &AcpLaunch<'_>,
         model: &str,
         session_cwd: &Path,
     ) -> Result<Self, RunnerError> {
         // Held until the handshake completes: see MODEL_ROUTING_GATE.
         let routing_gate = MODEL_ROUTING_GATE.lock().await;
-        let mut child = spawn_copilot(cli_path, github_token, model, session_cwd)?;
+        let mut child = spawn_copilot(cli_path, launch, model, session_cwd)?;
         let stderr_ring = StderrRing::drain(child.stderr.take());
         let stdin = child
             .stdin
@@ -1164,16 +1245,62 @@ struct TurnAccumulator {
 /// reply exists, text written in a continuation is withheld. A run that ended
 /// with no reply leaves its continuation's text in place: that text is then
 /// the only answer there is.
+///
+/// A continuation after the reply that opens by writing text is also
+/// cancelled (`session/cancel`), not only silenced: that text is the
+/// narration being withheld, and every further request re-sends the whole
+/// prompt. A continuation that opens with a tool call is left to run, its
+/// text still withheld: it is doing work the caller asked for (the carnet#690
+/// turn retried `analyze_activity` there), and cancelling it would leave a
+/// reply that claims work never done. A continuation that opens with
+/// `task_complete` is ending anyway. On CLI 1.0.108 a cancel as a turn's
+/// continuation began took it from 67,662 prompt tokens over 3 requests to
+/// 44,917 over 2, the reply unchanged; the prompt response then carries
+/// `stopReason: "cancelled"` and the usage of the requests before the
+/// cancel.
 #[derive(Debug, Default)]
 struct AutopilotRun {
+    /// Model requests the turn has started (`usage_update` frames).
+    requests_started: u32,
     /// The current model request has produced reply text.
     request_wrote_text: bool,
     /// The current model request has called a tool.
     request_called_tool: bool,
-    /// A continuation started after the model had already replied.
-    continuing_after_reply: bool,
+    /// What has happened since the model replied.
+    after_reply: AfterReply,
     /// Bytes of continuation text withheld from the reply.
     withheld_bytes: usize,
+}
+
+/// Where a turn stands once the model has replied (see [`AutopilotRun`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum AfterReply {
+    /// No continuation has started after a reply.
+    #[default]
+    Replying,
+    /// A continuation started after the reply and has shown nothing yet.
+    Continuing,
+    /// The continuation opened with text: the turn is to be cancelled.
+    CancelDue,
+    /// The continuation was cancelled; its request is not in the usage.
+    Cancelled,
+    /// The continuation opened with a tool call and is left to run.
+    ContinuingWithTools,
+    /// The model marked the run complete (`task_complete`) after replying.
+    ///
+    /// The CLI then echoes the tool's `summary` argument into the reply
+    /// stream as ordinary text, inside the same request — `Called the
+    /// secret_word tool; it returned "erable".` after the answer itself
+    /// (CLI 1.0.108, with and without the built-in tools). That is the model
+    /// describing its turn to the runtime, not to the user, so it is withheld
+    /// like a continuation's text.
+    Completed,
+}
+
+/// Whether a tool call is Autopilot's `task_complete`. The CLI titles it by
+/// the tool's name on 1.0.90 and as "Task completion" on 1.0.108.
+fn is_task_complete(title: &str) -> bool {
+    title == "task_complete" || title == "Task completion"
 }
 
 impl TurnAccumulator {
@@ -1192,21 +1319,84 @@ impl TurnAccumulator {
     /// ended there and this request is an Autopilot continuation.
     fn begin_model_request(&mut self) {
         let run = &mut self.run;
+        run.requests_started = run.requests_started.saturating_add(1);
         let previous_ended_run = run.request_wrote_text && !run.request_called_tool;
-        if previous_ended_run && !run.continuing_after_reply && !self.content.trim().is_empty() {
+        if previous_ended_run
+            && run.after_reply == AfterReply::Replying
+            && !self.content.trim().is_empty()
+        {
             debug!(
                 reply_len = self.content.len(),
                 "ACP: Autopilot continued after the model replied; its text is withheld"
             );
-            run.continuing_after_reply = true;
+            run.after_reply = AfterReply::Continuing;
         }
         run.request_wrote_text = false;
         run.request_called_tool = false;
     }
 
-    /// The current model request called a tool.
-    fn record_tool_call(&mut self) {
-        self.run.request_called_tool = true;
+    /// Whether the turn must be cancelled now, because a continuation after
+    /// the reply opened with text. True once per turn.
+    fn take_cancel(&mut self) -> bool {
+        let due = self.run.after_reply == AfterReply::CancelDue;
+        if due {
+            self.run.after_reply = AfterReply::Cancelled;
+        }
+        due
+    }
+
+    /// Whether the turn ended on this runner's cancel. A cancel the CLI
+    /// arrived too late for leaves `end_turn`, and the request it aimed at
+    /// then ran to the end.
+    fn continuation_cancelled(&self, stop_reason: &str) -> bool {
+        stop_reason == "cancelled" && self.run.after_reply == AfterReply::Cancelled
+    }
+
+    /// The model requests the turn's usage covers, `None` when the stream
+    /// marked none. A cancelled continuation started a request whose tokens
+    /// the usage leaves out, so it is not counted.
+    fn model_requests(&self, stop_reason: &str) -> Option<u32> {
+        let billed = self
+            .run
+            .requests_started
+            .saturating_sub(u32::from(self.continuation_cancelled(stop_reason)));
+        (billed > 0).then_some(billed)
+    }
+
+    /// The finish reason for the turn's `stopReason`. A turn this runner
+    /// cancelled after the reply finished with that reply, so it stopped.
+    fn finish_reason(&self, stop_reason: &str) -> &'static str {
+        if self.continuation_cancelled(stop_reason) {
+            return "stop";
+        }
+        map_stop_reason(stop_reason)
+    }
+
+    /// The current model request called the tool titled `title`.
+    ///
+    /// The first call of a continuation decides it: `task_complete` ends the
+    /// turn, any other tool is work left to run (see [`AutopilotRun`]).
+    /// Outside a continuation, `task_complete` after this request's own reply
+    /// text withholds the summary the CLI echoes ([`AfterReply::Completed`]).
+    /// A preface written before an earlier tool call is not a reply: then the
+    /// echoed summary may be the only answer the turn has, and it is kept.
+    fn record_tool_call(&mut self, title: &str) {
+        let completes = is_task_complete(title);
+        let run = &mut self.run;
+        match run.after_reply {
+            AfterReply::Continuing => {
+                run.after_reply = if completes {
+                    AfterReply::Completed
+                } else {
+                    AfterReply::ContinuingWithTools
+                };
+            }
+            AfterReply::Replying if completes && run.request_wrote_text => {
+                run.after_reply = AfterReply::Completed;
+            }
+            _ => {}
+        }
+        run.request_called_tool = true;
     }
 
     /// Take a chunk of model text, returning it when it belongs in the reply.
@@ -1214,12 +1404,21 @@ impl TurnAccumulator {
     /// Text written in a continuation after the model replied is withheld
     /// (see [`AutopilotRun`]) and returns `None`, so no caller streams it.
     fn accept_text(&mut self, text: &str) -> Option<String> {
-        if self.run.continuing_after_reply {
+        if self.run.after_reply != AfterReply::Replying {
+            if self.run.after_reply == AfterReply::Continuing && !text.trim().is_empty() {
+                self.run.after_reply = AfterReply::CancelDue;
+            }
             if self.run.withheld_bytes == 0 {
-                warn!(
-                    "ACP: the model wrote text in an Autopilot continuation after its reply; \
-                     withheld from the reply"
-                );
+                if self.run.after_reply == AfterReply::Completed {
+                    debug!(
+                        "ACP: the CLI echoed the task_complete summary; withheld from the reply"
+                    );
+                } else {
+                    warn!(
+                        "ACP: the model wrote text in an Autopilot continuation after its reply; \
+                         withheld from the reply"
+                    );
+                }
             }
             self.run.withheld_bytes += text.len();
             return None;
@@ -1404,7 +1603,7 @@ fn process_notification_inner(
         }
         schema::SessionUpdate::UsageUpdate(_) => acc.begin_model_request(),
         schema::SessionUpdate::ToolCall(tc) => {
-            acc.record_tool_call();
+            acc.record_tool_call(&tc.title);
             // ACP carries a title and a status; the name, arguments and
             // result stay `None` because the adapter never sends them.
             let observed = ObservedToolCall {
@@ -1516,7 +1715,20 @@ fn build_permission_response(params: &Value, policy: PermissionPolicy) -> Value 
 /// `cachedReadTokens: 0` — which looks exactly like an agent that does not report
 /// reads. Only the second, warm turn distinguishes them; see
 /// `examples/acp_usage_probe.rs`, which is deliberately two-turn for that reason.
-fn extract_usage(result: &Value) -> Option<TokenUsage> {
+///
+/// Copilot's `outputTokens` INCLUDES `thoughtTokens`: across CLI 1.0.108 turns
+/// on claude-haiku-5.5, `outputTokens - thoughtTokens` tracked the visible
+/// reply (1,093 output, 895 thought, a ~110-token code block) and
+/// `inputTokens + outputTokens` equals `totalTokens`. [`TokenUsage`] keeps
+/// reasoning out of `completion_tokens` and every consumer adds it back, so the
+/// thought share is taken out here, capped at the output it is part of. Left
+/// in, each thought token was counted twice, and an OpenAI-shaped
+/// `completion_tokens` read at about twice the billed output on a reasoning
+/// turn.
+///
+/// `model_requests` is the count the turn's stream marked (see
+/// [`AutopilotRun`]); the usage object is their sum.
+fn extract_usage(result: &Value, model_requests: Option<u32>) -> Option<TokenUsage> {
     let usage = result
         .pointer("/result/usage")
         .or_else(|| result.get("usage"))?;
@@ -1543,14 +1755,18 @@ fn extract_usage(result: &Value) -> Option<TokenUsage> {
     let cached_write = usage.get("cachedWriteTokens").and_then(Value::as_u64);
     let thoughts = usage.get("thoughtTokens").and_then(Value::as_u64);
 
+    let thoughts = thoughts.map(|t| t.min(output));
+    let completion = output.saturating_sub(thoughts.unwrap_or(0));
+
     #[allow(clippy::cast_possible_truncation)]
     Some(
-        TokenUsage::new(input as u32, output as u32, total as u32)
+        TokenUsage::new(input as u32, completion as u32, total as u32)
             .with_cache(
                 cached_read.map(|v| v as u32),
                 cached_write.map(|v| v as u32),
             )
-            .with_reasoning(thoughts.map(|v| v as u32)),
+            .with_reasoning(thoughts.map(|v| v as u32))
+            .with_model_requests(model_requests),
     )
 }
 
@@ -1611,7 +1827,8 @@ async fn collect_complete(
                 return Err(err);
             }
 
-            let usage = extract_usage(&msg);
+            let usage = extract_usage(&msg, acc.model_requests(stop_reason));
+            let finish_reason = acc.finish_reason(stop_reason).to_owned();
 
             debug!(
                 content_len = acc.content.len(),
@@ -1625,7 +1842,7 @@ async fn collect_complete(
                 content: acc.content,
                 model,
                 usage,
-                finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
+                finish_reason: Some(finish_reason),
                 warnings: None,
                 tool_calls: None,
             };
@@ -1672,7 +1889,7 @@ async fn collect_streaming(
             let _ = chunk_tx.send(Ok(StreamChunk {
                 delta: String::new(),
                 is_final: true,
-                finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
+                finish_reason: Some(acc.finish_reason(stop_reason).to_owned()),
             }));
 
             return Ok(());
@@ -1697,6 +1914,7 @@ async fn collect_streaming(
                                 finish_reason: None,
                             }));
                         }
+                        cancel_continuation_if_due(transport, &mut acc, session_id).await?;
                     }
                 }
                 "session/request_permission" => {
@@ -1747,6 +1965,7 @@ async fn handle_server_message(
                 if let Some(params) = msg.get("params") {
                     if notification_is_for_session(params, session_id) {
                         let _ = process_notification(params, acc);
+                        cancel_continuation_if_due(transport, acc, session_id).await?;
                     } else {
                         debug!("ACP: dropped a session/update from another session");
                     }
@@ -1760,6 +1979,26 @@ async fn handle_server_message(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Cancel the turn when Autopilot has started a continuation after the reply
+/// (see [`AutopilotRun`]). Called after every `session/update` a turn reads.
+async fn cancel_continuation_if_due(
+    transport: &mut AcpTransport,
+    acc: &mut TurnAccumulator,
+    session_id: &str,
+) -> Result<(), RunnerError> {
+    if acc.take_cancel() {
+        info!(
+            session_id = %session_id,
+            reply_len = acc.content.len(),
+            "ACP: Autopilot continued after the reply; cancelling the rest of the turn"
+        );
+        transport
+            .send_notification("session/cancel", json!({ "sessionId": session_id }))
+            .await?;
     }
     Ok(())
 }
@@ -1783,6 +2022,7 @@ async fn handle_server_message_streaming(
                 if let Some(params) = msg.get("params") {
                     if notification_is_for_session(params, session_id) {
                         process_notification_streaming(params, acc, event_tx);
+                        cancel_continuation_if_due(transport, acc, session_id).await?;
                     } else {
                         debug!("ACP: dropped a session/update from another session");
                     }
@@ -1836,14 +2076,15 @@ async fn collect_streaming_with_tools(
                 .pointer("/result/stopReason")
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn");
-            let usage = extract_usage(&msg);
+            let usage = extract_usage(&msg, acc.model_requests(stop_reason));
+            let finish_reason = acc.finish_reason(stop_reason).to_owned();
 
             return Ok(HeadlessToolResponse {
                 content: acc.content,
                 model,
                 tool_calls: acc.tool_calls,
                 usage,
-                finish_reason: Some(map_stop_reason(stop_reason).to_owned()),
+                finish_reason: Some(finish_reason),
             });
         }
 
@@ -2060,6 +2301,15 @@ impl CopilotHeadlessRunner {
         }
     }
 
+    /// How this runner launches its `copilot --acp` children.
+    fn launch(&self) -> AcpLaunch<'_> {
+        AcpLaunch {
+            github_token: self.config.github_token.as_deref(),
+            reasoning_effort: self.config.reasoning_effort,
+            builtin_tools: self.config.builtin_tools,
+        }
+    }
+
     /// Resolve the copilot CLI binary path.
     ///
     /// A configured override is made absolute against the host's cwd: the
@@ -2198,7 +2448,7 @@ impl CopilotHeadlessRunner {
         if guard.is_none() {
             let fresh = AcpProcess::spawn_and_initialize(
                 cli_path,
-                self.config.github_token.as_deref(),
+                &self.launch(),
                 model,
                 &self.session_cwd,
             )
@@ -2448,7 +2698,7 @@ impl CopilotHeadlessRunner {
 
         let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
-            self.config.github_token.as_deref(),
+            &self.launch(),
             &model,
             &self.session_cwd,
             system_prompt,
@@ -2674,7 +2924,7 @@ impl LlmProvider for CopilotHeadlessRunner {
 
         let (mut transport, mut child, stderr_ring, session_id, observed) = setup_session(
             &cli_path,
-            self.config.github_token.as_deref(),
+            &self.launch(),
             &model,
             &self.session_cwd,
             system_prompt.as_deref(),
@@ -3628,9 +3878,21 @@ mod tests {
     }
 
     fn acp_args(model: &str) -> Vec<String> {
+        acp_args_with(model, &test_launch())
+    }
+
+    fn test_launch() -> AcpLaunch<'static> {
+        AcpLaunch {
+            github_token: None,
+            reasoning_effort: None,
+            builtin_tools: false,
+        }
+    }
+
+    fn acp_args_with(model: &str, launch: &AcpLaunch<'_>) -> Vec<String> {
         acp_command(
             Path::new("copilot"),
-            None,
+            launch,
             model,
             Path::new("/tmp/embacle-acp-test"),
         )
@@ -3690,7 +3952,11 @@ mod tests {
         let mut attempts = 0;
         let status = loop {
             attempts += 1;
-            let mut cmd = acp_command(&script, Some("tok-acp-1"), "", dir.path());
+            let launch = AcpLaunch {
+                github_token: Some("tok-acp-1"),
+                ..test_launch()
+            };
+            let mut cmd = acp_command(&script, &launch, "", dir.path());
             match cmd.status().await {
                 Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
                     time::sleep(Duration::from_millis(50)).await;
@@ -4456,6 +4722,72 @@ mod tests {
         assert_eq!(content, expected);
     }
 
+    /// A narrating continuation is cancelled on the wire: `complete()` sends
+    /// `session/cancel` for the turn's session, finishes with the reply as
+    /// `stop`, and leaves the cancelled request out of the count. `cat` echoes
+    /// what the collector writes, so the cancel is read back after the turn.
+    #[tokio::test]
+    async fn a_narrating_continuation_sends_session_cancel() {
+        let s = "cancel-session";
+        let wire = [
+            wire_usage(s, 1),
+            wire_text(s, "The secret word is erable."),
+            wire_usage(s, 2),
+            wire_text(s, "I already told the user the word."),
+            json!({
+                "jsonrpc": "2.0",
+                "id": RECORDED_PROMPT_ID,
+                "result": {
+                    "stopReason": "cancelled",
+                    "usage": { "inputTokens": 4003, "outputTokens": 12, "totalTokens": 4015 }
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        let (mut transport, _child) = replay(&wire).await;
+        let (response, _) = collect_complete(
+            &mut transport,
+            RECORDED_PROMPT_ID,
+            "claude-sonnet-5".to_owned(),
+            PermissionPolicy::DenyAll,
+            s,
+        )
+        .await
+        .unwrap(); // Safe: test assertion — the turn ends on its prompt response
+
+        assert_eq!(
+            response.content, "The secret word is erable.",
+            "the narration is withheld"
+        );
+        assert_eq!(
+            response.finish_reason.as_deref(),
+            Some("stop"),
+            "a turn cancelled after its reply finished with it"
+        );
+        assert_eq!(
+            response.usage.and_then(|u| u.model_requests),
+            Some(1),
+            "the cancelled request is not in the usage"
+        );
+        let sent = transport.read_message().await.unwrap(); // Safe: test assertion — cat echoes the cancel
+        assert_eq!(
+            sent.get("method").and_then(Value::as_str),
+            Some("session/cancel"),
+            "the collector cancels the turn: {sent}"
+        );
+        assert_eq!(
+            sent.pointer("/params/sessionId").and_then(Value::as_str),
+            Some(s),
+            "the cancel names the turn's session: {sent}"
+        );
+        assert!(
+            sent.get("id").is_none(),
+            "session/cancel is a notification, not a request: {sent}"
+        );
+    }
+
     /// The continuation's own wording, when the model wrote no reply before
     /// it, is the only answer there is.
     #[test]
@@ -4561,7 +4893,7 @@ mod tests {
         let Ok(value) = serde_json::from_str::<Value>(REAL_WARM_TURN_USAGE) else {
             unreachable!("the checked-in fixture must parse")
         };
-        let Some(usage) = extract_usage(&value) else {
+        let Some(usage) = extract_usage(&value, None) else {
             unreachable!("usage is present in the fixture")
         };
 
@@ -4588,7 +4920,7 @@ mod tests {
         let value = json!({
             "result": { "usage": { "inputTokens": 100, "outputTokens": 10, "totalTokens": 110 } }
         });
-        let Some(usage) = extract_usage(&value) else {
+        let Some(usage) = extract_usage(&value, None) else {
             unreachable!("usage is present in the fixture")
         };
 
@@ -4600,5 +4932,397 @@ mod tests {
         );
         assert_eq!(usage.cached_write_tokens, None);
         assert_eq!(usage.reasoning_tokens, None);
+    }
+
+    /// A reasoning turn, verbatim from the wire (CLI 1.0.108, claude-haiku-5.5,
+    /// 2026-11-11): a ~110-token code block behind 895 thought tokens.
+    const REAL_REASONING_TURN_USAGE: &str = r#"{
+        "result": {
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 21149,
+                "outputTokens": 1093,
+                "totalTokens": 22242,
+                "thoughtTokens": 895,
+                "cachedReadTokens": 0,
+                "cachedWriteTokens": 21145
+            }
+        }
+    }"#;
+
+    /// Copilot counts thoughts inside `outputTokens`; embacle counts them
+    /// beside `completion_tokens`. Taken as both, every thought billed twice.
+    #[test]
+    fn extract_usage_takes_the_thoughts_out_of_the_completion() {
+        let Ok(value) = serde_json::from_str::<Value>(REAL_REASONING_TURN_USAGE) else {
+            unreachable!("the checked-in fixture must parse")
+        };
+        let Some(usage) = extract_usage(&value, Some(1)) else {
+            unreachable!("usage is present in the fixture")
+        };
+
+        assert_eq!(usage.completion_tokens, 198, "1093 output - 895 thought");
+        assert_eq!(
+            usage.reasoning_tokens,
+            Some(895),
+            "thoughtTokens is the reasoning count"
+        );
+        assert_eq!(
+            usage.completion_tokens + usage.reasoning_tokens.unwrap_or(0), // Safe: test arithmetic
+            1093,
+            "billed output must equal what Copilot reported, once"
+        );
+        assert_eq!(
+            usage.total_tokens, 22242,
+            "totalTokens passes through unchanged"
+        );
+        assert_eq!(
+            usage.model_requests,
+            Some(1),
+            "the stream's request count is attached"
+        );
+    }
+
+    /// A vendor reporting more thought than output cannot push the completion
+    /// below zero, nor the billed output above what it reported.
+    #[test]
+    fn extract_usage_caps_the_thoughts_at_the_output() {
+        let value = json!({
+            "result": { "usage": {
+                "inputTokens": 10, "outputTokens": 5, "totalTokens": 15, "thoughtTokens": 9
+            } }
+        });
+        let Some(usage) = extract_usage(&value, None) else {
+            unreachable!("usage is present in the fixture")
+        };
+        assert_eq!(
+            usage.completion_tokens, 0,
+            "the completion saturates at zero"
+        );
+        assert_eq!(
+            usage.reasoning_tokens,
+            Some(5),
+            "reasoning is capped at the output"
+        );
+        assert_eq!(usage.model_requests, None, "no count marked, none reported");
+    }
+
+    /// One `usage_update` opens every model request, so the count is what the
+    /// stream marked: three for a reply, a tool batch and a continuation.
+    #[test]
+    fn model_requests_counts_every_usage_update() {
+        let mut acc = TurnAccumulator::new();
+        assert_eq!(
+            acc.model_requests("end_turn"),
+            None,
+            "a stream that marked none"
+        );
+        acc.begin_model_request();
+        acc.record_tool_call("dravr-get_activities");
+        acc.begin_model_request();
+        acc.begin_model_request();
+        assert_eq!(
+            acc.model_requests("end_turn"),
+            Some(3),
+            "one request per usage_update"
+        );
+    }
+
+    /// A continuation after the reply that opens with narration is
+    /// cancelled exactly once, the turn still finishes as `stop`, and the
+    /// cancelled request is not counted among those the usage covers.
+    #[test]
+    fn a_continuation_that_narrates_is_cancelled_once() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("The secret word is erable.");
+        assert!(!acc.take_cancel(), "no continuation has started yet");
+
+        acc.begin_model_request();
+        assert!(
+            !acc.take_cancel(),
+            "a continuation that has shown nothing is not cancelled yet"
+        );
+        assert_eq!(
+            acc.accept_text("I already told the user the word."),
+            None,
+            "continuation narration is withheld"
+        );
+        assert!(acc.take_cancel(), "its narration cancels it");
+        assert!(!acc.take_cancel(), "and only once");
+
+        assert_eq!(
+            acc.finish_reason("cancelled"),
+            "stop",
+            "a turn cancelled after its reply finished with it"
+        );
+        assert_eq!(
+            acc.model_requests("cancelled"),
+            Some(1),
+            "the cancelled request is not billed"
+        );
+        assert_eq!(
+            acc.content, "The secret word is erable.",
+            "the reply is kept whole"
+        );
+    }
+
+    /// A cancel the CLI arrived too late for: the turn ended `end_turn`, so
+    /// the request it aimed at ran and is in the usage.
+    #[test]
+    fn a_late_cancel_still_counts_the_request_it_missed() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("The secret word is erable.");
+        acc.begin_model_request();
+        let _ = acc.accept_text("Done.");
+        assert!(
+            acc.take_cancel(),
+            "the continuation's text made the cancel due"
+        );
+        assert_eq!(
+            acc.model_requests("end_turn"),
+            Some(2),
+            "an uncancelled request is in the usage"
+        );
+        assert_eq!(
+            acc.finish_reason("end_turn"),
+            "stop",
+            "end_turn maps to stop"
+        );
+    }
+
+    /// A continuation that opens with a tool call is doing work: it runs to
+    /// the end (its text still withheld), so the call is not cut off.
+    #[test]
+    fn a_continuation_that_calls_a_tool_is_left_to_run() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("Logged your 40 km ride!");
+        acc.begin_model_request();
+        acc.record_tool_call("dravr-log_activity");
+        assert_eq!(
+            acc.accept_text("Logged it for real this time."),
+            None,
+            "a working continuation's text is still withheld"
+        );
+        assert!(!acc.take_cancel(), "work in flight is never cancelled");
+        acc.begin_model_request();
+        acc.record_tool_call("Task completion");
+        assert!(
+            !acc.take_cancel(),
+            "a continuation ending with task_complete is not cancelled"
+        );
+        assert_eq!(
+            acc.content, "Logged your 40 km ride!",
+            "only the reply reaches the caller"
+        );
+        assert_eq!(
+            acc.model_requests("end_turn"),
+            Some(3),
+            "every request of a run left to finish is counted"
+        );
+    }
+
+    /// A continuation that opens with `task_complete` is ending on its own.
+    #[test]
+    fn a_continuation_that_completes_is_not_cancelled() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("The secret word is erable.");
+        acc.begin_model_request();
+        acc.record_tool_call("Task completion");
+        assert_eq!(
+            acc.accept_text("Told the user the word."),
+            None,
+            "the task_complete echo is withheld"
+        );
+        assert!(
+            !acc.take_cancel(),
+            "a completing continuation is not cancelled"
+        );
+        assert_eq!(
+            acc.content, "The secret word is erable.",
+            "the reply is kept whole"
+        );
+    }
+
+    /// A tool batch is not a continuation: the request after it is the run
+    /// going on, and cancelling it would drop the answer.
+    #[test]
+    fn a_request_after_a_tool_call_is_not_cancelled() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("Let me look that up.");
+        acc.record_tool_call("dravr-get_activities");
+        acc.begin_model_request();
+        assert!(
+            !acc.take_cancel(),
+            "the request after a tool batch is the run going on"
+        );
+        assert_eq!(
+            acc.finish_reason("cancelled"),
+            "cancelled",
+            "a cancel this runner did not send keeps its own meaning"
+        );
+    }
+
+    /// A run that ended with no reply keeps going: its continuation's text is
+    /// then the only answer there is.
+    #[test]
+    fn a_continuation_with_no_reply_yet_is_not_cancelled() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        acc.begin_model_request();
+        assert!(
+            !acc.take_cancel(),
+            "with no reply yet, there is nothing to protect"
+        );
+    }
+
+    #[test]
+    fn acp_command_leaves_the_builtin_tools_out_by_default() {
+        let args = acp_args("gpt-5.4");
+        let idx = args
+            .iter()
+            .position(|a| a == "--available-tools")
+            .expect("--available-tools should be present"); // Safe: test assertion
+        assert_eq!(
+            args.get(idx + 1..idx + 3),
+            Some(&["mcp:*".to_owned(), "task_complete".to_owned()][..]),
+            "MCP tools and Autopilot's task_complete stay; nothing else"
+        );
+    }
+
+    #[test]
+    fn acp_command_keeps_the_builtin_tools_when_the_host_asks() {
+        let launch = AcpLaunch {
+            builtin_tools: true,
+            ..test_launch()
+        };
+        let args = acp_args_with("gpt-5.4", &launch);
+        assert!(!args.iter().any(|a| a == "--available-tools"), "{args:?}");
+    }
+
+    /// The effort is passed explicitly, so the host user's settings.json
+    /// `effortLevel` never decides it for a model with a known default.
+    #[test]
+    fn acp_command_passes_the_model_default_effort() {
+        let args = acp_args("claude-haiku-5.5");
+        let idx = args
+            .iter()
+            .position(|a| a == "--reasoning-effort")
+            .expect("--reasoning-effort should be present"); // Safe: test assertion
+        assert_eq!(
+            args.get(idx + 1).map(String::as_str),
+            Some("medium"),
+            "claude-haiku-5.5's family default"
+        );
+    }
+
+    #[test]
+    fn acp_command_prefers_the_configured_effort() {
+        let launch = AcpLaunch {
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..test_launch()
+        };
+        let args = acp_args_with("claude-haiku-5.5", &launch);
+        let idx = args
+            .iter()
+            .position(|a| a == "--reasoning-effort")
+            .expect("--reasoning-effort should be present"); // Safe: test assertion
+        assert_eq!(
+            args.get(idx + 1).map(String::as_str),
+            Some("low"),
+            "the configured effort wins over the model default"
+        );
+    }
+
+    /// The CLI echoes `task_complete`'s summary as reply text right after the
+    /// answer, in the same request. Recorded on CLI 1.0.108 with the tool
+    /// allowlist; the same shape arrives with the built-ins.
+    const RECORDED_TASK_COMPLETE_ECHO: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Info: Disabled tools: bash, create, edit, glob, grep, view, web_fetch"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":5350,"size":200000}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"toolu_1","title":"probe-secret_word","kind":"other","status":"pending","rawInput":{}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":5416,"size":200000}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The secret word is"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" **erable**."}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"toolu_2","title":"Task completion","kind":"other","status":"pending","rawInput":{"summary":"Called the secret_word tool; it returned \"erable\"."}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Called the secret_word tool; it returned \"erable\"."}}}}"#;
+
+    #[test]
+    fn the_task_complete_echo_and_the_cli_notice_stay_out_of_the_reply() {
+        let mut acc = TurnAccumulator::new();
+        for line in RECORDED_TASK_COMPLETE_ECHO.lines() {
+            let Ok(msg) = serde_json::from_str::<Value>(line) else {
+                unreachable!("the recorded fixture must parse")
+            };
+            let _ = process_notification(&msg, &mut acc);
+        }
+        assert_eq!(
+            acc.content, "The secret word is **erable**.",
+            "the answer alone, no notice, no echoed summary"
+        );
+        assert_eq!(
+            acc.notices.len(),
+            1,
+            "the Disabled tools notice is a notice"
+        );
+        assert!(!acc.take_cancel(), "a completed run is not a continuation");
+        assert_eq!(
+            acc.model_requests("end_turn"),
+            Some(2),
+            "two usage_update frames in the recording"
+        );
+        assert_eq!(
+            acc.finish_reason("end_turn"),
+            "stop",
+            "end_turn maps to stop"
+        );
+    }
+
+    /// A run that marks itself complete before writing any reply keeps the
+    /// echoed summary: it is then the only answer the turn has.
+    #[test]
+    fn a_task_complete_with_no_reply_keeps_its_summary() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        acc.record_tool_call("Task completion");
+        assert_eq!(
+            acc.accept_text("Done."),
+            Some("Done.".to_owned()),
+            "the summary is the only answer, so it streams"
+        );
+        assert_eq!(acc.content, "Done.", "the summary is kept as the reply");
+    }
+
+    /// A preface written before a tool call is not the reply: when the model
+    /// then answers only through `task_complete`'s summary, that summary is
+    /// the answer and is kept.
+    #[test]
+    fn a_preface_does_not_withhold_the_summary_answer() {
+        let mut acc = TurnAccumulator::new();
+        acc.begin_model_request();
+        let _ = acc.accept_text("Let me check your recent activities.");
+        acc.record_tool_call("dravr-get_activities");
+        acc.begin_model_request();
+        acc.record_tool_call("Task completion");
+        assert_eq!(
+            acc.accept_text(" You ran 42 km this week."),
+            Some(" You ran 42 km this week.".to_owned()),
+            "with only a preface before it, the summary is the answer and streams"
+        );
+        assert_eq!(
+            acc.content, "Let me check your recent activities. You ran 42 km this week.",
+            "the preface and the summary make the reply"
+        );
+    }
+
+    /// A model with no known default gets no flag rather than a guess the CLI
+    /// may reject (Haiku 4.5 rejects any effort).
+    #[test]
+    fn acp_command_passes_no_effort_without_a_default() {
+        let args = acp_args("claude-haiku-4.5");
+        assert!(!args.iter().any(|a| a == "--reasoning-effort"), "{args:?}");
     }
 }

@@ -372,7 +372,7 @@ async fn e2e_kilo_cli() {
 #[cfg(feature = "copilot-headless")]
 mod headless {
     use super::*;
-    use embacle::CopilotHeadlessRunner;
+    use embacle::{CopilotHeadlessConfig, CopilotHeadlessRunner};
 
     #[tokio::test]
     async fn e2e_copilot_headless_complete() {
@@ -439,7 +439,12 @@ mod headless {
             );
             return;
         }
-        let runner = CopilotHeadlessRunner::from_env();
+        // Reading a file is a CLI built-in tool, which the runner leaves out
+        // unless the host keeps them: this test is that host.
+        let runner = CopilotHeadlessRunner::with_config(CopilotHeadlessConfig {
+            builtin_tools: true,
+            ..CopilotHeadlessConfig::from_env()
+        });
 
         // Ask something that should trigger tool use (file read)
         let request = ChatRequest::new(vec![ChatMessage::user(

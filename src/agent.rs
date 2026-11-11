@@ -298,6 +298,7 @@ fn accumulate_usage(total: &mut TokenUsage, turn: &TokenUsage) {
     total.cached_write_1h_tokens =
         add_reported(total.cached_write_1h_tokens, turn.cached_write_1h_tokens);
     total.reasoning_tokens = add_reported(total.reasoning_tokens, turn.reasoning_tokens);
+    total.model_requests = add_reported(total.model_requests, turn.model_requests);
 }
 
 /// Sum two optional counts, `None` only when neither was reported.

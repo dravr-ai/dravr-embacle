@@ -387,6 +387,11 @@ pub struct Usage {
     /// The reasoning share of `completion_tokens`, when the runner reported one
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
+    /// Model requests behind the counts, when the runner reported them. Not
+    /// an `OpenAI` field: an agent runtime can make several requests for one
+    /// completion, each re-sending the prompt, and the counts are their sum.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_requests: Option<u32>,
 }
 
 /// `prompt_tokens_details`: the cached share of the prompt
@@ -437,6 +442,7 @@ impl From<&TokenUsage> for Usage {
             completion_tokens_details: usage
                 .reasoning_tokens
                 .map(|reasoning_tokens| CompletionTokensDetails { reasoning_tokens }),
+            model_requests: usage.model_requests,
         }
     }
 }

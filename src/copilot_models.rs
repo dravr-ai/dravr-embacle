@@ -100,6 +100,19 @@ impl ReasoningEffort {
             Self::XHigh => "xhigh",
         }
     }
+
+    /// The level a configuration value names, case-insensitively: one of
+    /// [`Self::as_str`]'s values. `None` for anything else.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            _ => None,
+        }
+    }
 }
 
 /// One entry in the ranked Copilot model catalog.
@@ -382,6 +395,32 @@ mod tests {
         assert_eq!(
             ordered_ids, catalog_ids,
             "CATALOG entries should already be sorted by rank()"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_parses_every_level_it_prints() {
+        for effort in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+        ] {
+            assert_eq!(
+                ReasoningEffort::parse(effort.as_str()),
+                Some(effort),
+                "as_str and parse must round-trip"
+            );
+        }
+        assert_eq!(
+            ReasoningEffort::parse(" HIGH "),
+            Some(ReasoningEffort::High),
+            "a configured value is trimmed and case-insensitive"
+        );
+        assert_eq!(
+            ReasoningEffort::parse("max"),
+            None,
+            "an unknown level is rejected, not guessed"
         );
     }
 

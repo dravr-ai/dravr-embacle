@@ -934,6 +934,16 @@ pub struct TokenUsage {
     /// so dropping it under-reports cost on reasoning models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
+    /// Model requests the provider made to produce this response, when it
+    /// reports them and they can exceed one.
+    ///
+    /// An agent runtime can answer one prompt with several requests to the
+    /// model — one after each tool batch, and Copilot's Autopilot more after
+    /// the model has already replied — and every one re-sends the whole
+    /// prompt. The token counts above are their sum, so this is what tells a
+    /// long prompt apart from a prompt sent several times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_requests: Option<u32>,
 }
 
 impl TokenUsage {
@@ -949,6 +959,7 @@ impl TokenUsage {
             cached_write_tokens: None,
             cached_write_1h_tokens: None,
             reasoning_tokens: None,
+            model_requests: None,
         }
     }
 
@@ -972,6 +983,14 @@ impl TokenUsage {
     #[must_use]
     pub const fn with_reasoning(mut self, reasoning: Option<u32>) -> Self {
         self.reasoning_tokens = reasoning;
+        self
+    }
+
+    /// Attach the number of model requests behind the response. Pass `None`
+    /// when the provider did not report it.
+    #[must_use]
+    pub const fn with_model_requests(mut self, requests: Option<u32>) -> Self {
+        self.model_requests = requests;
         self
     }
 }

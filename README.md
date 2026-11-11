@@ -625,6 +625,8 @@ Configuration via environment variables:
 | `COPILOT_HEADLESS_MAX_HISTORY_TURNS` | `20` | Max conversation history turns in prompt (0 disables) |
 | `COPILOT_HEADLESS_PERMISSION_POLICY` | deny | `auto_approve` lets the subprocess run its own tools (shell, git, file edits); anything else denies |
 | `COPILOT_HEADLESS_MCP_TOOL_CALLING` | `false` | Advertise `SDK_TOOL_CALLING`: the caller passes `mcp_servers` per request and copilot calls those tools natively |
+| `COPILOT_HEADLESS_REASONING_EFFORT` | model default | `low`, `medium`, `high` or `xhigh`, passed as `--reasoning-effort`. Unset, the model family's default; a model with none takes `effortLevel` from `~/.copilot/settings.json` |
+| `COPILOT_HEADLESS_BUILTIN_TOOLS` | `false` (`true` under `auto_approve`) | Keep the CLI's built-in tools (`bash`, `view`, `edit`, …). Off, the child runs with `--available-tools mcp:* task_complete`, which takes ~17k tokens of tool schemas off every prompt |
 
 ## Copilot SDK (feature flag)
 

@@ -12,13 +12,18 @@
 //! system messages and tool definitions exceed the model's usable context
 //! budget … Error: No response was returned."
 //!
+//! The budget must stay below what the CLI adds on its own. Without its
+//! built-in tools (the runner's default) that is ~4k tokens on CLI 1.0.103 and
+//! 1.0.108, so 3,000 no longer refuses and the turn goes to the provider; 1,000
+//! does.
+//!
 //! That text once reached athletes as the coach's reply. Its own cargo run
 //! because the budget is process environment the CLI inherits; the lane sets it
 //! for this module alone:
 //!
 //! ```bash
 //! EMBACLE_E2E_COPILOT_CLI_NOTICE=1 COPILOT_OFFLINE=true \
-//!   COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9/v1 COPILOT_PROVIDER_MAX_PROMPT_TOKENS=3000 \
+//!   COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9/v1 COPILOT_PROVIDER_MAX_PROMPT_TOKENS=1000 \
 //!   COPILOT_HEADLESS_MODEL=any-model cargo test --features copilot-headless --test it -- e2e_cli_notice::
 //! ```
 

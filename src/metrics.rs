@@ -71,7 +71,9 @@ pub struct MetricsReport {
     pub avg_latency_ms: u64,
     /// Total prompt tokens consumed
     pub total_prompt_tokens: u64,
-    /// Total completion tokens generated
+    /// Total completion tokens generated, reasoning included: the output
+    /// the provider billed. [`TokenUsage`] reports reasoning beside
+    /// `completion_tokens`, so it is added back here.
     pub total_completion_tokens: u64,
     /// Total tokens (prompt + completion)
     pub total_tokens: u64,
@@ -279,10 +281,15 @@ impl LlmProvider for MetricsProvider {
                 || estimate_tokens(&response.content),
                 |u| u.completion_tokens,
             ));
-            let total = prompt_tokens + completion_tokens;
+            // The output generated, reasoning included. Pricing takes the two
+            // apart (`compute_cost` adds the reasoning itself), the totals
+            // count what was generated.
+            let reasoning_tokens = u64::from(usage.and_then(|u| u.reasoning_tokens).unwrap_or(0));
+            let output_tokens = completion_tokens + reasoning_tokens;
+            let total = prompt_tokens + output_tokens;
 
             state.total_prompt_tokens += prompt_tokens;
-            state.total_completion_tokens += completion_tokens;
+            state.total_completion_tokens += output_tokens;
             state.total_tokens += total;
 
             let cost = self.compute_cost(&response.model, prompt_tokens, completion_tokens, usage);
@@ -290,7 +297,12 @@ impl LlmProvider for MetricsProvider {
 
             info!(
                 provider = self.inner.name(),
-                elapsed_ms, prompt_tokens, completion_tokens, cost, "metrics: complete() succeeded"
+                elapsed_ms,
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                cost,
+                "metrics: complete() succeeded"
             );
 
             #[cfg(feature = "otel")]
@@ -302,7 +314,7 @@ impl LlmProvider for MetricsProvider {
                     .requests_duration_ms
                     .record(elapsed_ms as f64, attrs);
                 self.otel.tokens_prompt.add(prompt_tokens, attrs);
-                self.otel.tokens_completion.add(completion_tokens, attrs);
+                self.otel.tokens_completion.add(output_tokens, attrs);
                 if cost > 0.0 {
                     self.otel.cost_total.add(cost, attrs);
                 }
@@ -477,6 +489,31 @@ mod tests {
         assert_eq!(report.total_completion_tokens, 8);
         assert_eq!(report.total_tokens, 26);
         assert_eq!(report.errors_count, 0);
+    }
+
+    /// Reasoning is generated output: a reply of 198 tokens behind 895 of
+    /// reasoning generated 1,093, which the totals must show.
+    #[tokio::test]
+    async fn completion_totals_include_reasoning() {
+        let provider = TestProvider::new(vec![Ok(ChatResponse {
+            content: "code".to_owned(),
+            model: "test-model".to_owned(),
+            usage: Some(TokenUsage::new(100, 198, 1193).with_reasoning(Some(895))),
+            finish_reason: Some("stop".to_owned()),
+            warnings: None,
+            tool_calls: None,
+        })]);
+        let metered = MetricsProvider::new(Box::new(provider));
+        let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+
+        metered.complete(&request).await.expect("call"); // Safe: test assertion
+
+        let report = metered.report().unwrap(); // Safe: test assertion
+        assert_eq!(
+            report.total_completion_tokens, 1093,
+            "198 completion + 895 reasoning"
+        );
+        assert_eq!(report.total_tokens, 1193, "100 prompt + 1093 output");
     }
 
     #[tokio::test]

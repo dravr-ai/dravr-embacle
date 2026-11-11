@@ -639,6 +639,7 @@ impl TurnAccumulator {
             cached_write_tokens: Some(self.cached_write_tokens),
             cached_write_1h_tokens: None,
             reasoning_tokens: Some(self.reasoning_tokens),
+            model_requests: None,
         });
         HeadlessToolResponse {
             content: self.content,
