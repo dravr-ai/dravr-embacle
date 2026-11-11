@@ -43,8 +43,10 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+          # Cross-compiled on the arm64 runner, as it was on macos-14 until
+          # GitHub retired that image (v0.45.0's build never started).
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-latest
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
