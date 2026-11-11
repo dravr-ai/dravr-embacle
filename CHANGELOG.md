@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.45.0] — 2026-11-11
+
+### Fixed
+
+- fix(copilot-headless): cut the ACP turn cost and report it honestly
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.5.0 -> 6.7.0
+
+
 ## [0.44.0] — 2026-10-29
 
 ### Fixed
