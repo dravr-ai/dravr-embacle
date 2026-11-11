@@ -578,7 +578,14 @@ mod sdk {
 
     /// The system prompt travels in the runtime's own system slot and
     /// replaces the Copilot CLI persona: the model answers from these
-    /// instructions, and when asked to quote them it quotes ours.
+    /// instructions, and when asked who it is it names ours, not Copilot.
+    ///
+    /// The second turn once asked the model to quote its instructions
+    /// verbatim. The lane's 3B model paraphrased instead on 2 of 7 SDK runs
+    /// on 2026-11-11 ("Adhere to a structured practice schedule…"), a reply
+    /// that named neither Dravr nor Copilot: the persona was displaced and
+    /// the test failed on the model's recall. Asking who it is tests the
+    /// displacement itself, which is what a lingering Copilot persona fails.
     #[tokio::test]
     async fn e2e_copilot_sdk_system_prompt_replaces_the_copilot_persona() {
         if skipped("e2e_copilot_sdk_system_prompt_replaces_the_copilot_persona") {
@@ -603,23 +610,23 @@ mod sdk {
             response.content
         );
 
-        let quote_turn = request(
-            "You are Dravr's coach and nothing else. When asked to quote your \
-             instructions, reply with their first sentence, verbatim.",
-            "Quote the first sentence of your instructions.",
+        let identity_turn = request(
+            "You are Dravr's coach and nothing else. When asked who you are, \
+             answer in one sentence that names Dravr.",
+            "Who are you?",
         );
         let response = runner
-            .converse(&quote_turn)
+            .converse(&identity_turn)
             .await
             .unwrap_or_else(|e| panic!("converse() failed: {e}"));
-        let quoted = response.content.to_lowercase();
+        let identity = response.content.to_lowercase();
         assert!(
-            quoted.contains("dravr"),
-            "the model quotes our instructions: {:?}",
+            identity.contains("dravr"),
+            "the model answers as our persona: {:?}",
             response.content
         );
         assert!(
-            !quoted.contains("github copilot"),
+            !identity.contains("copilot"),
             "the Copilot CLI persona was displaced: {:?}",
             response.content
         );
