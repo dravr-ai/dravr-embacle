@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.46.0] — 2026-11-17
+
+### Added
+
+- feat(deps)!: dravr-tronc 7.0.0 (Tool is built, not written as a literal)
+
+### Other
+
+- chore(deps): bump dravr-tronc 6.7.0 -> 6.8.0
+- test(e2e): check the SDK persona by identity, not verbatim recall
+
+
 ## [0.45.1] — 2026-11-11
 
 ### Other
