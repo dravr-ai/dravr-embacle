@@ -18,18 +18,14 @@ pub struct GetModel;
 #[async_trait]
 impl McpTool<ServerState> for GetModel {
     fn definition(&self) -> Tool {
-        Tool {
-            name: "get_model".to_owned(),
-            description: "Get the current model and list available models for the active provider"
-                .to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "get_model".to_owned(),
+            "Get the current model and list available models for the active provider".to_owned(),
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(
@@ -77,11 +73,10 @@ pub struct SetModel;
 #[async_trait]
 impl McpTool<ServerState> for SetModel {
     fn definition(&self) -> Tool {
-        Tool {
-            name: "set_model".to_owned(),
-            description: "Set the model for the active provider (pass null to reset to default)"
-                .to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "set_model".to_owned(),
+            "Set the model for the active provider (pass null to reset to default)".to_owned(),
+            json!({
                 "type": "object",
                 "properties": {
                     "model": {
@@ -91,10 +86,7 @@ impl McpTool<ServerState> for SetModel {
                 },
                 "required": ["model"]
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(

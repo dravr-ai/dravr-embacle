@@ -22,12 +22,11 @@ pub struct Prompt;
 #[async_trait]
 impl McpTool<ServerState> for Prompt {
     fn definition(&self) -> Tool {
-        Tool {
-            name: "prompt".to_owned(),
-            description:
-                "Send a chat prompt to the active LLM provider, or multiplex to all configured providers"
-                    .to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "prompt".to_owned(),
+            "Send a chat prompt to the active LLM provider, or multiplex to all configured providers"
+                .to_owned(),
+            json!({
                 "type": "object",
                 "properties": {
                     "messages": {
@@ -73,10 +72,7 @@ impl McpTool<ServerState> for Prompt {
                 },
                 "required": ["messages"]
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(

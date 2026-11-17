@@ -19,18 +19,14 @@ pub struct GetMultiplexProvider;
 #[async_trait]
 impl McpTool<ServerState> for GetMultiplexProvider {
     fn definition(&self) -> Tool {
-        Tool {
-            name: "get_multiplex_provider".to_owned(),
-            description: "Get the list of providers configured for multiplex prompt dispatch"
-                .to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "get_multiplex_provider".to_owned(),
+            "Get the list of providers configured for multiplex prompt dispatch".to_owned(),
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(
@@ -65,12 +61,11 @@ impl McpTool<ServerState> for SetMultiplexProvider {
     fn definition(&self) -> Tool {
         let provider_names: Vec<String> = ALL_PROVIDERS.iter().map(ToString::to_string).collect();
 
-        Tool {
-            name: "set_multiplex_provider".to_owned(),
-            description:
-                "Set providers for multiplex mode — prompts will fan out to all listed providers"
-                    .to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "set_multiplex_provider".to_owned(),
+            "Set providers for multiplex mode — prompts will fan out to all listed providers"
+                .to_owned(),
+            json!({
                 "type": "object",
                 "properties": {
                     "providers": {
@@ -84,10 +79,7 @@ impl McpTool<ServerState> for SetMultiplexProvider {
                 },
                 "required": ["providers"]
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(

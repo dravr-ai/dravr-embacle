@@ -514,14 +514,7 @@ impl ToolDispatcher<Inner> for Forwarding {
             .list_tools()
             .await
             .into_iter()
-            .map(|t| Tool {
-                name: t.name,
-                description: t.description,
-                input_schema: t.input_schema,
-                annotations: None,
-                output_schema: None,
-                execution: None,
-            })
+            .map(|t| Tool::new(t.name, t.description, t.input_schema))
             .collect()
     }
 

@@ -19,17 +19,14 @@ pub struct GetProvider;
 #[async_trait]
 impl McpTool<ServerState> for GetProvider {
     fn definition(&self) -> Tool {
-        Tool {
-            name: "get_provider".to_owned(),
-            description: "Get the active LLM provider and list all available providers".to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "get_provider".to_owned(),
+            "Get the active LLM provider and list all available providers".to_owned(),
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(
@@ -59,10 +56,10 @@ impl McpTool<ServerState> for SetProvider {
     fn definition(&self) -> Tool {
         let provider_names: Vec<String> = ALL_PROVIDERS.iter().map(ToString::to_string).collect();
 
-        Tool {
-            name: "set_provider".to_owned(),
-            description: "Set the active LLM provider for prompt dispatch".to_owned(),
-            input_schema: json!({
+        Tool::new(
+            "set_provider".to_owned(),
+            "Set the active LLM provider for prompt dispatch".to_owned(),
+            json!({
                 "type": "object",
                 "properties": {
                     "provider": {
@@ -73,10 +70,7 @@ impl McpTool<ServerState> for SetProvider {
                 },
                 "required": ["provider"]
             }),
-            annotations: None,
-            output_schema: None,
-            execution: None,
-        }
+        )
     }
 
     async fn execute(
