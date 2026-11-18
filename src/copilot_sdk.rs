@@ -820,6 +820,7 @@ impl LlmProvider for CopilotSdkRunner {
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse, RunnerError> {
         let turn = self.converse(request).await?;
         Ok(ChatResponse {
+            replay_blocks: None,
             content: turn.content,
             model: turn.model,
             usage: turn.usage,

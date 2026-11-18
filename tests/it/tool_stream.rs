@@ -32,6 +32,7 @@ use embacle::types::{
 /// What every provider below answers: text, one tool call and usage
 fn answer() -> ChatResponse {
     ChatResponse {
+        replay_blocks: None,
         content: "Let me look".to_owned(),
         model: "test-model".to_owned(),
         usage: Some(TokenUsage::new(12, 4, 16).with_cache(Some(8), Some(0))),

@@ -159,6 +159,7 @@ impl KiloCliRunner {
         let content = content_parts.join("");
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "kilo".to_owned(),
             usage,

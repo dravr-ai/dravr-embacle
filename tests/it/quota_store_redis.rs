@@ -197,6 +197,7 @@ impl LlmProvider for TestProvider {
             return Err(e);
         }
         Ok(ChatResponse {
+            replay_blocks: None,
             content: format!("answered by {}", self.provider_name),
             model: self.models[0].clone(),
             usage: Some(TokenUsage::new(1, 1, 2)),

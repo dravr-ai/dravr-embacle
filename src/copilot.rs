@@ -263,6 +263,7 @@ impl CopilotRunner {
             .to_owned();
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: model.to_owned(),
             usage: None,

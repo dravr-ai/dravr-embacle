@@ -122,6 +122,7 @@ impl GeminiCliRunner {
                 TokenUsage::new(input, output, total)
             });
             return Ok(ChatResponse {
+                replay_blocks: None,
                 content,
                 model: "gemini".to_owned(),
                 usage,
@@ -182,6 +183,7 @@ impl GeminiCliRunner {
 
         let content = content_parts.join("");
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "gemini".to_owned(),
             usage,

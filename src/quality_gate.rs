@@ -284,6 +284,7 @@ mod tests {
             let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
+                    replay_blocks: None,
                     content: "valid response".to_owned(),
                     model: "test-model".to_owned(),
                     usage: None,
@@ -305,6 +306,7 @@ mod tests {
 
     fn make_response(content: &str) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: content.to_owned(),
             model: "test-model".to_owned(),
             usage: None,

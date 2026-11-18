@@ -1302,6 +1302,7 @@ mod tests {
 
     fn scripted_reply(content: &str, usage: TokenUsage) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: content.to_owned(),
             model: "scripted-model".to_owned(),
             usage: Some(usage),

@@ -110,6 +110,7 @@ impl GooseCliRunner {
         }
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "goose".to_owned(),
             usage: None,

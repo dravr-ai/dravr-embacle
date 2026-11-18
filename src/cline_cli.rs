@@ -99,6 +99,7 @@ impl ClineCliRunner {
         }
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "cline".to_owned(),
             usage: None,

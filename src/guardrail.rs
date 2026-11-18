@@ -383,6 +383,7 @@ mod tests {
         fn ok(content: &str) -> Self {
             Self {
                 responses: Mutex::new(vec![Ok(ChatResponse {
+                    replay_blocks: None,
                     content: content.to_owned(),
                     model: "test-model".to_owned(),
                     usage: None,
@@ -417,6 +418,7 @@ mod tests {
             let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
+                    replay_blocks: None,
                     content: "default".to_owned(),
                     model: "test-model".to_owned(),
                     usage: None,
@@ -485,6 +487,7 @@ mod tests {
         };
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         let response = ChatResponse {
+            replay_blocks: None,
             content: "a very long response that exceeds limits".to_owned(),
             model: "m".to_owned(),
             usage: None,
@@ -536,6 +539,7 @@ mod tests {
         };
         let request = ChatRequest::new(vec![ChatMessage::user("tell me")]);
         let response = ChatResponse {
+            replay_blocks: None,
             content: "this information is classified".to_owned(),
             model: "m".to_owned(),
             usage: None,
@@ -597,6 +601,7 @@ mod tests {
         };
         let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
         let response = ChatResponse {
+            replay_blocks: None,
             content: "reach out to admin@corp.io".to_owned(),
             model: "m".to_owned(),
             usage: None,

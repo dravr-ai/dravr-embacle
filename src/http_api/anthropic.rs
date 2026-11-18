@@ -105,7 +105,7 @@
 //! ## Prompt caching
 //!
 //! Three of the four cache breakpoints are used (four with a stable system
-//! prefix, below), in render order: the last
+//! prefix or a marked message, below), in render order: the last
 //! tool definition (the tools prefix), the last system block (tools +
 //! system), and the request's top-level `cache_control`, which places an
 //! automatic breakpoint on the last cacheable block and moves it forward as
@@ -115,6 +115,17 @@
 //! system blocks and messages are serialized in the caller's order from
 //! structs, never from a map with random order. A prefix under the model's
 //! minimum (512 tokens on the 5.5 family) is simply not cached.
+//!
+//! A message marked [`ChatMessage::cache_breakpoint`] takes a breakpoint on
+//! the last block it sent: the conversation up to it is written as its own
+//! entry, so the next request, which replays that conversation and appends to
+//! it, reads it back even when the messages after the mark (a per-turn clock,
+//! a data refresh) are new every request. Without it the only breakpoint in
+//! `messages` is the automatic tail, whose entry always ends after those
+//! per-turn messages and so never prefixes the next request. Only the last
+//! marked message counts, and its breakpoint lives 5 minutes. When it would
+//! make a fifth breakpoint (a stable system head is present), the tools
+//! breakpoint is the one dropped: every later entry starts with the tools.
 //!
 //! A system message that names a stable prefix
 //! ([`ChatMessage::stable_prefix_len`]) is sent as two blocks, cut at that
@@ -141,10 +152,18 @@
 //! `defer_loading: true`, and the request then declares the server-side tool
 //! search (`tool_search_tool_regex_20251119`) ahead of every tool. The API
 //! keeps a deferred tool's schema out of the model's context and out of the
-//! cached prefix until the model searches for it; the search runs inside the
-//! same call, and its `server_tool_use` and `tool_search_tool_result` blocks
-//! are read past like any other non-text block. The loaded tools follow the
-//! search in the caller's order, the deferred ones close the list, and the
+//! cached prefix until the model searches for it. The search runs inside the
+//! same call, which the API answers by sampling the prompt twice: once to
+//! search, once more with the found schemas. Its `server_tool_use` and
+//! `tool_search_tool_result` blocks come back on
+//! [`ChatResponse::replay_blocks`], and [`TokenUsage::model_requests`] counts
+//! the extra sampling. A caller that sends them back on the assistant turn
+//! ([`ChatMessage::replay_blocks`]) keeps the found tools loaded; one that
+//! drops them makes the model search, and the API sample twice, again on
+//! every request that needs the tool. They are sent back only on a request
+//! that declares the search, since the API refuses them otherwise. The
+//! loaded tools follow the search in the caller's order, the deferred ones
+//! close the list, and the
 //! tools breakpoint sits on the last loaded tool, since the API refuses
 //! `cache_control` on a deferred one. A tool a `tool_choice` forces is always
 //! loaded. A model that predates tool search gets every tool loaded and no
@@ -869,6 +888,10 @@ enum WireBlock {
         #[serde(skip_serializing_if = "String::is_empty")]
         content: String,
     },
+    /// A block sent as given: a replayed tool-search block, or a block that
+    /// carries a cache breakpoint
+    #[serde(untagged)]
+    Raw(Value),
 }
 
 /// A base64 image source
@@ -973,6 +996,25 @@ enum ResponseBlock {
         name: String,
         #[serde(default)]
         input: Value,
+    },
+    /// A server-side tool call: the tool search, or a server tool this crate
+    /// does not declare
+    ServerToolUse {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        input: Value,
+    },
+    /// What the server-side tool search found. Every field is defaulted, so a
+    /// block of an unexpected shape is never replayed rather than failing the
+    /// whole response.
+    ToolSearchToolResult {
+        #[serde(default)]
+        tool_use_id: String,
+        #[serde(default)]
+        content: Value,
     },
     #[serde(other)]
     Other,
@@ -1194,6 +1236,30 @@ fn text_block(text: &str) -> Option<WireBlock> {
     })
 }
 
+/// An assistant message's blocks: its replayed tool-search exchanges when the
+/// request searches, then its text, then its tool calls
+fn assistant_blocks(
+    message: &ChatMessage,
+    calls: &[ToolCallRequest],
+    replays: bool,
+) -> Vec<WireBlock> {
+    let replayed = message
+        .replay_blocks
+        .iter()
+        .flatten()
+        .filter(|_| replays)
+        .cloned()
+        .map(WireBlock::Raw);
+    replayed
+        .chain(text_block(&message.content))
+        .chain(calls.iter().map(|call| WireBlock::ToolUse {
+            id: call.id.clone(),
+            name: call.function_name.clone(),
+            input: tool_input(&call.arguments),
+        }))
+        .collect()
+}
+
 /// An unmarked system text block
 const fn system_block(text: String) -> SystemBlock {
     SystemBlock {
@@ -1228,9 +1294,13 @@ fn push_system(
 fn convert_messages(
     messages: &[ChatMessage],
     prefix_marker: CacheControl,
+    replays: bool,
 ) -> (Vec<SystemBlock>, Vec<WireMessage>) {
     let mut system: Vec<SystemBlock> = Vec::new();
     let mut turns: Vec<WireMessage> = Vec::new();
+    // Where the last message marked as a cache breakpoint ended: its turn and
+    // block. Marked once the turns are final, since pairing rewrites blocks.
+    let mut breakpoint: Option<(usize, usize)> = None;
     // The tool calls of the most recent assistant turn: only these may be
     // answered by a tool_result in the turn that follows it.
     let mut open_calls: Vec<String> = Vec::new();
@@ -1267,12 +1337,7 @@ fn convert_messages(
                     continue;
                 }
                 let calls = message.tool_calls.as_deref().unwrap_or_default();
-                let mut blocks: Vec<WireBlock> = text_block(&message.content).into_iter().collect();
-                blocks.extend(calls.iter().map(|call| WireBlock::ToolUse {
-                    id: call.id.clone(),
-                    name: call.function_name.clone(),
-                    input: tool_input(&call.arguments),
-                }));
+                let blocks = assistant_blocks(message, calls, replays);
                 if blocks.is_empty() {
                     continue;
                 }
@@ -1299,6 +1364,12 @@ fn convert_messages(
                 push_turn(&mut turns, "user", vec![block]);
             }
         }
+        if message.cache_breakpoint {
+            breakpoint = turns
+                .len()
+                .checked_sub(1)
+                .and_then(|turn| Some((turn, turns[turn].content.len().checked_sub(1)?)));
+        }
     }
 
     match stable_head {
@@ -1318,13 +1389,63 @@ fn convert_messages(
         }
     }
     pair_tool_blocks(&mut turns);
+    let breakpoint = breakpoint.map(|(turn, index)| (turn, sorted_index(&turns[turn], index)));
     for turn in &mut turns {
         // Tool results lead the user turn that answers a tool call; a stable
         // sort keeps every other order intact.
-        turn.content
-            .sort_by_key(|block| !matches!(block, WireBlock::ToolResult { .. }));
+        turn.content.sort_by_key(|block| !is_tool_result(block));
+    }
+    if let Some((turn, index)) = breakpoint {
+        mark_breakpoint(&mut turns, turn, index);
     }
     (system, turns)
+}
+
+/// Whether `block` answers a tool call
+const fn is_tool_result(block: &WireBlock) -> bool {
+    matches!(block, WireBlock::ToolResult { .. })
+}
+
+/// Where the block at `index` of `turn` lands once the stable sort has moved
+/// the turn's tool results to its front
+fn sorted_index(turn: &WireMessage, index: usize) -> usize {
+    let (before, after) = turn.content.split_at(index.min(turn.content.len()));
+    match after.split_first() {
+        Some((block, _)) if is_tool_result(block) => {
+            before.iter().filter(|b| is_tool_result(b)).count()
+        }
+        Some((_, rest)) => index + rest.iter().filter(|b| is_tool_result(b)).count(),
+        None => index,
+    }
+}
+
+/// Put a 5-minute breakpoint on the block at `turn`/`index`, unless it is the
+/// request's last block, which the automatic tail already covers.
+fn mark_breakpoint(turns: &mut [WireMessage], turn: usize, index: usize) {
+    let last_turn = turns.len().saturating_sub(1);
+    let Some(content) = turns.get_mut(turn).map(|t| &mut t.content) else {
+        return;
+    };
+    if turn == last_turn && index + 1 >= content.len() {
+        return;
+    }
+    let Some(block) = content.get_mut(index) else {
+        return;
+    };
+    let mut value = match serde_json::to_value(&*block) {
+        Ok(value) => value,
+        Err(e) => {
+            debug!("cache breakpoint not placed: block did not serialize: {e}");
+            return;
+        }
+    };
+    let Ok(marker) = serde_json::to_value(EPHEMERAL) else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cache_control".to_owned(), marker);
+        *block = WireBlock::Raw(value);
+    }
 }
 
 /// Make every `tool_use` and `tool_result` a matched pair, as the API
@@ -1478,6 +1599,27 @@ fn convert_tools(
     wire
 }
 
+/// The most explicit breakpoints a request may carry beside the automatic one
+const MAX_EXPLICIT_BREAKPOINTS: usize = 3;
+
+/// Drop the tools breakpoint when the system and message breakpoints already
+/// use every slot the automatic tail leaves. Every later breakpoint's entry
+/// starts with the tools, so the tools one is the cheapest to lose.
+fn fit_breakpoints(system: &[SystemBlock], messages: &[WireMessage], tools: &mut [WireTool]) {
+    let in_system = system.iter().filter(|b| b.cache_control.is_some()).count();
+    let in_messages = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| matches!(b, WireBlock::Raw(v) if v.get("cache_control").is_some()))
+        .count();
+    if in_system + in_messages < MAX_EXPLICIT_BREAKPOINTS {
+        return;
+    }
+    for tool in tools.iter_mut() {
+        tool.cache_control = None;
+    }
+}
+
 /// The request's tool choice in wire shape; `auto` when it names none
 fn convert_tool_choice(choice: Option<&ToolChoice>, model: &str) -> WireToolChoice {
     match choice {
@@ -1500,16 +1642,20 @@ fn build_body(config: &AnthropicConfig, request: &ChatRequest, stream: bool) -> 
         .clone()
         .unwrap_or_else(|| config.model.clone());
     let prefix_marker = config.prefix_cache_ttl.marker();
-    let (system, messages) = convert_messages(&request.messages, prefix_marker);
     let forced = match &request.tool_choice {
         Some(ToolChoice::Specific { name }) => Some(name.as_str()),
         _ => None,
     };
-    let tools = request
+    let mut tools = request
         .tools
         .as_deref()
         .map(|tools| convert_tools(tools, &model, forced, prefix_marker))
         .unwrap_or_default();
+    let searching = tools
+        .first()
+        .is_some_and(|tool| tool.kind == Some(TOOL_SEARCH_TYPE));
+    let (system, messages) = convert_messages(&request.messages, prefix_marker, searching);
+    fit_breakpoints(&system, &messages, &mut tools);
     let tool_choice =
         (!tools.is_empty()).then(|| convert_tool_choice(request.tool_choice.as_ref(), &model));
     let (temperature, top_p) = if accepts_sampling(&model) {
@@ -1578,6 +1724,8 @@ fn gross_usage(usage: WireUsage) -> TokenUsage {
 fn into_chat_response(response: MessagesResponse, model: &str) -> ChatResponse {
     let mut content = String::new();
     let mut tool_calls = Vec::new();
+    let mut searches = Vec::new();
+    let mut found = Vec::new();
     for block in response.content {
         match block {
             ResponseBlock::Text { text } => content.push_str(&text),
@@ -1586,10 +1734,23 @@ fn into_chat_response(response: MessagesResponse, model: &str) -> ChatResponse {
                 function_name: name,
                 arguments: input,
             }),
-            ResponseBlock::Other => {}
+            ResponseBlock::ServerToolUse { id, name, input } if name == TOOL_SEARCH_NAME => {
+                searches.push(serde_json::json!({
+                    "type": "server_tool_use", "id": id, "name": name, "input": input,
+                }));
+            }
+            ResponseBlock::ToolSearchToolResult {
+                tool_use_id,
+                content,
+            } => found.push((tool_use_id, content)),
+            ResponseBlock::ServerToolUse { .. } | ResponseBlock::Other => {}
         }
     }
-    if response.stop_reason.as_deref() == Some("refusal") {
+    let search_count = u32::try_from(searches.len()).unwrap_or(u32::MAX);
+    let refused = response.stop_reason.as_deref() == Some("refusal");
+    // A declined turn leaves nothing to carry forward, its search included.
+    let replay_blocks = search_replay(searches, &found).filter(|_| !refused);
+    if refused {
         // A decline can land mid-output: whatever came before it is a
         // fragment of an answer the model did not finish, never a reply.
         warn!(
@@ -1610,11 +1771,37 @@ fn into_chat_response(response: MessagesResponse, model: &str) -> ChatResponse {
     ChatResponse {
         content,
         model: model.to_owned(),
-        usage: response.usage.map(gross_usage),
+        usage: response.usage.map(|usage| {
+            gross_usage(usage).with_model_requests(Some(search_count.saturating_add(1)))
+        }),
         finish_reason: response.stop_reason.as_deref().map(map_stop_reason),
         warnings: None,
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+        replay_blocks,
     }
+}
+
+/// The tool-search exchanges of a response, in order, each call followed by
+/// its result. A call without a result is left out: the API refuses either
+/// half alone.
+fn search_replay(searches: Vec<Value>, found: &[(String, Value)]) -> Option<Vec<Value>> {
+    let mut blocks = Vec::with_capacity(searches.len() * 2);
+    for search in searches {
+        let id = search.get("id").and_then(Value::as_str).unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some((tool_use_id, content)) = found.iter().find(|(used, _)| used == id) {
+            let result = serde_json::json!({
+                "type": "tool_search_tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+            });
+            blocks.push(search);
+            blocks.push(result);
+        }
+    }
+    (!blocks.is_empty()).then_some(blocks)
 }
 
 /// The status an error `type` stands for, so a mid-stream error event maps
@@ -1779,9 +1966,57 @@ enum StreamedBlock {
         /// The concatenated `input_json_delta` fragments
         partial_json: String,
     },
-    /// A thinking, server-tool or future block: read past, as
-    /// [`into_chat_response`] reads it past
+    /// A server tool call, whose input streams like a tool call's
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: Value,
+        partial_json: String,
+    },
+    /// What the server-side tool search found, whole in its start event
+    ToolSearchResult {
+        tool_use_id: String,
+        content: Value,
+    },
+    /// A thinking or future block: read past, as [`into_chat_response`] reads
+    /// it past
     Other,
+}
+
+/// The block a `content_block_start` opens, and the text it already carries
+fn streamed_block(content_block: Option<ResponseBlock>) -> (StreamedBlock, Option<String>) {
+    match content_block {
+        Some(ResponseBlock::Text { text }) => (StreamedBlock::Text(text.clone()), Some(text)),
+        Some(ResponseBlock::ToolUse { id, name, input }) => (
+            StreamedBlock::ToolUse {
+                id,
+                name,
+                input,
+                partial_json: String::new(),
+            },
+            None,
+        ),
+        Some(ResponseBlock::ServerToolUse { id, name, input }) => (
+            StreamedBlock::ServerToolUse {
+                id,
+                name,
+                input,
+                partial_json: String::new(),
+            },
+            None,
+        ),
+        Some(ResponseBlock::ToolSearchToolResult {
+            tool_use_id,
+            content,
+        }) => (
+            StreamedBlock::ToolSearchResult {
+                tool_use_id,
+                content,
+            },
+            None,
+        ),
+        Some(ResponseBlock::Other) | None => (StreamedBlock::Other, None),
+    }
 }
 
 /// Assembles a `/v1/messages` event stream into the [`ToolStreamEvent`]s of
@@ -1839,21 +2074,7 @@ impl ToolStreamAccumulator {
                 index,
                 content_block,
             } => {
-                let (block, text) = match content_block {
-                    Some(ResponseBlock::Text { text }) => {
-                        (StreamedBlock::Text(text.clone()), Some(text))
-                    }
-                    Some(ResponseBlock::ToolUse { id, name, input }) => (
-                        StreamedBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                            partial_json: String::new(),
-                        },
-                        None,
-                    ),
-                    Some(ResponseBlock::Other) | None => (StreamedBlock::Other, None),
-                };
+                let (block, text) = streamed_block(content_block);
                 self.blocks.insert(index, block);
                 text.filter(|t| !t.is_empty())
                     .map(|t| Ok(ToolStreamEvent::TextDelta(t)))
@@ -1868,7 +2089,10 @@ impl ToolStreamAccumulator {
                     .or_insert_with(|| StreamedBlock::Text(String::new()))
                 {
                     StreamedBlock::Text(content) => content.push_str(&text),
-                    StreamedBlock::ToolUse { .. } | StreamedBlock::Other => return None,
+                    StreamedBlock::ToolUse { .. }
+                    | StreamedBlock::ServerToolUse { .. }
+                    | StreamedBlock::ToolSearchResult { .. }
+                    | StreamedBlock::Other => return None,
                 }
                 (!text.is_empty()).then_some(Ok(ToolStreamEvent::TextDelta(text)))
             }
@@ -1876,10 +2100,11 @@ impl ToolStreamAccumulator {
                 index,
                 delta: StreamDelta::InputJsonDelta { partial_json: part },
             } => {
-                // A server tool's input streams the same way; like its block,
-                // it is read past.
-                if let Some(StreamedBlock::ToolUse { partial_json, .. }) =
-                    self.blocks.get_mut(&index)
+                // A server tool's input streams the same way.
+                if let Some(
+                    StreamedBlock::ToolUse { partial_json, .. }
+                    | StreamedBlock::ServerToolUse { partial_json, .. },
+                ) = self.blocks.get_mut(&index)
                 {
                     partial_json.push_str(&part);
                 }
@@ -1936,6 +2161,35 @@ impl ToolStreamAccumulator {
                     };
                     content.push(ResponseBlock::ToolUse { id, name, input });
                 }
+                StreamedBlock::ServerToolUse {
+                    id,
+                    name,
+                    input,
+                    partial_json,
+                } => {
+                    // A search whose input does not parse is dropped, and its
+                    // result with it, as a half exchange would be refused.
+                    let input = if partial_json.is_empty() {
+                        Ok(input)
+                    } else {
+                        serde_json::from_str(&partial_json)
+                    };
+                    match input {
+                        Ok(input) => content.push(ResponseBlock::ServerToolUse { id, name, input }),
+                        Err(e) => warn!(
+                            provider = PROVIDER_NAME,
+                            tool = %name,
+                            "dropping a server tool call whose streamed input did not parse: {e}"
+                        ),
+                    }
+                }
+                StreamedBlock::ToolSearchResult {
+                    tool_use_id,
+                    content: found,
+                } => content.push(ResponseBlock::ToolSearchToolResult {
+                    tool_use_id,
+                    content: found,
+                }),
                 StreamedBlock::Other => {}
             }
         }
@@ -3959,5 +4213,336 @@ mod tests {
                 .all(|c| c.effort == Some(AnthropicEffort::Low)));
             assert!(configs.iter().all(|c| c.model == "claude-haiku-5-5"));
         }
+    }
+
+    /// A search exchange as the API returns it: the call, then what it found
+    fn search_exchange(id: &str) -> (Value, Value) {
+        (
+            json!({"type": "server_tool_use", "id": id, "name": "tool_search_tool_regex", "input": {"pattern": "workout"}}),
+            json!({"type": "tool_search_tool_result", "tool_use_id": id, "content": {"type": "tool_search_tool_search_result", "tool_references": [{"type": "tool_reference", "tool_name": "list_workout_templates"}]}}),
+        )
+    }
+
+    #[test]
+    fn a_search_comes_back_as_replay_blocks_and_counts_its_second_sampling() {
+        let (search, found) = search_exchange("srvtoolu_1");
+        let response = non_streaming(json!({
+            "content": [
+                search, found,
+                {"type": "tool_use", "id": "toolu_1", "name": "list_workout_templates", "input": {"q": "threshold"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 28_685, "output_tokens": 115}
+        }));
+        assert_eq!(
+            response.replay_blocks,
+            Some(vec![search, found]),
+            "the complete search exchange comes back, verbatim and in order"
+        );
+        let usage = response.usage.expect("usage"); // Safe: test assertion
+        assert_eq!(
+            usage.model_requests,
+            Some(2),
+            "the search samples the prompt twice"
+        );
+        let calls = response.tool_calls.expect("the found tool is called"); // Safe: test assertion
+        assert_eq!(
+            calls[0].function_name, "list_workout_templates",
+            "the search blocks do not hide the tool call after them"
+        );
+    }
+
+    #[test]
+    fn a_response_without_a_search_replays_nothing_and_counts_one_sampling() {
+        let response = non_streaming(json!({
+            "content": [{"type": "text", "text": "Easy spin today."}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 14_483, "output_tokens": 40}
+        }));
+        assert!(
+            response.replay_blocks.is_none(),
+            "nothing to send back without a search"
+        );
+        assert_eq!(
+            response.usage.and_then(|u| u.model_requests),
+            Some(1),
+            "a call without a search samples the prompt once"
+        );
+    }
+
+    #[test]
+    fn a_half_search_or_another_server_tool_is_never_replayed() {
+        let response = non_streaming(json!({
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_web", "name": "web_search", "input": {"query": "ftp"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_web", "content": []},
+                {"type": "server_tool_use", "id": "srvtoolu_lost", "name": "tool_search_tool_regex", "input": {"pattern": "x"}},
+                {"type": "text", "text": "done"},
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 1}
+        }));
+        assert!(
+            response.replay_blocks.is_none(),
+            "a search without its result, and a web search, would be refused when sent back"
+        );
+    }
+
+    #[test]
+    fn a_streamed_search_is_replayed_as_complete_replays_it() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_regex","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":" \"workout\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"list_workout_templates"}]}}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_workout_templates","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\": \"threshold\"}"}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":115}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (deltas, done) = deltas_and_done(events);
+        assert_eq!(deltas, Vec::<String>::new(), "a search streams no text");
+        let (search, found) = search_exchange("srvtoolu_1");
+        assert_eq!(
+            done.replay_blocks,
+            Some(vec![search.clone(), found.clone()]),
+            "the streamed input is reassembled into the search block"
+        );
+        same(
+            &done,
+            &non_streaming(json!({
+                "content": [
+                    search, found,
+                    {"type": "tool_use", "id": "toolu_1", "name": "list_workout_templates", "input": {"q": "threshold"}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 25, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 300, "output_tokens": 115}
+            })),
+        );
+    }
+
+    /// A conversation whose assistant turn searched, then the tool's result
+    fn after_a_search(tools: Vec<ToolDefinition>) -> ChatRequest {
+        let (search, found) = search_exchange("srvtoolu_1");
+        ChatRequest::new(vec![
+            ChatMessage::user("plan my week"),
+            ChatMessage::assistant("Looking up templates.").with_replay_blocks(vec![search, found]),
+            ChatMessage::user("[Tool Result for list_workout_templates]: 3 templates"),
+        ])
+        .with_tools(tools)
+    }
+
+    #[test]
+    fn replay_blocks_lead_the_assistant_turn_when_the_request_searches() {
+        let body = body_json(
+            &AnthropicConfig::new("k"),
+            &after_a_search(vec![weather_tool("a"), deferred("list_workout_templates")]),
+        );
+        let (search, found) = search_exchange("srvtoolu_1");
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([search, found, {"type": "text", "text": "Looking up templates."}]),
+            "sent back verbatim, ahead of the turn's text"
+        );
+    }
+
+    #[test]
+    fn replay_blocks_are_dropped_when_the_request_declares_no_search() {
+        for tools in [vec![weather_tool("a")], vec![]] {
+            let body = body_json(&AnthropicConfig::new("k"), &after_a_search(tools));
+            assert_eq!(
+                body["messages"][1]["content"],
+                json!([{"type": "text", "text": "Looking up templates."}]),
+                "the API refuses a search block on a request without the search tool"
+            );
+        }
+    }
+
+    /// The conversation a chat turn sends: replayed history, the last of it
+    /// marked, then the per-turn messages and the athlete's new message
+    fn marked_history(system: ChatMessage) -> ChatRequest {
+        ChatRequest::new(vec![
+            system,
+            ChatMessage::user("how was my week?"),
+            ChatMessage::assistant("Solid: four rides.").with_cache_breakpoint(),
+            ChatMessage::user("[clock] Tuesday 14:54"),
+            ChatMessage::user("[refresh] 1 new ride"),
+            ChatMessage::user("and today?"),
+        ])
+        .with_tools(vec![weather_tool("a"), weather_tool("b")])
+    }
+
+    fn breakpoints(body: &Value) -> usize {
+        serde_json::to_string(body)
+            .expect("serialises") // Safe: test assertion
+            .matches("\"cache_control\"")
+            .count()
+    }
+
+    #[test]
+    fn a_marked_message_takes_a_breakpoint_before_the_per_turn_messages() {
+        let body = body_json(
+            &AnthropicConfig::new("k"),
+            &marked_history(ChatMessage::system("persona")),
+        );
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "text", "text": "Solid: four rides.", "cache_control": {"type": "ephemeral"}}]),
+            "the entry ends at the replayed history, so the next turn reads it back"
+        );
+        assert!(
+            body["messages"][2]["content"]
+                .as_array()
+                .expect("the per-turn user turn") // Safe: test assertion
+                .iter()
+                .all(|block| block.get("cache_control").is_none()),
+            "the clock, the refresh and the new message stay after the breakpoint"
+        );
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "tools, system, history and the automatic tail: four, so the tools keep theirs"
+        );
+        assert_eq!(breakpoints(&body), 4, "the API allows four");
+    }
+
+    #[test]
+    fn with_a_stable_head_the_tools_breakpoint_gives_way_to_the_history_one() {
+        let system =
+            ChatMessage::system("stable persona head|per-turn tail").with_stable_prefix_len(19);
+        let body = body_json(&AnthropicConfig::new("k"), &marked_history(system));
+        assert!(
+            body["tools"]
+                .as_array()
+                .expect("tools") // Safe: test assertion
+                .iter()
+                .all(|tool| tool.get("cache_control").is_none()),
+            "the tools breakpoint is the one dropped"
+        );
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "the history keeps its breakpoint"
+        );
+        assert_eq!(breakpoints(&body), 4, "the API allows four");
+    }
+
+    #[test]
+    fn a_marked_last_message_is_left_to_the_automatic_tail() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello").with_cache_breakpoint(),
+        ]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "text", "text": "hello"}]),
+            "the automatic tail already ends there, so no explicit breakpoint is spent"
+        );
+    }
+
+    #[test]
+    fn a_marked_message_merged_into_a_user_turn_marks_its_own_block() {
+        let request = ChatRequest::new(vec![
+            ChatMessage::user("history").with_cache_breakpoint(),
+            ChatMessage::user("[clock] now"),
+        ]);
+        let body = body_json(&AnthropicConfig::new("k"), &request);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "history", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "[clock] now"},
+            ]),
+            "the breakpoint lands on the marked message's block, not the merged turn's last"
+        );
+    }
+
+    /// A tool loop whose answering user turn holds a note, the tool result
+    /// and a new message, with `marked` (0, 1 or 2) carrying the mark
+    fn marked_tool_turn(marked: usize) -> Value {
+        let mut answer = vec![
+            ChatMessage::user("note"),
+            ChatMessage::tool("ping", "toolu_1", "pong"),
+            ChatMessage::user("next"),
+        ];
+        answer[marked] = answer[marked].clone().with_cache_breakpoint();
+        let mut messages = vec![
+            ChatMessage::user("go"),
+            assistant_calling(vec![call("toolu_1", "ping", json!({}))]),
+        ];
+        messages.extend(answer);
+        messages.push(ChatMessage::assistant("pong it is"));
+        body_json(&AnthropicConfig::new("k"), &ChatRequest::new(messages))
+    }
+
+    #[test]
+    fn a_marked_block_keeps_its_mark_when_the_tool_result_moves_ahead_of_it() {
+        let marked_at = |marked: usize| -> Vec<usize> {
+            marked_tool_turn(marked)["messages"][2]["content"]
+                .as_array()
+                .expect("the answering user turn") // Safe: test assertion
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| block.get("cache_control").is_some())
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let body = marked_tool_turn(0);
+        assert_eq!(
+            body["messages"][2]["content"][0]["type"], "tool_result",
+            "the tool result leads the turn that answers the call"
+        );
+        assert_eq!(
+            marked_at(0),
+            [1],
+            "the note, sorted behind the result, keeps the mark"
+        );
+        assert_eq!(
+            marked_at(1),
+            [0],
+            "the result, sorted to the front, keeps the mark"
+        );
+        assert_eq!(marked_at(2), [2], "a block after the result does not move");
+    }
+
+    #[test]
+    fn a_streamed_search_whose_input_does_not_parse_is_not_replayed() {
+        let events = accumulate(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_regex","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[]}}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":"Done."}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (_, done) = deltas_and_done(events);
+        assert!(
+            done.replay_blocks.is_none(),
+            "a search with a broken input is dropped with its result, never sent back half"
+        );
+        assert_eq!(done.content, "Done.", "the reply itself still arrives");
+    }
+
+    #[test]
+    fn a_refused_reply_discards_its_search_with_its_partial_output() {
+        let (search, found) = search_exchange("srvtoolu_1");
+        let response = non_streaming(json!({
+            "content": [search, found, {"type": "text", "text": "I can"}],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 10, "output_tokens": 1}
+        }));
+        assert!(
+            response.replay_blocks.is_none(),
+            "a declined turn leaves nothing for the caller to carry forward"
+        );
     }
 }

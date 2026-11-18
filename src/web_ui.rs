@@ -657,6 +657,7 @@ impl LlmProvider for WebUiRunner {
         }
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content: final_text,
             model: request
                 .model
@@ -822,6 +823,8 @@ mod tests {
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
+            cache_breakpoint: false,
+            replay_blocks: None,
             role: MessageRole::User,
             content: content.to_owned(),
             images: None,
@@ -864,6 +867,8 @@ mod tests {
         let req = ChatRequest {
             messages: vec![
                 ChatMessage {
+                    cache_breakpoint: false,
+                    replay_blocks: None,
                     role: MessageRole::System,
                     content: "be terse".to_owned(),
                     images: None,

@@ -42,6 +42,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let request = ChatRequest {
         messages: vec![ChatMessage {
+            cache_breakpoint: false,
+            replay_blocks: None,
             role: MessageRole::User,
             content: prompt,
             images: None,

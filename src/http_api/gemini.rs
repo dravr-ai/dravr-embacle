@@ -701,6 +701,7 @@ impl GeminiProvider {
         if !tool_calls.is_empty() {
             debug!(count = tool_calls.len(), "Extracted function calls");
             return Ok(ChatResponse {
+                replay_blocks: None,
                 content: String::new(),
                 model: model.to_owned(),
                 usage,
@@ -713,6 +714,7 @@ impl GeminiProvider {
         // May fail on thinking-only responses; the caller retries those.
         let content = Self::extract_content(&gemini_response)?;
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: model.to_owned(),
             usage,

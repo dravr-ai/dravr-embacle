@@ -93,6 +93,7 @@ impl ContinueCliRunner {
                     .to_owned();
 
                 return Ok(ChatResponse {
+                    replay_blocks: None,
                     content,
                     model: "continue".to_owned(),
                     usage: None,
@@ -105,6 +106,7 @@ impl ContinueCliRunner {
 
         // No response object found; return empty content
         Ok(ChatResponse {
+            replay_blocks: None,
             content: String::new(),
             model: "continue".to_owned(),
             usage: None,

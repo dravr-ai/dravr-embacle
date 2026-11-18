@@ -831,6 +831,7 @@ mod tests {
                 caps: LlmCapabilities::text_only(),
                 models: vec![format!("{name}-model")],
                 responses: Mutex::new(vec![Ok(ChatResponse {
+                    replay_blocks: None,
                     content: content.to_owned(),
                     model: format!("{name}-model"),
                     usage: None,
@@ -938,6 +939,7 @@ mod tests {
 
     fn make_response(content: &str) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: content.to_owned(),
             model: "test-model".to_owned(),
             usage: None,

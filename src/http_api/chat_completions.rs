@@ -387,6 +387,7 @@ pub(super) fn parse_response(
     );
 
     Ok(ChatResponse {
+        replay_blocks: None,
         content,
         model: response.model,
         usage: response.usage.map(usage),

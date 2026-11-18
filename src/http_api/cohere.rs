@@ -669,6 +669,7 @@ impl CohereProvider {
         );
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: body.model.clone(),
             usage: Self::resolve_usage(cohere_response.usage),

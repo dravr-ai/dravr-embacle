@@ -78,6 +78,7 @@ impl Fake {
 
 fn reply(content: &str, tool_calls: Option<Vec<ToolCallRequest>>) -> ChatResponse {
     ChatResponse {
+        replay_blocks: None,
         content: content.to_owned(),
         model: "test-model".to_owned(),
         usage: None,

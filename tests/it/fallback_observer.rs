@@ -181,6 +181,7 @@ impl LlmProvider for Fake {
         self.note(request);
         match self.script {
             Script::Says(text) => Ok(ChatResponse {
+                replay_blocks: None,
                 content: text.to_owned(),
                 model: "test-model".to_owned(),
                 usage: None,
@@ -189,6 +190,7 @@ impl LlmProvider for Fake {
                 tool_calls: None,
             }),
             Script::Empty => Ok(ChatResponse {
+                replay_blocks: None,
                 content: String::new(),
                 model: "test-model".to_owned(),
                 usage: None,

@@ -463,6 +463,26 @@ pub struct ChatMessage {
     /// shorter than `content`, or not on a character boundary is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_prefix_len: Option<usize>,
+    /// Provider blocks this assistant turn must carry back, verbatim, on the
+    /// next request (only meaningful for `Assistant` role)
+    ///
+    /// Copied from [`ChatResponse::replay_blocks`]. Anthropic's server-side
+    /// tool search loads a deferred tool for the rest of the conversation only
+    /// while its `server_tool_use` and `tool_search_tool_result` blocks are in
+    /// the history; dropped, the next request searches again and the API
+    /// samples the whole prompt twice more. Every other provider ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_blocks: Option<Vec<serde_json::Value>>,
+    /// Whether the conversation up to and including this message is sent
+    /// unchanged on the next request
+    ///
+    /// A provider that caches the prompt per block (Anthropic) writes a cache
+    /// entry ending at this message, so a request that appends to the
+    /// conversation reads it back instead of rewriting it, even when the
+    /// messages after this one change every request. Only the last marked
+    /// message counts. Every other provider ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_breakpoint: bool,
 }
 
 impl ChatMessage {
@@ -477,6 +497,8 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             stable_prefix_len: None,
+            replay_blocks: None,
+            cache_breakpoint: false,
         }
     }
 
@@ -491,6 +513,22 @@ impl ChatMessage {
     #[must_use]
     pub const fn with_stable_prefix_len(mut self, len: usize) -> Self {
         self.stable_prefix_len = Some(len);
+        self
+    }
+
+    /// Carry `blocks` back on the next request (see
+    /// [`ChatMessage::replay_blocks`]); an empty list sets nothing
+    #[must_use]
+    pub fn with_replay_blocks(mut self, blocks: Vec<serde_json::Value>) -> Self {
+        self.replay_blocks = (!blocks.is_empty()).then_some(blocks);
+        self
+    }
+
+    /// Mark the conversation up to and including this message as sent
+    /// unchanged on the next request (see [`ChatMessage::cache_breakpoint`])
+    #[must_use]
+    pub const fn with_cache_breakpoint(mut self) -> Self {
+        self.cache_breakpoint = true;
         self
     }
 
@@ -524,6 +562,8 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             stable_prefix_len: None,
+            replay_blocks: None,
+            cache_breakpoint: false,
         }
     }
 
@@ -548,6 +588,8 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             stable_prefix_len: None,
+            replay_blocks: None,
+            cache_breakpoint: false,
         }
     }
 }
@@ -888,6 +930,11 @@ pub struct ChatResponse {
     /// Tool calls requested by the model (populated by providers with native function calling)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRequest>>,
+    /// Provider blocks the caller must send back on the assistant turn of the
+    /// next request (see [`ChatMessage::replay_blocks`]): Anthropic's
+    /// tool-search exchanges. `None` when the provider produced none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_blocks: Option<Vec<serde_json::Value>>,
 }
 
 /// Token usage statistics.

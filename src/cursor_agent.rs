@@ -123,6 +123,7 @@ impl CursorAgentRunner {
         });
 
         let response = ChatResponse {
+            replay_blocks: None,
             content,
             model: "cursor-agent".to_owned(),
             usage,

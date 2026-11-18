@@ -106,6 +106,7 @@ impl WarpCliRunner {
         let content = content_parts.join("");
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "warp-oz".to_owned(),
             usage: None,

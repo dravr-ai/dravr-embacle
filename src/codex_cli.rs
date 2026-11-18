@@ -145,6 +145,7 @@ impl CodexCliRunner {
         let content = content_parts.join("");
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "codex".to_owned(),
             usage,

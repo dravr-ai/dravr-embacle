@@ -538,6 +538,7 @@ mod tests {
 
     fn answer(from: &str) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: format!("answered by {from}"),
             model: format!("{from}-model"),
             usage: Some(TokenUsage::new(1, 1, 2)),

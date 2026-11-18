@@ -89,6 +89,7 @@ impl ScriptedProviderBuilder {
 
 fn make_response(content: &str, model: &str) -> ChatResponse {
     ChatResponse {
+        replay_blocks: None,
         content: content.to_owned(),
         model: model.to_owned(),
         usage: None,

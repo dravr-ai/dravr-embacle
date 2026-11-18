@@ -372,6 +372,7 @@ mod tests {
 
     fn make_response(content: &str, usage: Option<TokenUsage>) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: content.to_owned(),
             model: "test-model".to_owned(),
             usage,

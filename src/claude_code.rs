@@ -615,6 +615,7 @@ impl ClaudeCodeRunner {
         let usage = parsed.usage.map(|u| gross_usage(&u));
 
         let response = ChatResponse {
+            replay_blocks: None,
             content,
             model,
             usage,

@@ -564,6 +564,7 @@ mod tests {
     #[test]
     fn build_response_json_basic() {
         let response = ChatResponse {
+            replay_blocks: None,
             content: "Hello world".to_owned(),
             model: "test-model".to_owned(),
             usage: Some(TokenUsage::new(10, 5, 15)),
@@ -594,6 +595,7 @@ mod tests {
             .with_cache(Some(15_320), Some(12_540))
             .with_reasoning(Some(0));
         let response = ChatResponse {
+            replay_blocks: None,
             content: "OK".to_owned(),
             model: "m".to_owned(),
             usage: Some(usage),
@@ -616,6 +618,7 @@ mod tests {
         // embacle's own semantics: reasoning is additive, never folded into
         // `completion_tokens` the way OpenAI's usage counts it.
         let response = ChatResponse {
+            replay_blocks: None,
             content: "OK".to_owned(),
             model: "m".to_owned(),
             usage: Some(TokenUsage::new(100, 7, 127).with_reasoning(Some(20))),
@@ -633,6 +636,7 @@ mod tests {
     #[test]
     fn build_response_json_no_usage() {
         let response = ChatResponse {
+            replay_blocks: None,
             content: "Hi".to_owned(),
             model: "m".to_owned(),
             usage: None,

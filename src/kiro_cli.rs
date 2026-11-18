@@ -151,6 +151,7 @@ impl KiroCliRunner {
             .join("\n");
 
         Ok(ChatResponse {
+            replay_blocks: None,
             content,
             model: "kiro".to_owned(),
             usage: None,

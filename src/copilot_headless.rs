@@ -1839,6 +1839,7 @@ async fn collect_complete(
             );
 
             let response = ChatResponse {
+                replay_blocks: None,
                 content: acc.content,
                 model,
                 usage,

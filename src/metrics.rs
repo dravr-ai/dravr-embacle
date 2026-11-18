@@ -416,6 +416,7 @@ mod tests {
             let mut responses = self.responses.lock().expect("test lock"); // Safe: test assertion
             if responses.is_empty() {
                 Ok(ChatResponse {
+                    replay_blocks: None,
                     content: "default".to_owned(),
                     model: "test-model".to_owned(),
                     usage: None,
@@ -461,6 +462,7 @@ mod tests {
     async fn call_count_increments() {
         let provider = TestProvider::new(vec![
             Ok(ChatResponse {
+                replay_blocks: None,
                 content: "hello world".to_owned(),
                 model: "test-model".to_owned(),
                 usage: Some(TokenUsage::new(10, 5, 15)),
@@ -469,6 +471,7 @@ mod tests {
                 tool_calls: None,
             }),
             Ok(ChatResponse {
+                replay_blocks: None,
                 content: "second".to_owned(),
                 model: "test-model".to_owned(),
                 usage: Some(TokenUsage::new(8, 3, 11)),
@@ -496,6 +499,7 @@ mod tests {
     #[tokio::test]
     async fn completion_totals_include_reasoning() {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
+            replay_blocks: None,
             content: "code".to_owned(),
             model: "test-model".to_owned(),
             usage: Some(TokenUsage::new(100, 198, 1193).with_reasoning(Some(895))),
@@ -533,6 +537,7 @@ mod tests {
     #[tokio::test]
     async fn token_estimation_when_no_usage() {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
+            replay_blocks: None,
             content: "abcdefghijklmnop".to_owned(), // 16 chars => 4 tokens
             model: "test-model".to_owned(),
             usage: None,
@@ -563,6 +568,7 @@ mod tests {
     #[tokio::test]
     async fn reset_zeroes_counters() {
         let provider = TestProvider::new(vec![Ok(ChatResponse {
+            replay_blocks: None,
             content: "hello".to_owned(),
             model: "test-model".to_owned(),
             usage: Some(TokenUsage::new(5, 2, 7)),
@@ -598,6 +604,7 @@ mod tests {
 
     fn flash_response(content: &str, usage: Option<TokenUsage>) -> ChatResponse {
         ChatResponse {
+            replay_blocks: None,
             content: content.to_owned(),
             model: "gemini-2.5-flash".to_owned(),
             usage,
@@ -654,6 +661,7 @@ mod tests {
         let provider = TestProvider::named(
             "gemini",
             vec![Ok(ChatResponse {
+                replay_blocks: None,
                 content: "response".to_owned(),
                 model: "some-unknown-model".to_owned(),
                 usage: Some(TokenUsage::new(1000, 500, 1500)),
