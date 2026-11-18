@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0] — 2026-11-18
+
+### Added
+
+- feat(anthropic): replay tool searches, cache history at a mark
+
+
 ## [0.46.0] — 2026-11-17
 
 ### Added
