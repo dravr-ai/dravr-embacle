@@ -663,6 +663,8 @@ Both Copilot runners implement `HeadlessTurnProvider` (`converse` / `converse_st
 
 The runtime pair is a file on disk, never a payload in the binary. Point `COPILOT_RUNTIME_PATH` at the `copilot-runtime` wrapper with `runtime.node` adjacent — the pair ships inside the `github-copilot-<version>-<platform>.tgz` release asset of `github/copilot-cli` (`prebuilds/<platform>/`), and the Copilot CLI extracts the same pair into its package cache on first run. The SDK's build script would otherwise download and embed the whole CLI (~163 MB); this workspace's `.cargo/config.toml` sets `COPILOT_SKIP_CLI_DOWNLOAD=1`, and a consumer building with this feature sets the same variable in its own build environment.
 
+The runtime must speak a Copilot SDK protocol version the `github-copilot-sdk` crate accepts, and the crate checks it at the handshake. Every release of the crate through 1.0.35 accepts protocol 3 only, while Copilot CLI 1.0.113 and later speak protocol 4, so a runtime from 1.0.113 or later fails `health_check` with `version mismatch: server=4, supported=3–3`. Use a runtime from CLI 1.0.112 or earlier until the crate accepts protocol 4.
+
 Configuration via environment variables:
 
 | Variable | Default | Description |

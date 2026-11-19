@@ -126,6 +126,13 @@ jobs:
       EMBACLE_ACP_PROMPT_TIMEOUT_SECS: "1200"
       EMBACLE_ACP_SESSION_TIMEOUT_SECS: "180"
       EMBACLE_SDK_PROMPT_TIMEOUT_SECS: "900"
+      # The CLI version is pinned because the runtime it extracts has to speak
+      # a protocol version the github-copilot-sdk crate accepts (carnet#1637).
+      # CLI 1.0.113 and later speak protocol 4, and every crate release through
+      # 1.0.35 accepts protocol 3 only. 1.0.112 is the last CLI on protocol 3.
+      # Do not raise the pin until the crate accepts the newer protocol: the
+      # "Check the runtime's protocol" step below fails the job when they disagree.
+      COPILOT_CLI_VERSION: "1.0.112"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -210,13 +217,44 @@ jobs:
       - name: Install Copilot CLI
         run: |
           PREFIX="$HOME/.copilot-cli"
-          npm install -g --prefix "$PREFIX" @github/copilot-linux-x64
+          npm install -g --prefix "$PREFIX" "@github/copilot-linux-x64@${COPILOT_CLI_VERSION}"
           ln -sf "$PREFIX/bin/copilot-linux-x64" "$PREFIX/bin/copilot"
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
           "$PREFIX/bin/copilot" --version
 
       - name: Build the live tests
         run: cargo test --workspace --features copilot-headless,copilot-sdk --test it --no-run
+
+      # Asks the extracted runtime its protocol version (the `ping` RPC) and
+      # compares it with the range the locked github-copilot-sdk crate
+      # accepts, read from that crate's own source. A pin raised past what the
+      # crate accepts fails here, by name, instead of as three SDK test failures
+      # later (carnet#1637).
+      - name: Check the runtime's protocol against the SDK crate
+        run: |
+          RUNTIME="$HOME/.cache/copilot/pkg/linux-x64/$COPILOT_CLI_VERSION/prebuilds/linux-x64/copilot-runtime"
+          test -x "$RUNTIME" || { echo "ERROR: no runtime at $RUNTIME" >&2; exit 1; }
+          SDK_VERSION="$(awk '/^name = "github-copilot-sdk"$/{getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit}' Cargo.lock)"
+          SDK_SRC="$(ls -d "$HOME"/.cargo/registry/src/*/"github-copilot-sdk-$SDK_VERSION" | head -1)"
+          test -d "$SDK_SRC" || { echo "ERROR: no source for github-copilot-sdk $SDK_VERSION" >&2; exit 1; }
+          MAX="$(grep -rhoE 'SDK_PROTOCOL_VERSION: u32 = [0-9]+' "$SDK_SRC/src" | grep -oE '[0-9]+$' | head -1)"
+          MIN="$(grep -rhoE 'MIN_PROTOCOL_VERSION: u32 = [0-9]+' "$SDK_SRC/src" | grep -oE '[0-9]+$' | head -1)"
+          [ -n "$MIN" ] && [ -n "$MAX" ] || { echo "ERROR: protocol range not found in $SDK_SRC" >&2; exit 1; }
+          SERVER="$(timeout 120 python3 -I - "$RUNTIME" <<'EOF'
+          import json, subprocess, sys
+          body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}).encode()
+          frame = b"Content-Length: %d\r\n\r\n" % len(body) + body
+          out = subprocess.run([sys.argv[1], "--server", "--stdio", "--no-auto-update"],
+                               input=frame, capture_output=True, timeout=110).stdout
+          print(json.loads(out.split(b"\r\n\r\n", 1)[1])["result"]["protocolVersion"])
+          EOF
+          )"
+          echo "CLI $COPILOT_CLI_VERSION speaks protocol $SERVER; github-copilot-sdk $SDK_VERSION accepts $MIN-$MAX"
+          case "$SERVER" in ''|*[!0-9]*) echo "ERROR: the runtime reported no protocol version" >&2; exit 1;; esac
+          if [ "$SERVER" -lt "$MIN" ] || [ "$SERVER" -gt "$MAX" ]; then
+            echo "::error::Copilot CLI $COPILOT_CLI_VERSION speaks protocol $SERVER, outside the $MIN-$MAX that github-copilot-sdk $SDK_VERSION accepts (carnet#1637). Keep COPILOT_CLI_VERSION at or below the last CLI on a protocol the crate accepts."
+            exit 1
+          fi
 
       # One thread: the runner serves one model, and turns queued behind each
       # other would spend their timeouts waiting rather than running.
