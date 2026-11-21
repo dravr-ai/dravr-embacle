@@ -13,8 +13,9 @@ use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, ImagePart, LlmCapabilities, LlmProvider,
-    McpServerConfig, McpTransport, MessageRole, RunnerError, StreamChunk, TokenUsage,
+    anthropic_reports_spent_credit, ChatMessage, ChatRequest, ChatResponse, ChatStream, ImagePart,
+    LlmCapabilities, LlmProvider, McpServerConfig, McpTransport, MessageRole, RunnerError,
+    StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -147,7 +148,7 @@ fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
         || lower.contains("rate_limit_error")
         || lower.contains("billing_error")
         || lower.contains("rate limited")
-        || (lower.contains("credit balance") && lower.contains("too low"))
+        || anthropic_reports_spent_credit(message)
 }
 
 /// Default model for Claude Code

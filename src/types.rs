@@ -248,6 +248,18 @@ impl fmt::Display for RunnerError {
 
 impl Error for RunnerError {}
 
+/// Whether `message` is Anthropic saying the organization's prepaid credit is
+/// spent ("Your credit balance is too low to access the Anthropic API").
+///
+/// Both the HTTP API provider and the Claude Code runner (on an API-key login)
+/// hear it, and both treat it as a quota refusal. The API types it
+/// `invalid_request_error` on a 400, not the `billing_error` its error table
+/// lists, so only the wording tells it apart from a malformed request.
+pub(crate) fn anthropic_reports_spent_credit(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("credit balance") && lower.contains("too low")
+}
+
 // ============================================================================
 // Capability Flags
 // ============================================================================

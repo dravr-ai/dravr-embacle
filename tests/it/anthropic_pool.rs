@@ -1,5 +1,5 @@
 // ABOUTME: The Anthropic provider as pool accounts, against a local listener: names, headers, a spent credit, a fallback
-// ABOUTME: Pins that a 402 on account 1 reaches the chain as a quota refusal naming that account, and account 2 answers or streams
+// ABOUTME: Pins that a spent credit (a 400, as the API sends it) reaches the chain as a quota refusal naming that account, and account 2 answers or streams
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -60,7 +60,12 @@ const ANSWER: &str = r#"{"id":"msg_1","type":"message","role":"assistant","model
     "content":[{"type":"text","text":"Bonjour"}],"stop_reason":"end_turn",
     "usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":600,"cache_creation_input_tokens":0}}"#;
 
-const SPENT: &str = r#"{"type":"error","error":{"type":"billing_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+/// A spent prepaid credit as the API sends it — seen in production on
+/// 2026-11-21: a 400 typed `invalid_request_error`, not the 402 /
+/// `billing_error` its error table lists (that pair is pinned by the unit
+/// tests). Read as the request's fault, it would end the turn on account 1.
+const SPENT_STATUS: u16 = 400;
+const SPENT: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}"#;
 
 #[test]
 fn accounts_are_named_in_order_and_the_first_keeps_the_provider_name() {
@@ -87,7 +92,7 @@ fn an_empty_provider_pool_is_a_config_error() {
 
 #[tokio::test]
 async fn a_spent_account_refuses_as_a_quota_error_naming_the_account() {
-    let (base, server) = serve(vec![http(402, SPENT)]).await;
+    let (base, server) = serve(vec![http(SPENT_STATUS, SPENT)]).await;
     let tiers = provider_pool(vec![
         account("key-1", "http://127.0.0.1:9"),
         account("key-2", &base),
@@ -115,7 +120,7 @@ async fn a_spent_account_refuses_as_a_quota_error_naming_the_account() {
 
 #[tokio::test]
 async fn the_chain_moves_from_a_spent_account_to_the_next_one() {
-    let (base, server) = serve(vec![http(402, SPENT), http(200, ANSWER)]).await;
+    let (base, server) = serve(vec![http(SPENT_STATUS, SPENT), http(200, ANSWER)]).await;
     let tiers =
         provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
     let chain = FallbackProvider::new(tiers).expect("chain");
@@ -258,7 +263,7 @@ async fn a_tool_stream_leaves_a_spent_account_and_streams_the_reply_then_the_cal
         r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":33}}"#,
         r#"{"type":"message_stop"}"#,
     ]);
-    let (base, server) = serve(vec![http(402, SPENT), streamed]).await;
+    let (base, server) = serve(vec![http(SPENT_STATUS, SPENT), streamed]).await;
     let tiers =
         provider_pool(vec![account("key-1", &base), account("key-2", &base)]).expect("pool");
     // The shape a consumer holds: the chain shared behind an `Arc`, boxed again

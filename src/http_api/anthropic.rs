@@ -227,7 +227,11 @@
 //!
 //! - 402 / `billing_error` (prepaid credit exhausted) → `RateLimit`: a quota
 //!   refusal, never retried in place; a fallback chain cools the tier down
-//!   and the next account or provider answers.
+//!   and the next account or provider answers. The API actually reports a
+//!   spent credit as a 400 `invalid_request_error` saying the credit balance
+//!   is too low, so that message is the same quota refusal: read as the
+//!   request's fault, it would never fall through, and one spent account
+//!   would refuse every turn while the accounts behind it had credit.
 //! - 429 / `rate_limit_error` → `RateLimit`, carrying the `retry-after`
 //!   header's wait in its message; like a spent credit, never retried in
 //!   place, so a pool moves to its next account on the first refusal.
@@ -278,9 +282,9 @@ use tracing::{debug, instrument, warn};
 use super::client::{self, with_retries, AttemptError, HttpRetryConfig, DEFAULT_TIMEOUT_SECS};
 use super::sse::{create_sse_stream, SseEvent, SseParser};
 use crate::types::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
-    MessageRole, RunnerError, StreamChunk, TokenUsage, ToolCallRequest, ToolChoice, ToolDefinition,
-    ToolStream, ToolStreamEvent,
+    anthropic_reports_spent_credit, ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind,
+    LlmCapabilities, LlmProvider, MessageRole, RunnerError, StreamChunk, TokenUsage,
+    ToolCallRequest, ToolChoice, ToolDefinition, ToolStream, ToolStreamEvent,
 };
 
 /// The name this provider reports, and the price-table key its usage bills under
@@ -1847,6 +1851,9 @@ fn map_error(
         }
         (404, _) | (_, Some("not_found_error")) => RunnerError::model_unavailable(model),
         (402, _) | (_, Some("billing_error")) => {
+            client::map_http_error(PROVIDER_NAME, StatusCode::PAYMENT_REQUIRED, &message)
+        }
+        (400, _) if anthropic_reports_spent_credit(&message) => {
             client::map_http_error(PROVIDER_NAME, StatusCode::PAYMENT_REQUIRED, &message)
         }
         (429, _) | (_, Some("rate_limit_error")) => {
@@ -3556,6 +3563,85 @@ mod tests {
             err.message
         );
         assert!(!client::is_retryable_status(402));
+    }
+
+    /// The refusal as the API sent it when an organization's credit ran out
+    /// in production on 2026-11-21: a 400, typed `invalid_request_error`.
+    const SPENT_CREDIT: &str = "Your credit balance is too low to access the Anthropic API. \
+                                Please go to Plans & Billing to upgrade or purchase credits.";
+
+    #[test]
+    fn a_400_saying_the_credit_is_spent_is_a_quota_refusal_not_the_requests_fault() {
+        let err = map_api_error(
+            StatusCode::BAD_REQUEST,
+            &error_body("invalid_request_error", SPENT_CREDIT),
+            None,
+            "claude-sonnet-5-5",
+        );
+        assert_eq!(
+            err.kind,
+            ErrorKind::RateLimit,
+            "read as InvalidRequest, the chain never falls through: {}",
+            err.message
+        );
+        assert!(
+            err.kind.is_provider_fault(),
+            "a spent credit is the provider's fault, not the request's: {:?}",
+            err.kind
+        );
+        assert!(
+            err.message
+                .starts_with("anthropic: credit balance exhausted"),
+            "a spent credit reads the way a 402 does: {}",
+            err.message
+        );
+        assert!(
+            !attempt_error(StatusCode::BAD_REQUEST, err).retryable,
+            "a spent credit leaves the tier, never retried in place"
+        );
+    }
+
+    #[test]
+    fn a_spent_credit_reported_mid_stream_is_the_same_quota_refusal() {
+        let frame = error_body("invalid_request_error", SPENT_CREDIT);
+        let text = parse_stream_data(&frame, "claude-sonnet-5-5")
+            .expect("an item") // Safe: test assertion
+            .expect_err("an error"); // Safe: test assertion
+        assert_eq!(
+            text.kind,
+            ErrorKind::RateLimit,
+            "the text stream reads a mid-stream spent credit as a quota refusal: {}",
+            text.message
+        );
+        let events = accumulate(&[START, frame.as_str()]);
+        let tool = events[0].as_ref().expect_err("the error event"); // Safe: test assertion
+        assert_eq!(
+            tool.kind,
+            ErrorKind::RateLimit,
+            "the tool stream reads a mid-stream spent credit as a quota refusal: {}",
+            tool.message
+        );
+    }
+
+    #[test]
+    fn a_400_with_only_part_of_the_spent_credit_wording_stays_the_requests_fault() {
+        for message in [
+            "tools.0.name: the credit_card tool name is invalid",
+            "thinking.budget_tokens: 512 is too low, the minimum is 1024",
+        ] {
+            let err = map_api_error(
+                StatusCode::BAD_REQUEST,
+                &error_body("invalid_request_error", message),
+                None,
+                "m",
+            );
+            assert_eq!(
+                err.kind,
+                ErrorKind::InvalidRequest,
+                "half the spent-credit wording leaves a 400 the request's fault: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
