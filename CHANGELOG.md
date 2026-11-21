@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.47.1] — 2026-11-21
+
+### Fixed
+
+- fix(anthropic): a spent credit is a quota refusal, not a bad request
+
+### Other
+
+- chore(deps): bump dravr-tronc 7.0.0 -> 7.1.0
+- ci(e2e): pin Copilot CLI 1.0.112, the last on SDK protocol 3
+
+
 ## [0.47.0] — 2026-11-18
 
 ### Added
