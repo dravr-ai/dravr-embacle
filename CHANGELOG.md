@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.2] — 2026-11-22
+
+### Fixed
+
+- fix(claude-code): a weekly limit is a quota refusal, not a fault
+
+
 ## [0.47.1] — 2026-11-21
 
 ### Fixed
