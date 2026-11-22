@@ -817,9 +817,9 @@ dependencies = [
 
 [[package]]
 name = "dravr-tronc"
-version = "7.2.0"
+version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cc760c96bd9a58e168ec6017b3bde120dda29ba4cbe71b443bf592ad5bcb0a3"
+checksum = "8cd7cf901edf9cf2986671375488d6d823196ff1530b11578e4b2fb831d8bd30"
 dependencies = [
  "async-trait",
  "axum",
@@ -836,6 +836,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tokio",
  "tokio-util",
