@@ -137,7 +137,23 @@ fn gross_usage(u: &ClaudeUsage) -> TokenUsage {
 /// for a reset either — it passes the tier over for one cooldown window and
 /// asks again, so a spent account costs one refusal per window instead of a
 /// failed attempt on every turn, and answers again once credit is added.
-fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
+///
+/// The API status the CLI reports beside the reason decides before any
+/// wording does: `429` is a refusal for rate or quota and `402` one for
+/// payment, whatever prose comes with them. A subscription's weekly cap
+/// arrives as `You've hit your weekly limit · resets 12am (UTC)` with
+/// `api_error_status: 429`, none of the phrases below and no
+/// `terminal_reason`; read by its wording alone it was a transient fault,
+/// retried in place on every turn with no cooldown (14 startup probes on
+/// dravr-platform, 2026-10-23 to 2026-11-15).
+fn is_quota_refusal(
+    terminal_reason: Option<&str>,
+    api_error_status: Option<u16>,
+    message: &str,
+) -> bool {
+    if matches!(api_error_status, Some(402 | 429)) {
+        return true;
+    }
     if terminal_reason.is_some_and(|r| {
         r.eq_ignore_ascii_case("rate_limit") || r.eq_ignore_ascii_case("billing_error")
     }) {
@@ -145,6 +161,7 @@ fn is_quota_refusal(terminal_reason: Option<&str>, message: &str) -> bool {
     }
     let lower = message.to_ascii_lowercase();
     lower.contains("usage limit reached")
+        || (lower.contains("hit your") && lower.contains("limit"))
         || lower.contains("rate_limit_error")
         || lower.contains("billing_error")
         || lower.contains("rate limited")
@@ -591,7 +608,11 @@ impl ClaudeCodeRunner {
         // ExternalService made it indistinguishable from a flaky CLI, and
         // is_transient() then told every retry loop to keep hammering a
         // wall it cannot pass.
-        if is_quota_refusal(parsed.terminal_reason.as_deref(), reason) {
+        if is_quota_refusal(
+            parsed.terminal_reason.as_deref(),
+            parsed.api_error_status,
+            reason,
+        ) {
             return Some(RunnerError::rate_limit("claude-code", message));
         }
         Some(RunnerError::external_service("claude-code", message))
@@ -1048,6 +1069,44 @@ mod tests {
     }
 
     #[test]
+    fn a_weekly_limit_is_a_quota_refusal_not_a_fault() {
+        // What a Claude subscription at its weekly cap answered on
+        // dravr-platform from 2026-10-23 to 2026-11-15, as its logs kept it:
+        // the reason, `subtype: success` and `api_error_status: 429`.
+        let json = "{\"result\":\"You've hit your weekly limit · resets 12am (UTC)\",\
+            \"is_error\":true,\"subtype\":\"success\",\"api_error_status\":429}";
+        let err = parse_response(json.as_bytes()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::RateLimit, "{}", err.message);
+        assert!(
+            !err.kind.is_transient(),
+            "a cap that resets on a clock is not worth a retry in place"
+        );
+        assert!(err.message.contains("weekly limit"), "{}", err.message);
+    }
+
+    #[test]
+    fn the_api_status_classifies_a_refusal_whatever_its_wording() {
+        // The CLI's prose changes between releases; the status behind it
+        // does not. A wording nobody has seen yet still reads as a refusal.
+        for status in [402, 429] {
+            let json = format!(
+                r#"{{"result":"Something new the CLI says","is_error":true,"api_error_status":{status}}}"#
+            );
+            let err = parse_response(json.as_bytes()).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::RateLimit, "status {status}");
+        }
+    }
+
+    #[test]
+    fn a_limit_wording_without_a_status_is_still_a_refusal() {
+        let json = br#"{"result":"You've hit your session limit","is_error":true}"#;
+        let err = parse_response(json).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::RateLimit, "{}", err.message);
+    }
+
+    #[test]
     fn the_api_error_envelope_types_are_recognised() {
         for body in [
             br#"{"result":"{\"type\":\"rate_limit_error\"}","is_error":true}"#.as_slice(),
@@ -1158,17 +1217,26 @@ mod tests {
     fn a_low_credit_balance_is_a_quota_refusal() {
         // The same policy as an HTTP 402: the chain cools the account down
         // and asks the next one, rather than failing on it every turn.
-        assert!(is_quota_refusal(None, "Credit balance is too low"));
-        assert!(is_quota_refusal(None, "credit balance too low"));
-        assert!(!is_quota_refusal(None, "your balance looks fine"));
+        assert!(is_quota_refusal(None, None, "Credit balance is too low"));
+        assert!(is_quota_refusal(None, None, "credit balance too low"));
+        assert!(!is_quota_refusal(None, None, "your balance looks fine"));
     }
 
     #[test]
     fn a_structured_terminal_reason_is_enough_on_its_own() {
-        assert!(is_quota_refusal(Some("rate_limit"), "something opaque"));
-        assert!(is_quota_refusal(Some("billing_error"), "something opaque"));
+        assert!(is_quota_refusal(
+            Some("rate_limit"),
+            None,
+            "something opaque"
+        ));
+        assert!(is_quota_refusal(
+            Some("billing_error"),
+            None,
+            "something opaque"
+        ));
         assert!(!is_quota_refusal(
             Some("turn_setup_failed"),
+            None,
             "something opaque"
         ));
     }
