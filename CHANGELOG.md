@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.47.3] — 2026-11-23
+
+### Added
+
+- feat(errors): log what the vendor sent where an error is classified
+
+### Other
+
+- chore(deps): bump dravr-tronc 7.3.0 -> 7.4.0
+- chore(deps): bump dravr-tronc 7.2.0 -> 7.3.0
+- chore(deps): bump dravr-tronc 7.1.0 -> 7.2.0
+
+
 ## [0.47.2] — 2026-11-22
 
 ### Fixed
