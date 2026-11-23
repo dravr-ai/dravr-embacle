@@ -25,6 +25,7 @@ use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::vendor_log;
 
 /// Gemini CLI JSON response structure (`-o json`)
 #[derive(Debug, Deserialize)]
@@ -252,7 +253,11 @@ impl LlmProvider for GeminiCliRunner {
             }
 
             let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                RunnerError::internal(format!("Invalid JSON in gemini stream: {e}"))
+                vendor_log::classified_unparsed(
+                    "gemini",
+                    &line,
+                    RunnerError::internal(format!("Invalid JSON in gemini stream: {e}")),
+                )
             })?;
 
             let chunk_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");

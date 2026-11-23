@@ -37,6 +37,7 @@ use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
     McpServerConfig, McpTransport, RunnerError, StreamChunk, TokenUsage,
 };
+use crate::vendor_log;
 
 /// Default prompt timeout (5 minutes). Override with `EMBACLE_ACP_PROMPT_TIMEOUT_SECS`.
 const DEFAULT_ACP_PROMPT_TIMEOUT_SECS: u64 = 300;
@@ -528,10 +529,7 @@ impl AcpTransport {
             let msg = self.read_message().await?;
             if msg.get("id").and_then(Value::as_i64) == Some(expected_id) {
                 if let Some(error) = msg.get("error") {
-                    return Err(RunnerError::external_service(
-                        "copilot-acp",
-                        format!("RPC error: {error}"),
-                    ));
+                    return Err(rpc_error("RPC error", error));
                 }
                 return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
             }
@@ -878,9 +876,7 @@ async fn setup_session(
         let session_id = session_result
             .get("sessionId")
             .and_then(Value::as_str)
-            .ok_or_else(|| {
-                RunnerError::external_service("copilot-acp", "Missing sessionId in response")
-            })?
+            .ok_or_else(|| missing_session_id(&session_result))?
             .to_owned();
 
         // The CLI tells us which models this account may use. Read it here
@@ -1092,9 +1088,7 @@ impl AcpProcess {
             let session_id = resp
                 .get("sessionId")
                 .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RunnerError::external_service("copilot-acp", "Missing sessionId in response")
-                })?
+                .ok_or_else(|| missing_session_id(&resp))?
                 .to_owned();
 
             // The CLI reports which models this account may actually use, on
@@ -1525,7 +1519,38 @@ fn cli_notice(text: &str) -> Option<CliNotice> {
 /// next tier. The text is all ACP carries — the runtime's own error type does
 /// not survive the adapter — so quota and login failures are told apart by
 /// their wording, which matters only for how long a router rests the tier.
+///
+/// The CLI's error notices (`errors`) are logged beside the kind they were
+/// given: the text the kind was read from, without this crate's wording
+/// around it.
 fn notice_error(errors: &str, message: String) -> RunnerError {
+    vendor_log::classified_text("copilot-acp", errors, classify_notice(errors, message))
+}
+
+/// The error a `session/new` or `session/load` result with no session id
+/// becomes, logged with the result as the CLI sent it.
+fn missing_session_id(result: &Value) -> RunnerError {
+    vendor_log::classified_text(
+        "copilot-acp",
+        &result.to_string(),
+        RunnerError::external_service("copilot-acp", "Missing sessionId in response"),
+    )
+}
+
+/// The error a JSON-RPC `error` member becomes: an `ExternalService` fault
+/// naming what failed (`what`), logged with the member as the CLI sent it:
+/// its code and message are what tell one RPC refusal from another
+/// afterwards.
+fn rpc_error(what: &str, error: &Value) -> RunnerError {
+    vendor_log::classified_text(
+        "copilot-acp",
+        &error.to_string(),
+        RunnerError::external_service("copilot-acp", format!("{what}: {error}")),
+    )
+}
+
+/// The kind [`notice_error`] gives a CLI-answered turn, by its wording.
+fn classify_notice(errors: &str, message: String) -> RunnerError {
     let lower = errors.to_lowercase();
     let mentions = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
     if mentions(&[
@@ -1812,10 +1837,7 @@ async fn collect_complete(
         // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             if let Some(error) = msg.get("error") {
-                return Err(RunnerError::external_service(
-                    "copilot-acp",
-                    format!("Prompt failed: {error}"),
-                ));
+                return Err(rpc_error("Prompt failed", error));
             }
 
             let stop_reason = msg
@@ -1872,10 +1894,7 @@ async fn collect_streaming(
         // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             if let Some(error) = msg.get("error") {
-                return Err(RunnerError::external_service(
-                    "copilot-acp",
-                    format!("Prompt failed: {error}"),
-                ));
+                return Err(rpc_error("Prompt failed", error));
             }
 
             if let Some(err) = acc.failure() {
@@ -2063,10 +2082,7 @@ async fn collect_streaming_with_tools(
         // Prompt response — the turn is complete
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             if let Some(error) = msg.get("error") {
-                return Err(RunnerError::external_service(
-                    "copilot-acp",
-                    format!("Prompt failed: {error}"),
-                ));
+                return Err(rpc_error("Prompt failed", error));
             }
 
             if let Some(err) = acc.failure() {
@@ -4422,6 +4438,58 @@ mod tests {
             assert_eq!(err.kind, expected, "{chunk}");
             assert!(err.kind.is_provider_fault(), "{chunk}: falls through");
         }
+    }
+
+    /// The line carries the CLI's own notice, the text the kind was read
+    /// from, and none of the sentence this crate wraps it in.
+    #[test]
+    fn a_classified_notice_logs_the_cli_text_alone() {
+        use crate::vendor_log::capture::logged_by;
+
+        let notice = "Error: You have exceeded your premium request quota.";
+        let line = logged_by(|| {
+            let mut acc = TurnAccumulator::new();
+            process_notification(&make_text_chunk_notification(notice), &mut acc);
+            let err = acc.failure().unwrap(); // Safe: test assertion — an error-only turn fails
+            assert!(err.message.contains("the CLI answered the turn itself"));
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"copilot-acp\"",
+            "kind=RateLimit",
+            "exceeded your premium request quota",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        assert!(!line.contains("the CLI answered the turn itself"), "{line}");
+    }
+
+    /// A JSON-RPC error and a result with no session id are logged as the
+    /// CLI sent them.
+    #[test]
+    fn an_rpc_refusal_logs_the_member_the_cli_sent() {
+        use crate::vendor_log::capture::logged_by;
+
+        let line = logged_by(|| {
+            let error = rpc_error(
+                "Prompt failed",
+                &json!({"code": -32000, "message": "Authentication required"}),
+            );
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+            assert!(error.message.contains("Prompt failed"));
+        });
+        for expected in [
+            "provider=\"copilot-acp\"",
+            "-32000",
+            "Authentication required",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        let line = logged_by(|| {
+            let error = missing_session_id(&json!({"models": {"currentModelId": "gpt-5"}}));
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+        });
+        assert!(line.contains("currentModelId"), "{line}");
     }
 
     #[test]

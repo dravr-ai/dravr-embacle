@@ -20,6 +20,7 @@ use crate::types::{
     ChatRequest, ChatResponse, ChatStream, LlmCapabilities, LlmProvider, McpHeader,
     McpServerConfig, McpTransport, RunnerError, StreamChunk,
 };
+use crate::vendor_log;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tempfile::TempPath;
@@ -241,9 +242,14 @@ impl CopilotRunner {
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if let Some(model) = classify_model_error(&stderr) {
-            return RunnerError::model_unavailable(model);
+            return vendor_log::classified_text(
+                "copilot",
+                &stderr,
+                RunnerError::model_unavailable(model),
+            );
         }
-        // Delegate to the shared helper for the generic external-service mapping.
+        // Delegate to the shared helper for the generic external-service
+        // mapping; it logs the stream it classified.
         match self.base.check_exit_code(output, "copilot") {
             Ok(()) => RunnerError::internal("classify_exit: exit code was zero but stderr matched"),
             Err(e) => e,
@@ -362,6 +368,41 @@ mod tests {
 
     fn runner() -> CopilotRunner {
         CopilotRunner::new(RunnerConfig::new(PathBuf::from("copilot")))
+    }
+
+    /// Both arms of the exit classifier leave the line: the model the CLI
+    /// refused, and the generic exit the shared helper maps.
+    #[test]
+    fn a_classified_exit_logs_what_the_cli_wrote() {
+        use crate::types::ErrorKind;
+        use crate::vendor_log::capture::logged_by;
+        use std::time::Duration;
+
+        let exited = |stderr: &str| CliOutput {
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+            exit_code: 1,
+            duration: Duration::ZERO,
+        };
+        let refused = "Error: Model \"gpt-9\" from --model flag is not available.";
+        let line = logged_by(|| {
+            let error = runner().classify_exit(&exited(refused));
+            assert_eq!(error.kind, ErrorKind::ModelUnavailable);
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"copilot\"",
+            "kind=ModelUnavailable",
+            "from --model flag is not available",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        let line = logged_by(|| {
+            let error = runner().classify_exit(&exited("Error: Not authenticated"));
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+        });
+        assert!(line.contains("kind=ExternalService"), "{line}");
+        assert!(line.contains("body=Error: Not authenticated"), "{line}");
     }
 
     fn request_with_model(model: Option<&str>) -> ChatRequest {

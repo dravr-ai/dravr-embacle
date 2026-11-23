@@ -25,6 +25,7 @@ use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::vendor_log;
 
 /// Default model for Kilo CLI (uses Kilo Gateway routing)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-6";
@@ -99,6 +100,8 @@ impl KiloCliRunner {
         let mut usage: Option<TokenUsage> = None;
         let mut finish_reason: Option<String> = None;
         let mut error_message: Option<String> = None;
+        // The `error` event as the CLI printed it, for the classification log
+        let mut error_event: Option<&str> = None;
 
         for line in text.lines() {
             let trimmed = line.trim();
@@ -144,6 +147,7 @@ impl KiloCliRunner {
                         .or_else(|| value.pointer("/error/name").and_then(|v| v.as_str()));
                     if let Some(m) = msg {
                         error_message = Some(m.to_owned());
+                        error_event = Some(trimmed);
                     }
                 }
                 _ => {}
@@ -152,7 +156,12 @@ impl KiloCliRunner {
 
         if let Some(err) = error_message {
             if content_parts.is_empty() {
-                return Err(RunnerError::external_service("kilo", err));
+                let error = RunnerError::external_service("kilo", &err);
+                return Err(vendor_log::classified_text(
+                    "kilo",
+                    error_event.unwrap_or(&err),
+                    error,
+                ));
             }
         }
 
@@ -267,7 +276,11 @@ impl LlmProvider for KiloCliRunner {
                         .and_then(|v| v.as_str())
                         .or_else(|| value.pointer("/error/name").and_then(|v| v.as_str()))
                         .unwrap_or("unknown error");
-                    Err(RunnerError::external_service("kilo", msg))
+                    Err(vendor_log::classified_text(
+                        "kilo",
+                        &line,
+                        RunnerError::external_service("kilo", msg),
+                    ))
                 }
                 _ => Ok(StreamChunk {
                     delta: String::new(),
@@ -342,6 +355,26 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Rate limit exceeded"));
+    }
+
+    /// The `error` event is logged as the CLI printed it, name, status and
+    /// all: the same text the stream path logs for the same event.
+    #[test]
+    fn an_error_event_is_logged_as_printed() {
+        use crate::vendor_log::capture::logged_by;
+
+        let ndjson = br#"{"type":"error","sessionID":"ses_k4","error":{"name":"APIError","data":{"message":"Rate limit exceeded","statusCode":429}}}"#;
+        let line = logged_by(|| {
+            assert!(KiloCliRunner::parse_ndjson_response(ndjson).is_err());
+        });
+        for expected in [
+            "provider=\"kilo\"",
+            "APIError",
+            "statusCode",
+            "Rate limit exceeded",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
     }
 
     #[test]

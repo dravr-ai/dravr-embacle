@@ -28,6 +28,7 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::types::RunnerError;
+use crate::vendor_log::ResponseMeta;
 
 /// Timeout applied to a client a provider builds for itself.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -74,6 +75,47 @@ pub fn map_http_error(provider: &'static str, status: StatusCode, message: &str)
         }
         _ => RunnerError::external_service(provider, format!("HTTP {status}: {message}")),
     }
+}
+
+/// The headers of `response` a classified failure is logged with. Read them
+/// before the body is consumed, whatever the status: a success can still
+/// carry an error envelope, a body that does not parse, or a stream that
+/// fails later.
+pub(crate) fn failure_meta(response: &reqwest::Response) -> ResponseMeta {
+    ResponseMeta::read(response.headers())
+}
+
+/// Log what the vendor sent beside the error it was classified as, and hand
+/// the error back.
+///
+/// Every HTTP provider wraps its classifier in this, at the site that holds
+/// the status, the headers and the body together. The line is the one
+/// [`crate::vendor_log::log_classified`] writes: `provider`, `status`,
+/// `kind`, `retry_after`, `request_id`, and the body redacted and capped,
+/// with its original length. [`RunnerError`] keeps only the kind and a
+/// shortened message, so without the line the vendor's answer is lost.
+pub(crate) fn classified(
+    provider: &str,
+    status: StatusCode,
+    meta: &ResponseMeta,
+    body: &str,
+    error: RunnerError,
+) -> RunnerError {
+    meta.classified(provider, status.as_u16(), body, error)
+}
+
+/// [`classified`] for a success-status body that did not read as a
+/// completion. Such a body can be the model's output, so only its `type`
+/// and `error` members reach the line, with the length of the whole: an
+/// error envelope on a 200 is logged, a completion never is.
+pub(crate) fn classified_unparsed(
+    provider: &str,
+    status: StatusCode,
+    meta: &ResponseMeta,
+    body: &str,
+    error: RunnerError,
+) -> RunnerError {
+    meta.classified_unparsed(provider, Some(status.as_u16()), body, error)
 }
 
 /// Map a transport failure from `reqwest` to a [`RunnerError`].
@@ -336,8 +378,40 @@ pub fn is_retryable_request_error(error: &reqwest::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::header::HeaderMap;
+
     use super::*;
     use crate::types::ErrorKind;
+    use crate::vendor_log::capture::logged_by;
+
+    /// The shared HTTP site: the status, the headers and the body the vendor
+    /// sent, on one line, and the error handed back untouched.
+    #[test]
+    fn classified_logs_the_response_and_returns_the_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        headers.insert("request-id", "req_123".parse().unwrap());
+        let meta = ResponseMeta::read(&headers);
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
+        let line = logged_by(|| {
+            let error = map_http_error("acme", StatusCode::TOO_MANY_REQUESTS, "slow down");
+            let returned = classified("acme", StatusCode::TOO_MANY_REQUESTS, &meta, body, error);
+            assert_eq!(returned.kind, ErrorKind::RateLimit);
+            assert!(returned.message.contains("slow down"));
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"acme\"",
+            "status=429",
+            "kind=RateLimit",
+            "retry_after=\"30\"",
+            "request_id=\"req_123\"",
+            "rate_limit_error",
+            "truncated=false",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+    }
 
     #[test]
     fn map_http_error_auth() {

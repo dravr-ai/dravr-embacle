@@ -633,6 +633,7 @@ impl CohereProvider {
             .map_err(|e| AttemptError::from_send(PROVIDER_NAME, e))?;
 
         let status = response.status();
+        let meta = client::failure_meta(&response);
         let text = response.text().await.map_err(|e| {
             AttemptError::transient(RunnerError::external_service(
                 PROVIDER_NAME,
@@ -641,16 +642,24 @@ impl CohereProvider {
         })?;
 
         if !status.is_success() {
+            let error = parse_error_response(status, &text);
             return Err(AttemptError::from_status(
                 status,
-                parse_error_response(status, &text),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 
         let cohere_response: CohereResponse = serde_json::from_str(&text).map_err(|e| {
-            AttemptError::permanent(RunnerError::external_service(
+            let error = RunnerError::external_service(
                 PROVIDER_NAME,
                 format!("Failed to parse response: {e}"),
+            );
+            AttemptError::permanent(client::classified_unparsed(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &text,
+                error,
             ))
         })?;
 
@@ -689,10 +698,12 @@ impl CohereProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let meta = client::failure_meta(&response);
             let text = response.text().await.unwrap_or_default();
+            let error = parse_error_response(status, &text);
             return Err(AttemptError::from_status(
                 status,
-                parse_error_response(status, &text),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 

@@ -65,6 +65,7 @@ use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider,
     McpTransport, RunnerError, StreamChunk, TokenUsage,
 };
+use crate::vendor_log::{self, VendorFailure};
 
 /// Service name on every `RunnerError::external_service` this module raises.
 const SERVICE: &str = "copilot-sdk";
@@ -710,8 +711,26 @@ async fn collect_turn(
 /// `query` error carrying the status (measured against Ollama, runtime
 /// 1.0.86). The runtime's message names the model and the endpoint, so it is
 /// kept whole.
+///
+/// The event is logged as the runtime sent it, with the endpoint's status
+/// when the runtime relays one.
 fn map_session_error(event: &SessionEvent) -> RunnerError {
-    let Some(data) = event.typed_data::<SessionErrorData>() else {
+    let data = event.typed_data::<SessionErrorData>();
+    let status = data
+        .as_ref()
+        .and_then(|d| d.status_code)
+        .and_then(|code| u16::try_from(code).ok());
+    let error = classify_session_error(event, data);
+    vendor_log::log_classified(
+        &VendorFailure::text(SERVICE, &event.data.to_string()).with_status(status),
+        &error,
+    );
+    error
+}
+
+/// The kind and message [`map_session_error`] gives a `session.error`.
+fn classify_session_error(event: &SessionEvent, data: Option<SessionErrorData>) -> RunnerError {
+    let Some(data) = data else {
         return RunnerError::external_service(SERVICE, format!("session.error: {}", event.data));
     };
     let mut message = data.message;
@@ -745,6 +764,10 @@ fn naming_model(mut error: RunnerError, model: &str) -> RunnerError {
 }
 
 /// An SDK error as the error the host understands.
+///
+/// A missing binary, a bad configuration and a timeout are this host's own
+/// findings. Anything else may be the runtime relaying a refusal, so it is
+/// logged with the SDK's text.
 fn map_sdk_error(error: &SdkError) -> RunnerError {
     let message = error.to_string();
     match error.kind() {
@@ -754,7 +777,10 @@ fn map_sdk_error(error: &SdkError) -> RunnerError {
         SdkErrorKind::Protocol(ProtocolErrorKind::VersionMismatch { .. }) => {
             RunnerError::config(format!("{SERVICE}: {message}"))
         }
-        _ => RunnerError::external_service(SERVICE, message),
+        _ => {
+            let mapped = RunnerError::external_service(SERVICE, &message);
+            vendor_log::classified_text(SERVICE, &message, mapped)
+        }
     }
 }
 
@@ -1071,6 +1097,29 @@ mod tests {
                 _ => kind.contains("externalservice"),
             };
             assert!(matched, "{error_type} -> {kind}");
+        }
+    }
+
+    /// The event is logged as the runtime sent it, with the status it relays.
+    #[test]
+    fn a_session_error_logs_the_event_and_its_status() {
+        use crate::vendor_log::capture::logged_by;
+
+        let line = logged_by(|| {
+            let err = map_session_error(&event(
+                "session.error",
+                json!({"errorType": "rate_limit", "statusCode": 429, "message": "slow down"}),
+            ));
+            assert_eq!(err.kind, ErrorKind::RateLimit);
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"copilot-sdk\"",
+            "status=429",
+            "kind=RateLimit",
+            "slow down",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
         }
     }
 

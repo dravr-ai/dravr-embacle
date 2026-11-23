@@ -17,6 +17,7 @@ use crate::types::{
     LlmCapabilities, LlmProvider, McpServerConfig, McpTransport, MessageRole, RunnerError,
     StreamChunk, TokenUsage,
 };
+use crate::vendor_log::{self, VendorFailure};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -571,7 +572,29 @@ impl ClaudeCodeRunner {
     /// document, with `subtype` and `api_error_status` beside it. Reading
     /// them here is what tells a spent quota (`RateLimit`) from a context
     /// overflow (`ContextLength`) from a broken pipe (`ExternalService`).
+    ///
+    /// A failure is logged as the CLI reported it: the fields read here, with
+    /// the API status the CLI relays.
     fn failure_of(parsed: &ClaudeResponse) -> Option<RunnerError> {
+        let failure = Self::classify_failure(parsed)?;
+        let reported = json!({
+            "is_error": parsed.is_error,
+            "subtype": parsed.subtype,
+            "api_error_status": parsed.api_error_status,
+            "terminal_reason": parsed.terminal_reason,
+            "result": parsed.result,
+        })
+        .to_string();
+        vendor_log::log_classified(
+            &VendorFailure::text("claude-code", &reported).with_status(parsed.api_error_status),
+            &failure,
+        );
+        Some(failure)
+    }
+
+    /// The kind and message [`Self::failure_of`] gives a failed result
+    /// document.
+    fn classify_failure(parsed: &ClaudeResponse) -> Option<RunnerError> {
         if !parsed.is_error {
             return None;
         }
@@ -660,8 +683,13 @@ impl ClaudeCodeRunner {
             });
         }
 
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| RunnerError::internal(format!("Invalid JSON in claude stream: {e}")))?;
+        let value: Value = serde_json::from_str(line).map_err(|e| {
+            vendor_log::classified_unparsed(
+                "claude-code",
+                line,
+                RunnerError::internal(format!("Invalid JSON in claude stream: {e}")),
+            )
+        })?;
 
         let chunk_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match chunk_type {
@@ -776,8 +804,15 @@ impl LlmProvider for ClaudeCodeRunner {
         let parsed = match Self::parse_result_document(document) {
             Ok(parsed) => parsed,
             Err(not_a_document) => {
+                // A failed exit is logged there, with the stream it was
+                // read from; a clean exit whose stdout is not a document
+                // is logged here, once.
                 self.base.check_exit_code(&output, "claude-code")?;
-                return Err(not_a_document);
+                return Err(vendor_log::classified_unparsed(
+                    "claude-code",
+                    &String::from_utf8_lossy(document),
+                    not_a_document,
+                ));
             }
         };
         if output.exit_code != 0 && !parsed.is_error {
@@ -842,6 +877,7 @@ mod tests {
     use super::*;
     use crate::prompt::prepare_user_prompt;
     use crate::types::{ErrorKind, McpHeader};
+    use crate::vendor_log::capture::logged_by;
     use std::ffi::OsStr;
     use std::path::PathBuf;
 
@@ -985,6 +1021,54 @@ mod tests {
         let response = parse_response(json).unwrap(); // Safe: test assertion
 
         assert_eq!(response.model, "claude-opus-5-5");
+    }
+
+    /// The classification site writes the line: the reason the CLI gave and
+    /// the API status beside it, with the kind they were given.
+    #[test]
+    fn a_classified_failure_logs_what_the_cli_reported() {
+        let json =
+            br#"{"result":"You've hit your weekly limit","is_error":true,"api_error_status":429}"#;
+        let parsed = ClaudeCodeRunner::parse_result_document(json).unwrap();
+        let line = logged_by(|| {
+            let failure = ClaudeCodeRunner::failure_of(&parsed).unwrap();
+            assert_eq!(failure.kind, ErrorKind::RateLimit);
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"claude-code\"",
+            "status=429",
+            "kind=RateLimit",
+            "You've hit your weekly limit",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        // A success is not a failure and leaves no line.
+        let ok = ClaudeCodeRunner::parse_result_document(br#"{"result":"hi"}"#).unwrap();
+        let line = logged_by(|| assert!(ClaudeCodeRunner::failure_of(&ok).is_none()));
+        assert_eq!(line, "");
+    }
+
+    /// A stream line that is not JSON is the CLI talking in plain text, and
+    /// is logged; one that starts like JSON may be a cut event carrying the
+    /// model's text, and only its length is.
+    #[test]
+    fn an_unreadable_stream_line_is_logged_only_when_it_is_plain_text() {
+        let line = logged_by(|| {
+            assert!(ClaudeCodeRunner::stream_line_to_chunk("Error: Not logged in").is_err());
+        });
+        assert!(line.contains("provider=\"claude-code\""), "{line}");
+        assert!(line.contains("body=Error: Not logged in"), "{line}");
+
+        let cut = r#"{"type":"assistant","message":{"content":"the athlete slept ba"#;
+        let line = logged_by(|| {
+            assert!(ClaudeCodeRunner::stream_line_to_chunk(cut).is_err());
+        });
+        assert!(!line.contains("athlete"), "{line}");
+        assert!(
+            line.contains(&format!("body_bytes={}", cut.len())),
+            "{line}"
+        );
     }
 
     #[test]

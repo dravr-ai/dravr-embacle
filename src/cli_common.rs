@@ -11,6 +11,7 @@
 //! uses [`delegate_provider_base!`] to auto-generate the repetitive
 //! [`LlmProvider`](crate::types::LlmProvider) trait methods.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -19,6 +20,7 @@ use tracing::{debug, warn};
 use crate::config::RunnerConfig;
 use crate::process::{run_cli_command, CliOutput};
 use crate::types::RunnerError;
+use crate::vendor_log;
 
 /// Maximum output size for a single CLI invocation (50 MiB)
 pub const MAX_OUTPUT_BYTES: usize = 50 * 1024 * 1024;
@@ -122,7 +124,8 @@ impl CliRunnerBase {
 
     /// Check CLI exit code and return an error if non-zero.
     ///
-    /// Logs output byte lengths (not content) and constructs an error
+    /// Logs output byte lengths, then the failing stream redacted and capped
+    /// beside the kind it was given, and constructs an error
     /// message that surfaces the most diagnostic stream available.
     /// Stderr is preferred (where well-behaved Unix programs report
     /// errors), but some CLIs — notably `claude-code` exit-1 paths —
@@ -150,13 +153,30 @@ impl CliRunnerBase {
             "{runner_name} CLI failed"
         );
         let diagnostic = pick_diagnostic_stream(&output.stderr, &output.stdout);
-        Err(RunnerError::external_service(
+        let error = RunnerError::external_service(
             runner_name,
             format!(
                 "{runner_name} exited with code {}: {diagnostic}",
                 output.exit_code
             ),
+        );
+        Err(vendor_log::classified_text(
+            runner_name,
+            &failed_stream(&output.stderr, &output.stdout),
+            error,
         ))
+    }
+}
+
+/// The stream a failed CLI explained itself on, whole: `stderr`, or `stdout`
+/// when `stderr` is blank — the order [`pick_diagnostic_stream`] reads them
+/// in. The classification log redacts and caps it.
+fn failed_stream<'a>(stderr: &'a [u8], stdout: &'a [u8]) -> Cow<'a, str> {
+    let stderr = String::from_utf8_lossy(stderr);
+    if stderr.trim().is_empty() {
+        String::from_utf8_lossy(stdout)
+    } else {
+        stderr
     }
 }
 
@@ -241,8 +261,60 @@ macro_rules! delegate_provider_base {
 mod tests {
     use std::path::PathBuf;
 
+    use std::time::Duration;
+
     use super::{pick_diagnostic_stream, CliRunnerBase};
     use crate::config::RunnerConfig;
+    use crate::process::CliOutput;
+    use crate::types::ErrorKind;
+    use crate::vendor_log::capture::logged_by;
+
+    fn exited(exit_code: i32, stdout: &str, stderr: &str) -> CliOutput {
+        CliOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            exit_code,
+            duration: Duration::ZERO,
+        }
+    }
+
+    /// Every CLI runner's exit goes through here: the stream the CLI
+    /// explained itself on is logged, redacted, and a clean exit logs nothing.
+    #[test]
+    fn a_failed_exit_logs_the_stream_it_was_read_from() {
+        let line = logged_by(|| {
+            let failed = exited(1, "", "Error: Not authenticated, key sk-ant-api03-abcdef\n");
+            let error = base(None).check_exit_code(&failed, "goose").unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+        });
+        let classified: Vec<&str> = line
+            .lines()
+            .filter(|l| l.contains("LLM vendor error classified"))
+            .collect();
+        assert_eq!(classified.len(), 1, "{line}");
+        for expected in [
+            "provider=\"goose\"",
+            "kind=ExternalService",
+            "body=Error: Not authenticated, key [REDACTED]",
+        ] {
+            assert!(
+                classified[0].contains(expected),
+                "{expected} missing from {line}"
+            );
+        }
+        // A blank stderr hands over to stdout, as the diagnostic does.
+        let line = logged_by(|| {
+            let failed = exited(1, "Not logged in", " \n");
+            assert!(base(None).check_exit_code(&failed, "goose").is_err());
+        });
+        assert!(line.contains("body=Not logged in"), "{line}");
+        let line = logged_by(|| {
+            assert!(base(None)
+                .check_exit_code(&exited(0, "hi", ""), "goose")
+                .is_ok());
+        });
+        assert!(!line.contains("LLM vendor error classified"), "{line}");
+    }
 
     fn base(configured: Option<&str>) -> CliRunnerBase {
         let mut config = RunnerConfig::new(PathBuf::from("cli"));

@@ -132,6 +132,8 @@ pub mod structured_output;
 pub mod tool_simulation;
 /// Conversation-turn correlation identifier threaded through a user utterance
 pub mod turn;
+/// The log line a classified vendor failure leaves, and its redactor
+pub(crate) mod vendor_log;
 /// Warp terminal `oz` CLI runner
 pub mod warp_cli;
 

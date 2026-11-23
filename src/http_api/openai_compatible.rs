@@ -684,16 +684,27 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let response = self.send(&body).await?;
 
         let status = response.status();
+        let meta = client::failure_meta(&response);
         let text = response.text().await.map_err(|e| {
             RunnerError::external_service(self.label(), format!("Failed to read response: {e}"))
         })?;
         trace!(body_len = text.len(), body = %text, "response body");
 
         if !status.is_success() {
-            return Err(self.error_response(status, &text));
+            let error = self.error_response(status, &text);
+            return Err(client::classified(
+                self.label(),
+                status,
+                &meta,
+                &text,
+                error,
+            ));
         }
 
-        let response = chat_completions::parse_response(self.label(), &text, Usage::with_details)?;
+        let response = chat_completions::parse_response(self.label(), &text, Usage::with_details)
+            .map_err(|error| {
+            client::classified_unparsed(self.label(), status, &meta, &text, error)
+        })?;
         if let Some(usage) = &response.usage {
             info!(
                 provider = self.name(),
@@ -715,14 +726,23 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let meta = client::failure_meta(&response);
             let text = response.text().await.unwrap_or_default();
-            return Err(self.error_response(status, &text));
+            let error = self.error_response(status, &text);
+            return Err(client::classified(
+                self.label(),
+                status,
+                &meta,
+                &text,
+                error,
+            ));
         }
 
         let label = self.label();
+        let meta = client::failure_meta(&response);
         Ok(create_sse_stream(
             response.bytes_stream(),
-            move |json| chat_completions::parse_stream_frame(label, json),
+            move |json| chat_completions::parse_stream_frame(label, json, &meta),
             label,
         ))
     }

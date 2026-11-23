@@ -666,25 +666,44 @@ impl GeminiProvider {
             .map_err(|e| map_send_error(PROVIDER_NAME, e))?;
 
         let status = response.status();
+        let meta = client::failure_meta(&response);
         let response_text = response.text().await.map_err(|e| {
             RunnerError::external_service(PROVIDER_NAME, format!("Failed to read response: {e}"))
         })?;
 
         if !status.is_success() {
-            return Err(Self::map_api_error(status, &response_text));
+            let error = Self::map_api_error(status, &response_text);
+            return Err(client::classified(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &response_text,
+                error,
+            ));
         }
 
         let gemini_response: GeminiResponse =
             serde_json::from_str(&response_text).map_err(|e| {
                 error!(error = %e, response_len = response_text.len(), "Failed to parse Gemini response (body redacted)");
-                RunnerError::internal(format!("Failed to parse Gemini response: {e}"))
+                client::classified_unparsed(
+                    PROVIDER_NAME,
+                    status,
+                    &meta,
+                    &response_text,
+                    RunnerError::internal(format!("Failed to parse Gemini response: {e}")),
+                )
             })?;
 
         if let Some(error) = gemini_response.error {
-            return Err(RunnerError::internal(format!(
-                "Gemini API error: {}",
-                error.message
-            )));
+            // An error envelope on a success status: its `error` member is
+            // logged, and nothing of the candidates beside it.
+            return Err(client::classified_unparsed(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &response_text,
+                RunnerError::internal(format!("Gemini API error: {}", error.message)),
+            ));
         }
 
         let usage = gemini_response
@@ -742,11 +761,19 @@ impl GeminiProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let meta = client::failure_meta(&response);
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_owned());
-            return Err(Self::map_api_error(status, &error_text));
+            let error = Self::map_api_error(status, &error_text);
+            return Err(client::classified(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &error_text,
+                error,
+            ));
         }
 
         // Gemini does not send [DONE]; the stream ends with the HTTP response

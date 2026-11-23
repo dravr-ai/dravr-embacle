@@ -25,6 +25,7 @@ use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::vendor_log;
 
 /// Cursor Agent CLI response JSON structure
 #[derive(Debug, Deserialize)]
@@ -100,16 +101,24 @@ impl CursorAgentRunner {
         })?;
 
         let parsed: CursorResponse = serde_json::from_str(text).map_err(|e| {
-            RunnerError::internal(format!("Failed to parse Cursor Agent JSON response: {e}"))
+            vendor_log::classified_unparsed(
+                "cursor-agent",
+                text,
+                RunnerError::internal(format!("Failed to parse Cursor Agent JSON response: {e}")),
+            )
         })?;
 
         if parsed.is_error {
-            return Err(RunnerError::external_service(
+            let reason = parsed
+                .result
+                .as_deref()
+                .unwrap_or("Unknown error from Cursor Agent");
+            // The whole error document is logged, not only the reason read
+            // from it: the stream path logs the event as sent too.
+            return Err(vendor_log::classified_text(
                 "cursor-agent",
-                parsed
-                    .result
-                    .as_deref()
-                    .unwrap_or("Unknown error from Cursor Agent"),
+                text,
+                RunnerError::external_service("cursor-agent", reason),
             ));
         }
 
@@ -195,7 +204,11 @@ impl LlmProvider for CursorAgentRunner {
             }
 
             let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                RunnerError::internal(format!("Invalid JSON in cursor-agent stream: {e}"))
+                vendor_log::classified_unparsed(
+                    "cursor-agent",
+                    &line,
+                    RunnerError::internal(format!("Invalid JSON in cursor-agent stream: {e}")),
+                )
             })?;
 
             let chunk_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");

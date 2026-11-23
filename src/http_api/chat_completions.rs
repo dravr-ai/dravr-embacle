@@ -30,6 +30,7 @@ use crate::types::{
     ChatMessage, ChatRequest, ChatResponse, LlmCapabilities, ResponseFormat, RunnerError,
     StreamChunk, TokenUsage, ToolCallRequest, ToolChoice, ToolDefinition,
 };
+use crate::vendor_log::ResponseMeta;
 
 /// The only tool type the chat-completions API defines
 const FUNCTION_TYPE: &str = "function";
@@ -450,10 +451,14 @@ struct Delta {
 /// A frame with no choice (a usage-only trailer) yields nothing, and the SSE
 /// layer drops empty non-final deltas. A payload that is not a completion
 /// frame — a vendor's mid-stream error envelope among them — ends the stream
-/// with an error rather than vanishing into a truncated answer.
+/// with an error rather than vanishing into a truncated answer. That error
+/// is logged with the payload's `type` and `error` members and the request
+/// id of the response the stream arrived on (`meta`); the rest of the
+/// payload may be the model's output and is not.
 pub(super) fn parse_stream_frame(
     provider: &'static str,
     json: &str,
+    meta: &ResponseMeta,
 ) -> Option<Result<StreamChunk, RunnerError>> {
     match serde_json::from_str::<StreamFrame>(json) {
         Ok(frame) => {
@@ -464,9 +469,11 @@ pub(super) fn parse_stream_frame(
                 finish_reason: choice.finish_reason,
             }))
         }
-        Err(e) => Some(Err(RunnerError::external_service(
+        Err(e) => Some(Err(meta.classified_unparsed(
             provider,
-            format!("SSE parse error: {e}"),
+            None,
+            json,
+            RunnerError::external_service(provider, format!("SSE parse error: {e}")),
         ))),
     }
 }
@@ -524,4 +531,76 @@ pub(super) fn describe_error(provider: &'static str, status: StatusCode, body: &
         },
         |detail| detail.typed_message(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header::HeaderMap;
+    use reqwest::StatusCode;
+
+    use super::*;
+    use crate::http_api::client;
+    use crate::types::ErrorKind;
+    use crate::vendor_log::capture::logged_by;
+
+    /// A vendor's mid-stream error envelope ends the stream and is logged
+    /// with the request id of its response; a frame that is not one is
+    /// logged by its length alone, since it may be the model's text.
+    #[test]
+    fn an_unparsed_stream_frame_logs_its_error_and_never_its_text() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "req_42".parse().unwrap()); // Safe: test assertion
+        let meta = ResponseMeta::read(&headers);
+
+        let envelope = r#"{"error":{"message":"Provider returned error","code":502}}"#;
+        let line = logged_by(|| {
+            let error = parse_stream_frame("openrouter", envelope, &meta)
+                .expect("an item") // Safe: test assertion
+                .expect_err("an error"); // Safe: test assertion
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+        });
+        for expected in [
+            "LLM vendor error classified",
+            "provider=\"openrouter\"",
+            "request_id=\"req_42\"",
+            "Provider returned error",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+
+        let frame = r#"{"choices":[{"delta":{"content":["the athlete slept badly"]}}]}"#;
+        let line = logged_by(|| {
+            assert!(parse_stream_frame("groq", frame, &meta).is_some_and(|r| r.is_err()));
+        });
+        assert!(!line.contains("athlete"), "{line}");
+        assert!(
+            line.contains(&format!("body_bytes={}", frame.len())),
+            "{line}"
+        );
+        assert!(line.contains("truncated=true"), "{line}");
+    }
+
+    /// A 200 body that is an error envelope fails as before, and
+    /// [`client::classified_unparsed`] logs the envelope for the caller.
+    #[test]
+    fn a_success_status_error_envelope_is_logged_by_its_error_member() {
+        let body = r#"{"error":{"message":"No endpoints found","code":404},"user_id":"u_1"}"#;
+        let line = logged_by(|| {
+            let error = parse_response("openrouter", body, Usage::with_details)
+                .map_err(|error| {
+                    client::classified_unparsed(
+                        "openrouter",
+                        StatusCode::OK,
+                        &ResponseMeta::default(),
+                        body,
+                        error,
+                    )
+                })
+                .expect_err("an error"); // Safe: test assertion
+            assert_eq!(error.kind, ErrorKind::ExternalService);
+        });
+        assert!(line.contains("status=200"), "{line}");
+        assert!(line.contains("No endpoints found"), "{line}");
+        assert!(!line.contains("u_1"), "{line}");
+    }
 }

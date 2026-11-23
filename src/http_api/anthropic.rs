@@ -286,6 +286,7 @@ use crate::types::{
     LlmCapabilities, LlmProvider, MessageRole, RunnerError, StreamChunk, TokenUsage,
     ToolCallRequest, ToolChoice, ToolDefinition, ToolStream, ToolStreamEvent,
 };
+use crate::vendor_log::ResponseMeta;
 
 /// The name this provider reports, and the price-table key its usage bills under
 const PROVIDER_NAME: &str = "anthropic";
@@ -1866,6 +1867,29 @@ fn map_error(
     }
 }
 
+/// Map a mid-stream `error` event, logging the event as the vendor sent it
+/// with the request id of the response it arrived on (`meta`).
+///
+/// The event arrives on a stream whose HTTP status was a success, so the
+/// line carries no status: the one [`status_for_error_type`] derives picks
+/// the kind and was never on the wire.
+fn stream_error(json: &str, error: &ErrorBody, model: &str, meta: &ResponseMeta) -> RunnerError {
+    let mapped = map_error(status_for_error_type(&error.kind), Some(error), None, model);
+    meta.classified_event(PROVIDER_NAME, json, mapped)
+}
+
+/// The error an SSE payload that is not a stream event becomes. The payload
+/// may be a delta of the model's output, so only its `type` and `error`
+/// members are logged, with its length.
+fn stream_parse_error(json: &str, error: &serde_json::Error, meta: &ResponseMeta) -> RunnerError {
+    meta.classified_unparsed(
+        PROVIDER_NAME,
+        None,
+        json,
+        RunnerError::external_service(PROVIDER_NAME, format!("SSE parse error: {error}")),
+    )
+}
+
 /// The retry decision for a refused attempt. A quota refusal (`RateLimit`:
 /// a 429, a spent credit, or a body typed `rate_limit_error` /
 /// `billing_error` on any status) leaves the tier at once: retrying it in
@@ -1915,7 +1939,11 @@ fn retry_after_header(headers: &HeaderMap) -> Option<u64> {
 
 /// Parse one SSE `data:` payload of a stream opened for `model` into a
 /// [`StreamChunk`]
-fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, RunnerError>> {
+fn parse_stream_data(
+    json: &str,
+    model: &str,
+    meta: &ResponseMeta,
+) -> Option<Result<StreamChunk, RunnerError>> {
     match serde_json::from_str::<StreamEvent>(json) {
         Ok(StreamEvent::ContentBlockDelta {
             delta: StreamDelta::TextDelta { text },
@@ -1939,12 +1967,7 @@ fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, Runn
                 finish_reason: Some(map_stop_reason(&reason)),
             }))
         }
-        Ok(StreamEvent::Error { error }) => Some(Err(map_error(
-            status_for_error_type(&error.kind),
-            Some(&error),
-            None,
-            model,
-        ))),
+        Ok(StreamEvent::Error { error }) => Some(Err(stream_error(json, &error, model, meta))),
         Ok(
             StreamEvent::MessageStart { .. }
             | StreamEvent::ContentBlockStart { .. }
@@ -1952,10 +1975,7 @@ fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, Runn
             | StreamEvent::MessageStop
             | StreamEvent::Other,
         ) => None,
-        Err(e) => Some(Err(RunnerError::external_service(
-            PROVIDER_NAME,
-            format!("SSE parse error: {e}"),
-        ))),
+        Err(e) => Some(Err(stream_parse_error(json, &e, meta))),
     }
 }
 
@@ -2039,6 +2059,9 @@ fn streamed_block(content_block: Option<ResponseBlock>) -> (StreamedBlock, Optio
 struct ToolStreamAccumulator {
     /// The model the stream was opened for, reported as `complete()` does
     model: String,
+    /// The headers of the response the stream arrived on, for the line a
+    /// mid-stream failure leaves
+    meta: ResponseMeta,
     /// Content blocks keyed on their `index`, so they keep the wire order
     blocks: BTreeMap<usize, StreamedBlock>,
     stop_reason: Option<String>,
@@ -2048,9 +2071,10 @@ struct ToolStreamAccumulator {
 }
 
 impl ToolStreamAccumulator {
-    fn new(model: impl Into<String>) -> Self {
+    fn new(model: impl Into<String>, meta: ResponseMeta) -> Self {
         Self {
             model: model.into(),
+            meta,
             blocks: BTreeMap::new(),
             stop_reason: None,
             stop_details: None,
@@ -2063,12 +2087,7 @@ impl ToolStreamAccumulator {
     fn feed(&mut self, json: &str) -> Option<Result<ToolStreamEvent, RunnerError>> {
         let event = match serde_json::from_str::<StreamEvent>(json) {
             Ok(event) => event,
-            Err(e) => {
-                return Some(Err(RunnerError::external_service(
-                    PROVIDER_NAME,
-                    format!("SSE parse error: {e}"),
-                )))
-            }
+            Err(e) => return Some(Err(stream_parse_error(json, &e, &self.meta))),
         };
         match event {
             StreamEvent::MessageStart { message } => {
@@ -2130,12 +2149,9 @@ impl ToolStreamAccumulator {
                 None
             }
             StreamEvent::MessageStop => Some(self.finish().map(ToolStreamEvent::Done)),
-            StreamEvent::Error { error } => Some(Err(map_error(
-                status_for_error_type(&error.kind),
-                Some(&error),
-                None,
-                &self.model,
-            ))),
+            StreamEvent::Error { error } => {
+                Some(Err(stream_error(json, &error, &self.model, &self.meta)))
+            }
             StreamEvent::ContentBlockDelta {
                 delta: StreamDelta::Other,
                 ..
@@ -2224,8 +2240,13 @@ fn overlay_usage(base: Option<WireUsage>, update: WireUsage) -> WireUsage {
 }
 
 /// The [`ToolStream`] over a `/v1/messages` SSE byte stream opened for
-/// `model`: pull-based, so the bytes are read only as the consumer asks.
-fn create_tool_stream<S, B, E>(byte_stream: S, model: impl Into<String>) -> ToolStream
+/// `model`, on a response whose headers were `meta`: pull-based, so the
+/// bytes are read only as the consumer asks.
+fn create_tool_stream<S, B, E>(
+    byte_stream: S,
+    model: impl Into<String>,
+    meta: ResponseMeta,
+) -> ToolStream
 where
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
@@ -2234,7 +2255,7 @@ where
     Box::pin(ToolSseStream {
         bytes: Box::pin(byte_stream),
         parser: SseParser::new(),
-        accumulator: ToolStreamAccumulator::new(model),
+        accumulator: ToolStreamAccumulator::new(model, meta),
         pending: VecDeque::new(),
         terminated: false,
     })
@@ -2452,6 +2473,7 @@ impl AnthropicProvider {
 
         let status = response.status();
         let retry_after = retry_after_header(response.headers());
+        let meta = client::failure_meta(&response);
         let text = response.text().await.map_err(|e| {
             AttemptError::transient(RunnerError::external_service(
                 PROVIDER_NAME,
@@ -2460,16 +2482,24 @@ impl AnthropicProvider {
         })?;
 
         if !status.is_success() {
+            let error = map_api_error(status, &text, retry_after, model);
             return Err(attempt_error(
                 status,
-                map_api_error(status, &text, retry_after, model),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 
         serde_json::from_str(&text).map_err(|e| {
-            AttemptError::permanent(RunnerError::external_service(
+            let error = RunnerError::external_service(
                 PROVIDER_NAME,
                 format!("Failed to parse response: {e}"),
+            );
+            AttemptError::permanent(client::classified_unparsed(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &text,
+                error,
             ))
         })
     }
@@ -2487,10 +2517,12 @@ impl AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let retry_after = retry_after_header(response.headers());
+            let meta = client::failure_meta(&response);
             let text = response.text().await.unwrap_or_default();
+            let error = map_api_error(status, &text, retry_after, &body.model);
             return Err(attempt_error(
                 status,
-                map_api_error(status, &text, retry_after, &body.model),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 
@@ -2501,9 +2533,10 @@ impl AnthropicProvider {
     async fn attempt_stream(&self, body: &MessagesRequest) -> Result<ChatStream, AttemptError> {
         let response = self.open_stream(body).await?;
         let model = body.model.clone();
+        let meta = client::failure_meta(&response);
         Ok(create_sse_stream(
             response.bytes_stream(),
-            move |json| parse_stream_data(json, &model),
+            move |json| parse_stream_data(json, &model, &meta),
             PROVIDER_NAME,
         ))
     }
@@ -2514,9 +2547,11 @@ impl AnthropicProvider {
         body: &MessagesRequest,
     ) -> Result<ToolStream, AttemptError> {
         let response = self.open_stream(body).await?;
+        let meta = client::failure_meta(&response);
         Ok(create_tool_stream(
             response.bytes_stream(),
             body.model.as_str(),
+            meta,
         ))
     }
 }
@@ -2640,11 +2675,74 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
 
+    use reqwest::header::HeaderMap;
     use serde_json::json;
 
     use super::*;
     use crate::fallback::is_empty_completion;
     use crate::types::ImagePart;
+    use crate::vendor_log::capture::logged_by;
+
+    /// [`super::parse_stream_data`] on a stream whose response named no
+    /// request.
+    fn parse_stream_data(json: &str, model: &str) -> Option<Result<StreamChunk, RunnerError>> {
+        super::parse_stream_data(json, model, &ResponseMeta::default())
+    }
+
+    /// The headers of a streamed response that named its request.
+    fn stream_meta() -> ResponseMeta {
+        let mut headers = HeaderMap::new();
+        headers.insert("request-id", "req_stream_1".parse().unwrap()); // Safe: test assertion
+        ResponseMeta::read(&headers)
+    }
+
+    /// A mid-stream error is the vendor's own event: logged as sent, with
+    /// the request id of the response it arrived on and no status.
+    #[test]
+    fn a_mid_stream_error_event_is_logged_with_its_request_id() {
+        let event =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let line = logged_by(|| {
+            let item = super::parse_stream_data(event, "claude-haiku-5-5", &stream_meta());
+            assert!(item.is_some_and(|r| r.is_err()));
+        });
+        for expected in [
+            "provider=\"anthropic\"",
+            "kind=ExternalService",
+            "request_id=\"req_stream_1\"",
+            "overloaded_error",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        assert!(!line.contains("status="), "{line}");
+
+        let line = logged_by(|| {
+            let mut accumulator = ToolStreamAccumulator::new(STREAM_MODEL, stream_meta());
+            assert!(accumulator.feed(event).is_some_and(|r| r.is_err()));
+        });
+        assert!(line.contains("request_id=\"req_stream_1\""), "{line}");
+        assert!(line.contains("overloaded_error"), "{line}");
+    }
+
+    /// A payload that is not a stream event may be the model's output: the
+    /// line names the failure and the payload's length, never its text.
+    #[test]
+    fn an_unparsed_stream_payload_is_logged_without_its_text() {
+        let delta = r#"{"type":"content_block_delta","index":"zero","delta":{"type":"text_delta","text":"the athlete slept badly"}}"#;
+        let line = logged_by(|| {
+            let item = super::parse_stream_data(delta, "claude-haiku-5-5", &stream_meta());
+            assert!(item.is_some_and(|r| r.is_err()));
+            let mut accumulator = ToolStreamAccumulator::new(STREAM_MODEL, stream_meta());
+            assert!(accumulator.feed(delta).is_some_and(|r| r.is_err()));
+        });
+        assert_eq!(line.lines().count(), 2, "{line}");
+        assert!(!line.contains("athlete"), "{line}");
+        assert!(
+            line.contains(&format!("body_bytes={}", delta.len())),
+            "{line}"
+        );
+        assert!(line.contains("content_block_delta"), "{line}");
+    }
 
     fn body_json(config: &AnthropicConfig, request: &ChatRequest) -> Value {
         let body = build_body(config, request, false);
@@ -3851,7 +3949,7 @@ mod tests {
 
     /// Every event the accumulator produces for `frames`, in order
     fn accumulate(frames: &[&str]) -> Vec<Result<ToolStreamEvent, RunnerError>> {
-        let mut accumulator = ToolStreamAccumulator::new(STREAM_MODEL);
+        let mut accumulator = ToolStreamAccumulator::new(STREAM_MODEL, ResponseMeta::default());
         frames.iter().filter_map(|f| accumulator.feed(f)).collect()
     }
 
@@ -4080,7 +4178,9 @@ mod tests {
     ) -> Vec<Result<ToolStreamEvent, RunnerError>> {
         use tokio_stream::StreamExt;
         let bytes = tokio_stream::iter(chunks.into_iter().map(Ok::<_, io::Error>));
-        create_tool_stream(bytes, STREAM_MODEL).collect().await
+        create_tool_stream(bytes, STREAM_MODEL, ResponseMeta::default())
+            .collect()
+            .await
     }
 
     #[tokio::test]

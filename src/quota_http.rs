@@ -34,10 +34,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::time::timeout;
 
 use crate::copilot_common::resolve_github_token;
 use crate::quota::{parse_anthropic_usage, Cooldown, LimitChecker, QuotaSnapshot};
 use crate::types::RunnerError;
+use crate::vendor_log::ResponseMeta;
+
+/// How long the body of a refused response is waited for.
+const FAILURE_BODY_WAIT: Duration = Duration::from_secs(2);
 
 /// Where the Anthropic OAuth usage endpoint lives.
 const ANTHROPIC_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -173,6 +178,7 @@ impl LimitChecker for AnthropicUsageChecker {
             .map_err(|e| RunnerError::external_service("anthropic-usage", e.to_string()))?;
 
         let status = response.status();
+        let meta = ResponseMeta::read(response.headers());
         if status.as_u16() == 429 {
             let retry_after = response
                 .headers()
@@ -189,15 +195,27 @@ impl LimitChecker for AnthropicUsageChecker {
             // Not necessarily a rate limit at all: this endpoint answers an
             // EXPIRED token with 429 rather than 401. The cooldown carries the
             // token's fingerprint so refreshing it voids the penalty.
-            return Err(RunnerError::rate_limit(
+            let body = failure_body(response).await;
+            return Err(meta.classified(
                 "anthropic-usage",
-                "usage endpoint refused (429) — this can also mean the OAuth token has expired",
+                status.as_u16(),
+                &body,
+                RunnerError::rate_limit(
+                    "anthropic-usage",
+                    "usage endpoint refused (429) — this can also mean the OAuth token has expired",
+                ),
             ));
         }
         if !status.is_success() {
-            return Err(RunnerError::external_service(
+            let body = failure_body(response).await;
+            return Err(meta.classified(
                 "anthropic-usage",
-                format!("usage endpoint returned HTTP {status}"),
+                status.as_u16(),
+                &body,
+                RunnerError::external_service(
+                    "anthropic-usage",
+                    format!("usage endpoint returned HTTP {status}"),
+                ),
             ));
         }
 
@@ -205,7 +223,11 @@ impl LimitChecker for AnthropicUsageChecker {
             .json()
             .await
             .map_err(|e| RunnerError::external_service("anthropic-usage", e.to_string()))?;
-        let snapshots = parse_anthropic_usage(&body, now)?;
+        // A shape this crate cannot read is logged as sent: the body is
+        // the endpoint's own figures.
+        let snapshots = parse_anthropic_usage(&body, now).map_err(|error| {
+            meta.classified("anthropic-usage", status.as_u16(), &body.to_string(), error)
+        })?;
 
         if let Ok(mut state) = self.state.lock() {
             state.cooldown = None;
@@ -213,6 +235,19 @@ impl LimitChecker for AnthropicUsageChecker {
         }
         Ok(snapshots)
     }
+}
+
+/// The body of a refused response, for the classification log.
+///
+/// The refusal is known from the status, and the caller is a quota probe
+/// that must answer quickly: the body is waited for [`FAILURE_BODY_WAIT`] at
+/// most, and one that does not arrive is logged as empty.
+async fn failure_body(response: reqwest::Response) -> String {
+    timeout(FAILURE_BODY_WAIT, response.text())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 /// Hand back the cached reading when it is still young enough to act on.
@@ -301,17 +336,27 @@ impl GithubHeadroomChecker {
             .await
             .map_err(|e| RunnerError::external_service("github-headroom", e.to_string()))?;
 
-        if !response.status().is_success() {
-            return Err(RunnerError::external_service(
+        let status = response.status();
+        let meta = ResponseMeta::read(response.headers());
+        if !status.is_success() {
+            let body = failure_body(response).await;
+            return Err(meta.classified(
                 "github-headroom",
-                format!("rate_limit returned HTTP {}", response.status()),
+                status.as_u16(),
+                &body,
+                RunnerError::external_service(
+                    "github-headroom",
+                    format!("rate_limit returned HTTP {status}"),
+                ),
             ));
         }
         let body: Value = response
             .json()
             .await
             .map_err(|e| RunnerError::external_service("github-headroom", e.to_string()))?;
-        parse_github_rate_limit_counts(&body)
+        parse_github_rate_limit_counts(&body).map_err(|error| {
+            meta.classified("github-headroom", status.as_u16(), &body.to_string(), error)
+        })
     }
 }
 

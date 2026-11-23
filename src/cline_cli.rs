@@ -23,6 +23,7 @@ use crate::process::{read_stderr_capped, run_cli_command};
 use crate::prompt::prepare_prompt;
 use crate::sandbox::{apply_sandbox, build_policy};
 use crate::stream::{CappedLines, GuardedStream, MAX_STREAMING_STDERR_BYTES};
+use crate::vendor_log;
 
 /// Default model for Cline CLI (provider-agnostic)
 const DEFAULT_MODEL: &str = "auto";
@@ -164,8 +165,13 @@ impl LlmProvider for ClineCliRunner {
                 });
             }
 
-            let value: serde_json::Value = serde_json::from_str(&line)
-                .map_err(|e| RunnerError::internal(format!("Invalid JSON in cline stream: {e}")))?;
+            let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
+                vendor_log::classified_unparsed(
+                    "cline",
+                    &line,
+                    RunnerError::internal(format!("Invalid JSON in cline stream: {e}")),
+                )
+            })?;
 
             let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if line_type == "say" {

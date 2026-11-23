@@ -243,6 +243,7 @@ impl GroqProvider {
             .map_err(|e| AttemptError::from_send(PROVIDER_NAME, e))?;
 
         let status = response.status();
+        let meta = client::failure_meta(&response);
         let text = response.text().await.map_err(|e| {
             AttemptError::transient(RunnerError::external_service(
                 PROVIDER_NAME,
@@ -251,13 +252,22 @@ impl GroqProvider {
         })?;
 
         if !status.is_success() {
+            let error = Self::parse_error_response(status, &text);
             return Err(AttemptError::from_status(
                 status,
-                Self::parse_error_response(status, &text),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 
-        Self::read_completion(&text).map_err(AttemptError::permanent)
+        Self::read_completion(&text).map_err(|error| {
+            AttemptError::permanent(client::classified_unparsed(
+                PROVIDER_NAME,
+                status,
+                &meta,
+                &text,
+                error,
+            ))
+        })
     }
 
     /// Read a completion body. Groq bills the plain counts: the usage
@@ -276,16 +286,19 @@ impl GroqProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let meta = client::failure_meta(&response);
             let text = response.text().await.unwrap_or_default();
+            let error = Self::parse_error_response(status, &text);
             return Err(AttemptError::from_status(
                 status,
-                Self::parse_error_response(status, &text),
+                client::classified(PROVIDER_NAME, status, &meta, &text, error),
             ));
         }
 
+        let meta = client::failure_meta(&response);
         Ok(create_sse_stream(
             response.bytes_stream(),
-            |json| chat_completions::parse_stream_frame(PROVIDER_NAME, json),
+            move |json| chat_completions::parse_stream_frame(PROVIDER_NAME, json, &meta),
             PROVIDER_NAME,
         ))
     }
