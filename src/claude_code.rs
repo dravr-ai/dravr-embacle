@@ -13,9 +13,9 @@ use std::str;
 
 use crate::cli_common::{CliRunnerBase, MAX_OUTPUT_BYTES};
 use crate::types::{
-    anthropic_reports_spent_credit, ChatMessage, ChatRequest, ChatResponse, ChatStream, ImagePart,
-    LlmCapabilities, LlmProvider, McpServerConfig, McpTransport, MessageRole, RunnerError,
-    StreamChunk, TokenUsage,
+    anthropic_reports_spend_limit, anthropic_reports_spent_credit, ChatMessage, ChatRequest,
+    ChatResponse, ChatStream, ImagePart, LlmCapabilities, LlmProvider, McpServerConfig,
+    McpTransport, MessageRole, RunnerError, StreamChunk, TokenUsage,
 };
 use crate::vendor_log::{self, VendorFailure};
 use async_trait::async_trait;
@@ -167,6 +167,7 @@ fn is_quota_refusal(
         || lower.contains("billing_error")
         || lower.contains("rate limited")
         || anthropic_reports_spent_credit(message)
+        || anthropic_reports_spend_limit(message)
 }
 
 /// Default model for Claude Code
@@ -1304,6 +1305,23 @@ mod tests {
         assert!(is_quota_refusal(None, None, "Credit balance is too low"));
         assert!(is_quota_refusal(None, None, "credit balance too low"));
         assert!(!is_quota_refusal(None, None, "your balance looks fine"));
+    }
+
+    #[test]
+    fn a_reached_spend_limit_is_a_quota_refusal() {
+        // An API-key login hears the API's own refusal, a 400 with no status
+        // the CLI reports as quota: only the wording marks it.
+        assert!(is_quota_refusal(
+            None,
+            None,
+            "API Error: 400 You have reached your specified API usage limits. \
+             You will regain access on 2026-12-01 at 00:00 UTC."
+        ));
+        assert!(is_quota_refusal(
+            None,
+            None,
+            "You have reached your specified workspace API usage limits."
+        ));
     }
 
     #[test]

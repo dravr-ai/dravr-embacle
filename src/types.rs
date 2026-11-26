@@ -260,6 +260,21 @@ pub(crate) fn anthropic_reports_spent_credit(message: &str) -> bool {
     lower.contains("credit balance") && lower.contains("too low")
 }
 
+/// Whether `message` is Anthropic saying a spend limit the organization set
+/// for itself is reached ("You have reached your specified API usage limits.
+/// You will regain access on 2026-12-01 at 00:00 UTC.", or "... specified
+/// workspace API usage limits ..." for a workspace limit).
+///
+/// Like a spent credit it arrives as a 400 typed `invalid_request_error`, so
+/// only the wording tells it apart from a malformed request. Read as the
+/// request's fault, a fallback chain returns it instead of asking the next
+/// account; it is a quota refusal: the account answers again on the date the
+/// message names, or once the limit is raised.
+pub(crate) fn anthropic_reports_spend_limit(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("reached your specified") && lower.contains("api usage limits")
+}
+
 // ============================================================================
 // Capability Flags
 // ============================================================================

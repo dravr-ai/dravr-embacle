@@ -282,9 +282,10 @@ use tracing::{debug, instrument, warn};
 use super::client::{self, with_retries, AttemptError, HttpRetryConfig, DEFAULT_TIMEOUT_SECS};
 use super::sse::{create_sse_stream, SseEvent, SseParser};
 use crate::types::{
-    anthropic_reports_spent_credit, ChatMessage, ChatRequest, ChatResponse, ChatStream, ErrorKind,
-    LlmCapabilities, LlmProvider, MessageRole, RunnerError, StreamChunk, TokenUsage,
-    ToolCallRequest, ToolChoice, ToolDefinition, ToolStream, ToolStreamEvent,
+    anthropic_reports_spend_limit, anthropic_reports_spent_credit, ChatMessage, ChatRequest,
+    ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider, MessageRole, RunnerError,
+    StreamChunk, TokenUsage, ToolCallRequest, ToolChoice, ToolDefinition, ToolStream,
+    ToolStreamEvent,
 };
 use crate::vendor_log::ResponseMeta;
 
@@ -1856,6 +1857,9 @@ fn map_error(
         }
         (400, _) if anthropic_reports_spent_credit(&message) => {
             client::map_http_error(PROVIDER_NAME, StatusCode::PAYMENT_REQUIRED, &message)
+        }
+        (400, _) if anthropic_reports_spend_limit(&message) => {
+            RunnerError::rate_limit(PROVIDER_NAME, format!("spend limit reached: {message}"))
         }
         (429, _) | (_, Some("rate_limit_error")) => {
             client::rate_limit_error(PROVIDER_NAME, &message, retry_after)
@@ -3721,11 +3725,64 @@ mod tests {
         );
     }
 
+    /// The refusals the API sends once a spend limit set in the Console is
+    /// reached: a 400 typed `invalid_request_error`, for an organization
+    /// limit and for a workspace limit (anthropics/claude-code#55998).
+    const SPEND_LIMITS: [&str; 2] = [
+        "You have reached your specified API usage limits. \
+         You will regain access on 2026-12-01 at 00:00 UTC.",
+        "You have reached your specified workspace API usage limits. \
+         You will regain access on 2026-12-01 at 00:00 UTC.",
+    ];
+
+    #[test]
+    fn a_400_saying_a_spend_limit_is_reached_is_a_quota_refusal_not_the_requests_fault() {
+        for limit in SPEND_LIMITS {
+            let err = map_api_error(
+                StatusCode::BAD_REQUEST,
+                &error_body("invalid_request_error", limit),
+                None,
+                "claude-sonnet-5-5",
+            );
+            assert_eq!(
+                err.kind,
+                ErrorKind::RateLimit,
+                "read as InvalidRequest, the chain never falls through: {}",
+                err.message
+            );
+            assert!(err.kind.is_provider_fault(), "{:?}", err.kind);
+            assert!(
+                err.message.starts_with("anthropic: spend limit reached: "),
+                "{}",
+                err.message
+            );
+            assert!(
+                !attempt_error(StatusCode::BAD_REQUEST, err).retryable,
+                "a reached spend limit leaves the tier, never retried in place"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spend_limit_reported_mid_stream_is_the_same_quota_refusal() {
+        for limit in SPEND_LIMITS {
+            let frame = error_body("invalid_request_error", limit);
+            let text = parse_stream_data(&frame, "claude-sonnet-5-5")
+                .expect("an item") // Safe: test assertion
+                .expect_err("an error"); // Safe: test assertion
+            assert_eq!(text.kind, ErrorKind::RateLimit, "{}", text.message);
+            let events = accumulate(&[START, frame.as_str()]);
+            let tool = events[0].as_ref().expect_err("the error event"); // Safe: test assertion
+            assert_eq!(tool.kind, ErrorKind::RateLimit, "{}", tool.message);
+        }
+    }
+
     #[test]
     fn a_400_with_only_part_of_the_spent_credit_wording_stays_the_requests_fault() {
         for message in [
             "tools.0.name: the credit_card tool name is invalid",
             "thinking.budget_tokens: 512 is too low, the minimum is 1024",
+            "metadata.usage_limits: you have reached your specified field count",
         ] {
             let err = map_api_error(
                 StatusCode::BAD_REQUEST,

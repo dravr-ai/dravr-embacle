@@ -73,7 +73,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::time;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::types::{
     ChatRequest, ChatResponse, ChatStream, ErrorKind, LlmCapabilities, LlmProvider, RunnerError,
@@ -522,13 +522,15 @@ impl FallbackProvider {
         self.cooldowns.is_cooling(self.providers[position].name())
     }
 
-    /// Note a quota refusal from `position`: pass it over for the cooldown.
-    fn start_cooldown(&self, position: usize) {
+    /// Note a quota refusal from `position`: pass it over for the cooldown,
+    /// whose length is returned for the line that reports the refusal.
+    fn start_cooldown(&self, position: usize) -> Duration {
         let name = self.providers[position].name();
         let duration = self
             .quota_cooldown
             .unwrap_or_else(|| self.cooldowns.duration());
         self.cooldowns.start_for(name, duration);
+        duration
     }
 
     /// A tier answered: whatever cooldown it carried is over.
@@ -660,6 +662,16 @@ impl FallbackProvider {
                     self.before_attempt(tier)
                 };
                 if let Attempt::Skip(reason) = verdict {
+                    info!(
+                        provider = tier.provider.name(),
+                        next = self.tier(position + 1).provider.name(),
+                        reason,
+                        remaining_secs = self
+                            .cooldowns
+                            .remaining(tier.provider.name())
+                            .map_or(0, |left| left.as_secs()),
+                        "fallback: provider passed over, trying next"
+                    );
                     self.on_fallthrough(
                         tier,
                         self.tier(position + 1),
@@ -696,11 +708,16 @@ impl FallbackProvider {
                     return Err(err);
                 }
                 Err(err) if has_successor => {
-                    if err.kind == ErrorKind::RateLimit {
-                        self.start_cooldown(position);
-                    }
+                    let cooldown_secs = if err.kind == ErrorKind::RateLimit {
+                        self.start_cooldown(position).as_secs()
+                    } else {
+                        0
+                    };
                     warn!(
                         provider = tier.provider.name(),
+                        next = self.tier(position + 1).provider.name(),
+                        kind = ?err.kind,
+                        cooldown_secs,
                         error = %err,
                         "fallback: provider failed, trying next"
                     );
@@ -712,11 +729,15 @@ impl FallbackProvider {
                     self.forwarded(request, &mut held);
                 }
                 Err(err) => {
-                    if err.kind == ErrorKind::RateLimit {
-                        self.start_cooldown(position);
-                    }
+                    let cooldown_secs = if err.kind == ErrorKind::RateLimit {
+                        self.start_cooldown(position).as_secs()
+                    } else {
+                        0
+                    };
                     warn!(
                         provider = tier.provider.name(),
+                        kind = ?err.kind,
+                        cooldown_secs,
                         error = %err,
                         "fallback: last provider failed, chain exhausted"
                     );
