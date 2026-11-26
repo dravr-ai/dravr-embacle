@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.1] — 2026-11-26
+
+### Fixed
+
+- fix(anthropic): a reached spend limit falls through like a spent credit
+
+
 ## [0.48.0] — 2026-11-25
 
 ### Other
